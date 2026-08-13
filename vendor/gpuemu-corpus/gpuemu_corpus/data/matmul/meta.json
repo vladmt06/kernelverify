@@ -1,0 +1,24 @@
+{
+  "name": "matmul",
+  "source": "human",
+  "benchmark_verdict": "pass",
+  "input_names": ["a", "b"],
+  "reference": "matmul/ref_fp64.py",
+  "kernel": "matmul/kernel.py",
+  "dtypes": ["float32"],
+  "tolerances": {"float32": 5e-2},
+  "notes": "Correct human kernel (control). fp16 dropped + abs tol widened to the output magnitude; a single fixed abs tol cannot fit matmul across shapes/dtypes -> see P2.",
+  "op_schema": {
+    "name": "matmul",
+    "dims": [
+      {"name": "M", "candidates": [1, 2, 7, 128]},
+      {"name": "K", "candidates": [1, 3, 16, 127, 256]},
+      {"name": "N", "candidates": [1, 2, 15, 64]}
+    ],
+    "inputs": [
+      {"name": "a", "dims": ["M", "K"]},
+      {"name": "b", "dims": ["K", "N"]}
+    ],
+    "output": {"name": "out", "dims": ["M", "N"]}
+  }
+}

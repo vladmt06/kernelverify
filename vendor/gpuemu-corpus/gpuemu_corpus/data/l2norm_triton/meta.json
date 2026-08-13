@@ -1,0 +1,16 @@
+{
+  "name": "l2norm_triton", "source": "human:triton", "benchmark_verdict": "pass",
+  "input_names": ["input"], "reference": "l2norm_triton/ref_fp64.py",
+  "kernel": "l2norm_triton/kernel.py", "dtypes": ["float32", "float16"],
+  "tolerances": {"float32": 1e-4, "float16": 5e-2}, "requires_gpu": true,
+  "notes": "Correct Triton L2-norm over last axis. Control.", "op_schema": {
+    "name": "reduce_last",
+    "dims": [
+      {"name": "B", "candidates": [1, 2, 8]},
+      {"name": "S", "candidates": [1, 7, 128]},
+      {"name": "H", "candidates": [2, 3, 256, 1025]}
+    ],
+    "inputs": [{"name": "input", "dims": ["B", "S", "H"]}],
+    "output": {"name": "out", "dims": ["B", "S", "H"]}
+  }
+}

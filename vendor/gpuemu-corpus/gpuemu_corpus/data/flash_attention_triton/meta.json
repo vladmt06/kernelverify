@@ -1,0 +1,21 @@
+{
+  "name": "flash_attention_triton", "source": "human:triton", "benchmark_verdict": "pass",
+  "input_names": ["q", "k", "v"], "reference": "attention_triton/ref_fp64.py",
+  "kernel": "flash_attention_triton/kernel.py", "dtypes": ["float32", "float16"],
+  "tolerances": {"float32": 1e-3, "float16": 5e-2}, "requires_gpu": true,
+  "notes": "Flash-attention v1 with tiled K/V and online softmax (the SoTA LLM kernel pattern). Control.",
+  "op_schema": {
+    "name": "flash_attention",
+    "dims": [
+      {"name": "M", "candidates": [1, 2, 8]},
+      {"name": "N", "candidates": [1, 3, 16, 64, 128, 256]},
+      {"name": "D", "candidates": [8, 16, 64]}
+    ],
+    "inputs": [
+      {"name": "q", "dims": ["M", "D"]},
+      {"name": "k", "dims": ["N", "D"]},
+      {"name": "v", "dims": ["N", "D"]}
+    ],
+    "output": {"name": "out", "dims": ["M", "D"]}
+  }
+}

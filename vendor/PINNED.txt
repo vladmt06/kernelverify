@@ -1,0 +1,4 @@
+gpuemu-corpus @ 2f15310368118ddd8c76887675f8c6c0f76a0989
+source: https://github.com/sarkar-dipankar/gpuemu-corpus
+licence: MIT OR Apache-2.0
+vendored 2026-08-13, unmodified

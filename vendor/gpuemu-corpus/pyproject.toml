@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gpuemu-corpus"
+version = "0.1.0"
+description = "Validated GPU-kernel correctness corpus for gpuemu (P1–P4 reference + buggy variants)."
+readme = "README.md"
+license = { text = "MIT OR Apache-2.0" }
+authors = [{ name = "Skelf Research", email = "me@dipankar.name" }]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering",
+]
+
+[project.urls]
+Homepage = "https://github.com/sarkar-dipankar/gpuemu-corpus"
+Documentation = "https://docs.skelfresearch.com/gpuemu"
+Research = "https://github.com/sarkar-dipankar/gpuemu-paper"
+
+[tool.setuptools.packages.find]
+include = ["gpuemu_corpus*"]
+
+[tool.setuptools.package-data]
+gpuemu_corpus = [
+    "data/**/meta.json",
+    "data/**/kernel.py",
+    "data/**/ref_fp64.py",
+    "data/_refkit.py",
+]
