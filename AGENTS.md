@@ -58,7 +58,9 @@ cd /Users/vlad/kernelverify
 - The shell cwd resets between tool calls, so `cd /Users/vlad/kernelverify` in every command.
 - The verdict cache stores plain tuples, not dataclasses, because pickled dataclasses remember their defining module and break when loaded from an import context.
 - Structured input modes can make a correct fp32 kernel exceed the published tolerance against the fp64 reference.
-  That is ill-conditioning, not a port bug: such cases count as no-evidence, never as detections, and only control failures on iid modes mean the port is wrong.
+  That is ill-conditioning, not a port bug; the shipped oracle handles it with the ensemble-floor tolerance (ADR 0004), and a control failing that tolerance on any mode now always means the oracle or the port is broken.
+- An input-perturbation probe is not a substitute for the ensemble floor: it misses internal accumulation error by up to 64x, and probing at fp16 epsilon absolves fp16-internal faults.
+  The falsification trail is in ADR 0004; the probe survives only as the repaired opaque-reference fallback.
 - Table cells rounded to whole percents once overstated a result (99.8% shown as 100%); keep one decimal and verify exact counts for any 100.0% cell.
 - A deterministic-only test policy plateaued at 88% while random reached 98%; exploration must survive in any policy.
 - Pure pair-greedy coverage cratered to 67% at B=4 by buying pair density before basic diversity; cover single features first, then pairs, then random.

@@ -55,6 +55,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from kernelverify.mutation.catalogue import CATALOGUE, KERNEL_TO_CORPUS_OP  # noqa: E402
 from kernelverify.reference.kernels import KERNELS, next_pow2  # noqa: E402
+from kernelverify.tolerance.floor import K_ENSEMBLE, conditioned_tolerance  # noqa: E402
 from measure_escape import (  # noqa: E402
     DISTRIBUTIONS,
     all_dims,
@@ -170,7 +171,8 @@ def build_verdicts() -> dict:
     pickled dataclass remembers which module defined it and this file is
     sometimes __main__ and sometimes an import.
     """
-    fingerprint = sorted(m.name for m in CATALOGUE) + sorted(INPUT_MODES)
+    fingerprint = (sorted(m.name for m in CATALOGUE) + sorted(INPUT_MODES)
+                   + [f"oracle=ensemble-floor-k{K_ENSEMBLE}"])
 
     def thaw(stored: dict) -> dict:
         spaces = {op: [Case(*t) for t in cases] for op, cases in stored["spaces"].items()}
@@ -199,6 +201,7 @@ def build_verdicts() -> dict:
 
     table: dict = {}
     spaces: dict = {}
+    tol_cache: dict = {}  # (corpus_op, case) -> the shipped per-case tolerance
     for index, mutation in enumerate(CATALOGUE, 1):
         corpus_op = KERNEL_TO_CORPUS_OP[mutation.kernel]
         meta = load_meta(corpus_op)
@@ -209,40 +212,33 @@ def build_verdicts() -> dict:
         correct = KERNELS[mutation.kernel]
         faulty = mutation.build()
         detected = {}
-        ill_conditioned = 0
         for case in cases:
             inputs = make_mode_inputs(meta, case.dim_map, case.dtype, case.seed, case.distribution)
-            tol = float(meta["tolerances"].get(case.dtype, 1e-5))
+            base_tol = float(meta["tolerances"].get(case.dtype, 1e-5))
             key = (corpus_op, case.dims, case.dtype, case.seed, case.distribution)
             ref = reference(meta, inputs, key)
 
-            control_ok = corpus_oracle_passes(correct(inputs), ref, tol)
-            if not control_ok:
-                if case.distribution in IID_MODES:
-                    # The ports are proven against iid inputs; a control failure
-                    # here means the port itself is broken, so refuse to score.
-                    raise AssertionError(
-                        f"the correct {mutation.kernel} disagrees with the corpus reference "
-                        f"at {case.dim_map} {case.dtype} {case.distribution}; the port is wrong"
-                    )
-                # Structured modes can make a CORRECT kernel exceed the corpus
-                # tolerance: constant rows drive attention scores to ~800, where
-                # fp32 rounding alone moves softmax outputs past 1e-3. The
-                # published tolerances were calibrated on iid inputs and are
-                # simply wrong in these regimes. Such a case cannot give
-                # evidence against a faulty kernel - a verdict that also fires
-                # on the correct kernel is a false positive, not a detection -
-                # so it counts as no-evidence rather than as a catch.
-                ill_conditioned += 1
-                detected[case] = False
-                continue
+            # The shipped oracle (ADR 0004): tolerance floored by what a
+            # provably-correct working-precision implementation can deviate on
+            # this exact case. It must clear every correct kernel on every
+            # case, structured modes included; there is no no-evidence discard
+            # any more, so a control failure means the oracle or the port is
+            # broken and scoring against it would be meaningless.
+            tol_key = (corpus_op, case)
+            if tol_key not in tol_cache:
+                tol_cache[tol_key] = conditioned_tolerance(corpus_op, inputs, ref, base_tol)
+            tol = tol_cache[tol_key]
+            if not corpus_oracle_passes(correct(inputs), ref, tol):
+                raise AssertionError(
+                    f"the correct {mutation.kernel} fails the shipped tolerance "
+                    f"at {case.dim_map} {case.dtype} {case.distribution}"
+                )
             detected[case] = not corpus_oracle_passes(faulty(inputs), ref, tol)
 
         table[mutation.name] = detected
         hits = sum(detected.values())
-        note = f"  ({ill_conditioned} ill-conditioned)" if ill_conditioned else ""
         print(f"  [{index:>2}/{len(CATALOGUE)}] {mutation.name:<52} "
-              f"detectable at {hits}/{len(detected)} cases{note}")
+              f"detectable at {hits}/{len(detected)} cases")
 
     CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
     CACHE_PATH.write_bytes(pickle.dumps(freeze(table, spaces)))

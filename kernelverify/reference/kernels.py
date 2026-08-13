@@ -228,7 +228,8 @@ def matmul(inputs, *, accumulate=True, k_offset=0, accum_dtype="float32"):
 # ---------------------------------------------------------------------------
 # Attention
 # ---------------------------------------------------------------------------
-def attention(inputs, *, scale_power=-0.5, subtract_max=True, post_scale=False):
+def attention(inputs, *, scale_power=-0.5, subtract_max=True, post_scale=False,
+              scores_dtype="float32"):
     """Scaled dot-product attention.
 
     Seam: `scale_power`, the exponent applied to D in the score scale. The
@@ -238,12 +239,16 @@ def attention(inputs, *, scale_power=-0.5, subtract_max=True, post_scale=False):
     every D instead of only at the one D where a fixed constant happens to be
     right. `post_scale` applies the scale to the output instead of to the
     scores, a transposition of operation order rather than a wrong constant.
+    `scores_dtype` "float16" keeps the score matrix in half precision, the
+    precision-canary fault a conditioning-aware tolerance must never absolve.
     """
     q, k, v = inputs["q"], inputs["k"], inputs["v"]
     qf, kf, vf = (t.astype(np.float32) for t in (q, k, v))
     dim = qf.shape[1]
     applied = np.float32(float(dim) ** scale_power)
     scores = (qf @ kf.T) * (np.float32(1.0) if post_scale else applied)
+    if scores_dtype != "float32":
+        scores = scores.astype(scores_dtype).astype(np.float32)
     shifted = scores - scores.max(axis=1, keepdims=True) if subtract_max else scores
     e = np.exp(shifted)
     out = (e / e.sum(axis=1, keepdims=True)) @ vf

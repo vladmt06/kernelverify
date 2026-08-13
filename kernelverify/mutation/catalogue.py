@@ -122,6 +122,10 @@ CATALOGUE: list[Mutation] = [
     _m("l2norm", {"eps": 0.0}, "dropped the epsilon"),
     # Boundary comparison rewrite: provably equivalent, tests the exclusion.
     _m("leaky_relu", {"boundary_ge": True}, "x >= 0 instead of x > 0"),
+    # Precision canary (ADR 0004): scores kept in fp16. A conditioning-aware
+    # tolerance must keep catching this, or it has legitimised the very
+    # precision faults the verifier exists to reject.
+    _m("attention", {"scores_dtype": "float16"}, "score matrix held at fp16"),
 ]
 
 
