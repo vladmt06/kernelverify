@@ -6,7 +6,7 @@
     "_meaning": "these hashes identify WHAT was verified; they assert nothing about output values",
     "translation_unit_sha256": "af205ab56e81f1ba23241229137525e00fd2058cab3b3c1a90344171ba1763c7",
     "catalogue_fingerprint": "none: no mutation-scored fault catalogue exists for this operator yet",
-    "harness_commit": "7d7c453",
+    "harness_commit": "3806ca1",
     "contract_version": "MLX-affine quant contract, device-joined ensemble, K_QUANT=4 (ADR 0009/0012)",
     "compile_options": {
       "math_mode": "safe"

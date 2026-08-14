@@ -186,7 +186,8 @@ def verify(runner: MetalRunner) -> GateEvidence:
             spec_ev.calls.append(LiveCall(
                 inputs={"q": q, "k_wq": k_wq, "k_scales": k_sc, "k_biases": k_bi,
                         "v_wq": v_wq, "v_scales": v_sc, "v_biases": v_bi,
-                        "new_k": nk, "new_v": nv},
+                        "new_k": nk, "new_v": nv,
+                        "t_cached": np.array([t], dtype=np.uint32)},
                 output_shapes=[((b, h, dh), "float16")],
                 grid=grid, threadgroup=threadgroup,
                 template=(("T", "float16"), ("BITS", bits), ("DH", dh)),
