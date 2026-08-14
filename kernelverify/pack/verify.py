@@ -80,6 +80,20 @@ def moe_inputs(x: np.ndarray, router: np.ndarray,
     return {"x": x, "router": router, "experts": experts}
 
 
+def kv_inputs(q: np.ndarray, k_cache: np.ndarray, v_cache: np.ndarray,
+              new_k: np.ndarray, new_v: np.ndarray, bits: int) -> dict:
+    """Native-op inputs for the quantized-KV attention decode surface.
+
+    Takes the RAW float caches, not the packed artefacts: the shipped
+    operator canonically quantizes the cache itself, so a surface cannot
+    hand the oracle a cache that disagrees with the artefact it packed for
+    the kernel. Same anchoring as `qmv_inputs`.
+    """
+    return {"q": q, "k_cache": k_cache, "v_cache": v_cache,
+            "new_k": new_k, "new_v": new_v,
+            "bits": np.array([bits], dtype=np.int32)}
+
+
 def reference_and_tolerance(op_name: str, inputs: dict,
                             dtype: str = "float16") -> tuple[np.ndarray, float]:
     """The shipped reference and tolerance for one case, straight from
