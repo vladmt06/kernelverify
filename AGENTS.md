@@ -31,6 +31,18 @@ Vlad's global instructions still apply; this file adds the project's layout, how
 - `bench/probe_bottleneck.py` - one-off probe of where a given fault is detectable; rerun it whenever the catalogue grows.
 - `bench/calibrate_k.py` - measures what the admissible-implementation contract demands of K, and how many ensemble members it takes to represent that contract.
   Rerun it whenever the contract, the ensemble or the catalogue changes.
+- `bench/roofline.py` and `bench/metal/roofline_probe.mm` - this machine's measured ceilings, GPU and CPU.
+  Everything the optimiser claims is scored against these, so they are the denominators of the whole phase 2 story.
+- `bench/baseline_llamacpp.py` - llama.cpp at a pinned master commit, placed on the roofline.
+- `bench/baseline_kernels.py` - upstream's own per-kernel perf set, each case scored against the roofline at its own arithmetic intensity.
+- `bench/gguf_info.py` - GGUF tensor table reader; supplies the flop and byte models those two scripts need.
+- `bench/probe_baseline_gaps.py` - one-off probes that closed the three claims ADR 0005 first shipped as inferred; rerun it whenever the baseline moves.
+- `bench/measure_baselines.py` - the one command that measures the machine's baselines across both stacks and appends them to `bench/.baselines/<date>.jsonl`.
+  It interleaves specs round-robin, refuses to call a number binding on a busy or unplugged machine, and refuses sub-millisecond samples as absolute claims.
+- `bench/machine_state.py` - the idle gate and the timing floor, with the reason each exists.
+- `bench/mlx_info.py` - the MLX safetensors equivalent of `gguf_info`, so both stacks get modelled bytes rather than file size.
+- `bench/.baselines/SCHEMA.md` - the row contract the per-chip matrix renderer consumes. The producer validates against it on every write.
+- `bench/results/` - the recorded baselines, committed. ADR 0005 is the reading of them.
 - `docs/adr/` - decisions with the measurements that forced them.
   Read these before changing any method.
 - `vendor/gpuemu-corpus/` - vendored unmodified at the commit pinned in `vendor/PINNED.txt`.
@@ -50,6 +62,25 @@ cd /Users/vlad/kernelverify
 - Contract measurements are cached at `bench/.cache/contract_k.pkl` under the same discipline, fingerprinted by the contract version and sample size as well.
 - Deleting `bench/.cache/` is the safe full reset.
 - The environment needs `torch`, which only `gelu[variant=erf]` uses; a worktree venv created without it fails part-way through a verdict build.
+
+The machine baseline, in this order, because each step writes the denominators the next one divides by:
+
+```
+.venv/bin/python bench/roofline.py           # ~1 min, machine ceilings
+.venv/bin/python bench/baseline_llamacpp.py  # ~6 min, llama.cpp on the roofline
+.venv/bin/python bench/baseline_kernels.py   # ~8 min, per-kernel
+```
+
+Or, for the cross-stack matrix rows in one command:
+
+```
+.venv/bin/python bench/measure_baselines.py     # refuses unless idle and on AC
+```
+
+- External dependencies, deliberately outside the repo: a llama.cpp checkout at `/Users/vlad/llama.cpp` and GGUF models at `/Users/vlad/models/gguf`.
+  These two paths are canonical across lanes as of 2026-08-14; `~/src/llama.cpp` is abandoned.
+  The commit, build flags, model files and power state are recorded in the result JSON, so a rerun that disagrees can be diagnosed rather than argued about.
+- Re-baseline whenever llama.cpp master moves, and record the commit; a speedup measured against a stale baseline is not a speedup.
 
 ## Working rules for this repo
 
@@ -80,3 +111,14 @@ cd /Users/vlad/kernelverify
   ADR 0004's cache tag carried K but not the ensemble membership, so changing who computes the floor would have silently reused stale verdicts.
 - Any claim about how much of the admissible class an ensemble covers must be scored against an independently seeded draw of that class.
   Scoring a sample against itself makes every ensemble look complete.
+- Charging `2 * model_n_params` flops per token overstates prompt processing badly enough to score a run at 110% of the machine's flop ceiling.
+  The embedding table is a gather and the output head runs once per decode call, not once per prompt token; take both from the GGUF tensor table (ADR 0005).
+- Score every backend against its own ceiling.
+  The CPU path measured 13% when divided by the GPU's flop ceiling and 56% when divided by Accelerate's, and only the second number means anything.
+- The CPU probes need best-of-50; best-of-5 was still swinging 39% between invocations, while the GPU probes are stable at best-of-12.
+- Measure ceilings on AC power and record the power state; the first bandwidth probe on battery read about 6% low.
+- A kernel gap seen at one shape is not a kernel gap until a second shape shows it.
+  The q3_K deficit reproduced at large reduction dimensions and nearly vanished at small ones, which changes what it is worth (ADR 0005).
+- Generation carries a fixed 0.99 ms/token dispatch cost on this machine, so any small-model bandwidth percentage is depressed by it and is not evidence about the kernels.
+- `--pure` when quantizing for a kernel comparison, or the K-quant presets mix types per tensor and measure the wrong thing.
+  Requantized files are timing artifacts only and are numerically junk; keep them out of any quality measurement.
