@@ -148,8 +148,56 @@ Known limits, stated rather than hidden:
 - A correct but slow kernel and a hung one are the same event to the runner.
   The budget is the caller's policy, and calibrating it against the reference implementation's own time is the obvious next step.
 - One output tensor per kernel, because that is what the corpus schemas declare.
+  Lifted by the consolidation update below: the transport is multi-output as of W1.
 - Timing below roughly a millisecond per dispatch is not reproducible under contention, so the optimiser must size its comparisons above that floor rather than trusting a fast number on a small shape.
   Whether a dedicated quiet-machine mode is worth building is a separate question, and it should be answered by measuring how often the floor actually blocks a ranking.
 
 Not done here, and deliberately: the runner is not yet wired into the case space or the scoring harness, so no published table changes.
 Doing that is the step where a Metal kernel can be scored against the full battery, and it touches files this component does not own.
+
+## Consolidation update (2026-08-14, dispatch W1-W6)
+
+The runner consolidation kept every decision above and changed four things, each behind a measurement.
+
+### The transport is multi-output, and it carries integers
+
+`RunCase.output_shapes` is a list of `(shape, dtype)` and `RunResult.outputs` a list of arrays, one per output binding in binding order; the single-output restriction is gone.
+The integer dtypes were not planned, they were forced: MLX's generated kernel ABI appends `const constant int*` shape buffers and `const constant int64_t*` stride buffers when a kernel body indexes through them, so an extracted kernel cannot be bound without int32 and int64 input tensors, and uint32 followed for packed quantized words.
+That is the shape/stride self-correction trail: the first bridge draft guessed the ABI, the guess was replaced by parsing the signature MLX actually generated, and any parameter the parser does not recognise is a loud error rather than a guess.
+ADR 0011 (certificates) takes this trail as evidence for its extraction-provenance tier.
+
+### Specs of one candidate share a worker session, and a hang costs one case
+
+A candidate may arrive as several specializations of one template.
+They now share one worker process, one compile per spec, because the isolation argument in Decision 2 is about candidates, not about specs: damage by one specialization can only reach its siblings' verdicts, never another candidate's.
+Resume-from-index is ported from the retired runner: a hang or crash is charged to the case in flight (or to the spec being compiled, when no case was), and a fresh worker resumes from the next case.
+The one deliberate non-resume is a worker that dies before opening the Metal device, which indicts the environment rather than the candidate.
+
+### Extraction: the verbose dump, and what did not reproduce
+
+The MSL a surface actually runs is captured from `mx.fast.metal_kernel`'s call-time verbose dump.
+Two mechanics were measured on mlx 0.32.0:
+
+- The dump is written by the C++ layer straight to file descriptor 1; a Python-level `sys.stdout` redirect captures zero bytes, so the capture worker rebinds fd 1 itself before MLX loads.
+- The eng review's stated reason for one process per specialization was that the in-process kernel cache suppresses reprints.
+  That suppression did not reproduce: a repeat verbose call reprints in full, cache warm or not.
+  The rule survives anyway, on attribution grounds: a process whose fd 1 carries exactly one dump cannot mis-attribute source to the wrong specialization, whatever a future MLX does.
+
+The match criterion between the extracted kernel under this runner and the live surface under MLX is the shipped oracle's verdict function across the battery including structured modes, never bitwise; the silu extraction matched on all four modes, and a strided kernel with shape/stride metadata round-tripped bit-exactly on synthetic data.
+
+### Compile options are mirrored and recorded, and divergence has a signature
+
+Metal's own compile default is fast math; MLX's documented default for custom kernels is `math_mode="safe"`.
+Until the consolidation this runner compiled candidates under Metal's default, which judged them under a different math regime than the framework they are meant to replace.
+The runner now defaults to MLX's documented default, and the worker echoes the options each shader was actually built with into `BatchResult.compile_options`, which certificates record as inputs (ADR 0011).
+A validation failure pattern that concentrates on reassociation-sensitive cases while order-insensitive cases pass is raised as the compile-option alarm, because that is what a math-mode divergence between arms looks like.
+
+### compare() (decision D6): the reference arm is the canary
+
+`compare(spec_a, spec_b, cases)` holds both specs compiled in two live workers and dispatches the arms back to back each round, which is the interleaving default the measurement section above already argued.
+`spec_a` is the reference arm, and any round in which its own samples spread wider than 1.5x max-to-min is auto-rejected; a comparison with any rejected round is not ok and a gate built on it exits non-zero.
+This is the wide-qmv canary made structural: ratios the reference arm cannot back are refused rather than withheld quietly, and the per-round evidence is kept so a refused run is inspectable.
+
+### Cross-reference
+
+The C1-at-fp16 topology split (numeric enforcement for sequential-class accumulators, structural attestation for tree-class, commit b3fc3b8) is the first live instance of the per-clause attestation-mechanism field that ADR 0011 will formalize, and the compile-option record above is the same idea applied to the compiler: every claim a certificate makes names how it was checked.
