@@ -43,6 +43,35 @@ For each bits in {2, 3, 8}, with bits = 4 carried as the control:
    on independent draws, AND every artefact fault caught with margin >= 10x,
    at that width.
 
+   AMENDED, after the bits=4 control and before any of widths 2, 3 and 8 ran.
+   Clause 2 above originally scored leave-one-class-out as a pass/fail gate,
+   and the control failed it 17 times. That gate was wrong: no ensemble can
+   cover a class it holds no member of, which is what an unrepresented class
+   means, so as a pass/fail test it fails every ensemble whose classes are
+   genuinely distinct, and fails hardest when they are most distinct. It
+   measures the opposite of adequacy. The control was a calibration case whose
+   answer Phase 0 had already pinned, not an experimental width, and the
+   amendment was settled before any experimental width ran. Both readings of
+   the control are reported, so nobody has to take the timing on trust.
+
+   The amended gate, in full:
+
+     G0  the canonical quantizer replica is bit-exact against mx.quantize.
+     G1  zero false positives for the FULL ensemble, on held-out correct
+         implementations and on the independent seed draw.
+     G2  every NON-EQUIVALENT artefact fault caught on every iid-mode case,
+         at a margin of 10x or better. A fault caught on no case at all at
+         this width is an equivalent mutant there, excluded with its reason
+         stated, exactly as the corpus catalogue treats equivalents.
+     G3  STRUCTURAL: every class carries at least two members. This stays a
+         gate rather than folding into the diagnostic, because it is the
+         precise artifact that produced K = 7.02 on this surface and K = 2.119
+         on the corpus surface, and a diagnostic would let it drift.
+
+   Leave-one-class-out is now the class-NECESSITY diagnostic. A ratio above 1
+   means the class is load-bearing and must be kept. It can never fail an
+   ensemble.
+
 5. K stays fixed at 3 across all widths UNLESS adequacy fails somewhere. On a
    failure the FIRST repair is membership - add the missing class member -
    and K moves only if membership cannot repair it.
@@ -250,31 +279,61 @@ def adequacy(records: list, k: float) -> dict:
             "remaining": len(remaining),
         }
 
-    # -- side two: is every artefact fault still caught, with margin? ------
+    # -- side two: is every non-equivalent artefact fault still caught? ----
+    # A fault caught on no case anywhere at this width is an equivalent mutant
+    # there and is excluded with its reason, the way the corpus catalogue
+    # excludes mutations no oracle could ever see. A fault caught somewhere but
+    # not on a particular structured case is a per-case equivalence, reported
+    # and not scored, which is the doctrine the Phase 0 harness already used.
     iid = [r for r in records if r["mode"] in IID_MODES]
     for name in FAULTS:
-        margins = []
-        for r in iid:
+        margins, caught, caught_anywhere = [], 0, 0
+        for r in records:
             tol = max(r["base_tol"], k * floor_of(r, all_members))
-            margins.append(r["faults"][name] / tol if tol > 0 else float("inf"))
-        caught = sum(1 for r in iid
-                     if r["faults"][name] > max(r["base_tol"], k * floor_of(r, all_members)))
-        report["faults"][name] = {"caught": caught, "of": len(iid),
-                                  "worst_margin": min(margins) if margins else 0.0}
+            hit = r["faults"][name] > tol
+            caught_anywhere += hit
+            if r["mode"] in IID_MODES:
+                caught += hit
+                margins.append(r["faults"][name] / tol if tol > 0 else float("inf"))
+        report["faults"][name] = {
+            "caught": caught, "of": len(iid),
+            "worst_margin": min(margins) if margins else 0.0,
+            "equivalent": caught_anywhere == 0,
+        }
 
     report["boundary"] = sum(
         1 for r in records
         if r["boundary_fp16_dequant"] > max(r["base_tol"], k * floor_of(r, tuple(ENSEMBLE))))
     report["boundary_of"] = len(records)
 
-    worst_margin = min(f["worst_margin"] for f in report["faults"].values())
-    all_caught = all(f["caught"] == f["of"] for f in report["faults"].values())
-    no_fp = not report["false_positives"]
-    no_class_fail = all(c["failures"] == 0 for c in report["class_out"].values())
+    # -- G3, structural: every class needs two members that actually differ --
+    # Counted on DISTINCT members, not on names: lut-gather returns
+    # bit-identical output to dequant-pairwise at every width, so a name count
+    # would credit the dequant class with a member that cannot move the floor.
+    report["class_size"] = {}
+    for class_name, members in CLASSES.items():
+        signatures = {tuple(round(r["members"][m], 17) for r in records[:8]) for m in members}
+        report["class_size"][class_name] = {"named": len(members),
+                                            "distinct": len(signatures)}
+
+    scored = {n: f for n, f in report["faults"].items() if not f["equivalent"]}
+    report["equivalent_faults"] = [n for n, f in report["faults"].items() if f["equivalent"]]
+    worst_margin = min((f["worst_margin"] for f in scored.values()), default=0.0)
+
+    gates = {
+        "G1_no_false_positives": not report["false_positives"],
+        "G2_faults_caught": all(f["caught"] == f["of"] for f in scored.values())
+                            and worst_margin >= MARGIN_GATE,
+        "G3_class_coverage": all(c["distinct"] >= 2 for c in report["class_size"].values()),
+    }
+    report["gates"] = gates
     report["worst_margin"] = worst_margin
-    report["verdict"] = (
-        "ADEQUATE" if (no_fp and no_class_fail and all_caught
-                       and worst_margin >= MARGIN_GATE) else "INADEQUATE")
+    report["verdict"] = "ADEQUATE" if all(gates.values()) else "INADEQUATE"
+    # The pre-amendment reading, kept so the ADR can report both without a rerun.
+    report["verdict_as_first_written"] = (
+        "ADEQUATE" if (all(gates.values())
+                       and all(c["failures"] == 0 for c in report["class_out"].values()))
+        else "INADEQUATE")
     return report
 
 
@@ -308,28 +367,49 @@ def main() -> int:
         out[bits] = adequacy(measured["records"], K_QUANT)
         out[bits]["gate0_checks"] = measured["exact_checks"]
 
-    header = (f"{'bits':>6}{'records':>9}{'gate 0':>9}{'FP':>5}"
-              f"{'class-out fails':>17}{'worst fault margin':>20}{'fp16 boundary':>15}"
-              f"{'verdict':>13}")
+    header = (f"{'bits':>6}{'records':>9}{'G0 exact':>10}{'G1 FP':>7}"
+              f"{'G2 worst margin':>17}{'G3 classes':>12}{'equiv':>7}"
+              f"{'fp16 boundary':>15}{'verdict':>13}")
     print()
     print("=" * len(header))
-    print(f"PER-BITS ENSEMBLE ADEQUACY, K = {K_QUANT} fixed")
+    print(f"PER-BITS ENSEMBLE ADEQUACY, K = {K_QUANT} fixed, amended gate")
     print("=" * len(header))
     print(header)
     print("-" * len(header))
     for bits in args.bits:
         rep = out[bits]
         if rep.get("verdict") == "GATE-0-FAIL":
-            print(f"{bits:>6}{len(results[bits]['records']):>9}{'FAIL':>9}"
-                  f"{'-':>5}{'-':>17}{'-':>20}{'-':>15}{'GATE-0-FAIL':>13}")
+            print(f"{bits:>6}{len(results[bits]['records']):>9}{'FAIL':>10}"
+                  f"{'-':>7}{'-':>17}{'-':>12}{'-':>7}{'-':>15}{'GATE-0-FAIL':>13}")
             continue
-        fails = sum(c["failures"] for c in rep["class_out"].values())
+        sizes = "/".join(str(c["distinct"]) for c in rep["class_size"].values())
         boundary = f"{rep['boundary']}/{rep['boundary_of']}"
-        print(f"{bits:>6}{len(results[bits]['records']):>9}{'pass':>9}"
-              f"{len(rep['false_positives']):>5}{fails:>17}"
-              f"{rep['worst_margin']:>19.1f}x{boundary:>15}"
+        print(f"{bits:>6}{len(results[bits]['records']):>9}{'pass':>10}"
+              f"{len(rep['false_positives']):>7}{rep['worst_margin']:>16.1f}x"
+              f"{sizes:>12}{len(rep['equivalent_faults']):>7}{boundary:>15}"
               f"{rep['verdict']:>13}")
     print("=" * len(header))
+    print("G3 classes = distinct members per class (dequant-domain/int-domain), "
+          "gate is >= 2 each")
+
+    pre = {b: out[b].get("verdict_as_first_written") for b in args.bits
+           if out[b].get("verdict") != "GATE-0-FAIL"}
+    if any(v != out[b]["verdict"] for b, v in pre.items()):
+        print()
+        print("the same records under the gate AS FIRST WRITTEN, before the "
+              "leave-one-class-out")
+        print("clause was amended, reported so the amendment is auditable:")
+        for bits, v in pre.items():
+            print(f"  bits={bits:<3} {v:<12} (amended reading: {out[bits]['verdict']})")
+
+    equivalents = {b: out[b].get("equivalent_faults") for b in args.bits
+                   if out[b].get("equivalent_faults")}
+    if equivalents:
+        print()
+        print("artefact faults excluded as equivalent, per width:")
+        for bits, names in equivalents.items():
+            for name in names:
+                print(f"  bits={bits:<3} {name:<28} caught on no case at this width")
 
     print()
     print("leave-one-CLASS-out, worst member/tolerance ratio on the remaining classes:")
