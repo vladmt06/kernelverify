@@ -154,10 +154,21 @@ The verifier lane has the measurement and the ruling is theirs; the current expe
 
 Anyone reproducing this should apply all four rules, because each was learned by getting a number wrong.
 
-1. **MLX is lazy.** Building N graphs and evaluating one measures graph construction. Every sample here puts N copies of the op in one graph and evaluates once. Getting this wrong inflated the first feasibility benchmark by up to 30x.
-2. **Rotate the weights.** A few-MB buffer reused across iterations reports system-cache bandwidth, not DRAM. Weights rotate over a 512 MB working set. Getting this wrong produced rows reading above the machine's own streaming ceiling.
-3. **Interleave the arms within a round.** Timing each kernel in its own pass over the shapes produced a table saying a variant won by up to 1.45x; interleaving reversed the sign at every point. The difference was entirely power-state drift between passes.
-4. **Check the reference arm's own spread.** Interleaving is necessary and not sufficient: it makes both arms suffer a clock excursion together, it does not detect one. A simdgroup sweep produced a clean-looking table in which MLX's own time for one fixed shape went 150.6 to 345.8 to 355.4 us across rows while MLX did not change. Both benches now reject any row whose reference samples vary by more than 1.5x max-to-min, and exit non-zero.
+1. **MLX is lazy.**
+   Building N graphs and evaluating one measures graph construction.
+   Every sample here puts N copies of the op in one graph and evaluates once.
+   Getting this wrong inflated the first feasibility benchmark by up to 30x.
+2. **Rotate the weights.**
+   A few-MB buffer reused across iterations reports system-cache bandwidth, not DRAM.
+   Weights rotate over a 512 MB working set.
+   Getting this wrong produced rows reading above the machine's own streaming ceiling.
+3. **Interleave the arms within a round.**
+   Timing each kernel in its own pass over the shapes produced a table saying a variant won by up to 1.45x; interleaving reversed the sign at every point.
+   The difference was entirely power-state drift between passes.
+4. **Check the reference arm's own spread.**
+   Interleaving is necessary and not sufficient: it makes both arms suffer a clock excursion together, it does not detect one.
+   A simdgroup sweep produced a clean-looking table in which MLX's own time for one fixed shape went 150.6 to 345.8 to 355.4 us across rows while MLX did not change.
+   Both benches now reject any row whose reference samples vary by more than 1.5x max-to-min, and exit non-zero.
 
 Rule 4 justified itself on its first run by rejecting exactly the nine 3-bit rows that had been withheld by hand, and passing the 4-bit rows measured alongside them.
 
