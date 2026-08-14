@@ -7,7 +7,10 @@ remembered:
   idle          a shared machine depressed the first-pass numbers, so every
                 run samples load before and after and marks the rows it
                 produced as non-binding when the machine was busy, on battery,
-                in low power mode, or thermally warned.
+                in low power mode, or thermally warned. Load average alone is
+                not enough: the kernels lane saw 2.2x-9.7x spreads on an AC
+                machine at load 1.79, caused by interactive apps driving the
+                display stack, so busy processes are named individually.
 
   timing floor  kv-runner-e9 measured that GPU timings around 200 us move
                 together by up to 4x with power state. Anything measured below
@@ -53,6 +56,62 @@ def load_averages() -> tuple[float, float, float]:
     return tuple(nums[:3]) if len(nums) >= 3 else (float("nan"),) * 3
 
 
+# A process using this much CPU is assumed to be driving the display stack or
+# competing for the GPU. Measured cause: the kernels lane saw 2.2x-9.7x spreads
+# on an AC-powered machine at load average 1.79, with Terminal at 36% CPU and
+# VS Code at 25% sharing the GPU. Load average and power state both passed.
+BUSY_PROCESS_PCT = 15.0
+
+
+def _own_process_tree() -> set[int]:
+    """Our own pid and every descendant, so the harness does not flag itself."""
+    import os
+
+    ps = subprocess.run(
+        ["ps", "-Ao", "pid=,ppid="], capture_output=True, text=True
+    ).stdout
+    children: dict[int, list[int]] = {}
+    for line in ps.splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            pid, ppid = int(parts[0]), int(parts[1])
+            children.setdefault(ppid, []).append(pid)
+
+    mine, stack = set(), [os.getpid()]
+    while stack:
+        pid = stack.pop()
+        if pid in mine:
+            continue
+        mine.add(pid)
+        stack.extend(children.get(pid, []))
+    return mine
+
+
+def competing_processes(threshold_pct: float = BUSY_PROCESS_PCT) -> list[dict]:
+    """Processes busy enough to be competing for the GPU, excluding our own.
+
+    There is no unprivileged way to read GPU utilisation on macOS
+    (powermetrics needs sudo), so this uses CPU as the observable proxy for
+    the display stack being active. It catches the case load average misses,
+    which is one or two interactive apps driving WindowServer hard while the
+    one-minute average still reads low.
+    """
+    ours = _own_process_tree()
+    ps = subprocess.run(
+        ["ps", "-Ao", "pid=,pcpu=,comm="], capture_output=True, text=True
+    ).stdout
+    busy = []
+    for line in ps.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) != 3:
+            continue
+        pid, pcpu, comm = int(parts[0]), float(parts[1]), parts[2].strip()
+        if pid in ours or pcpu < threshold_pct:
+            continue
+        busy.append({"name": comm.rsplit("/", 1)[-1], "pcpu": pcpu})
+    return sorted(busy, key=lambda p: -p["pcpu"])
+
+
 def power_state() -> dict:
     batt = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True).stdout
     everything = subprocess.run(["pmset", "-g"], capture_output=True, text=True).stdout
@@ -91,9 +150,12 @@ def idle_check(cores: int | None = None) -> dict:
     power = power_state()
 
     threshold = IDLE_LOAD_FRACTION * cores
+    competitors = competing_processes()
     blockers = []
     if load1 > threshold:
         blockers.append(f"load1 {load1:.2f} over threshold {threshold:.2f}")
+    for p in competitors:
+        blockers.append(f"{p['name']} at {p['pcpu']:.0f}% CPU competing for the GPU")
     if power["source"] != "AC":
         blockers.append(f"power source {power['source']}")
     if power["low_power_mode"] not in ("0", "?"):
@@ -107,6 +169,7 @@ def idle_check(cores: int | None = None) -> dict:
         "load15": load15,
         "load_threshold": round(threshold, 2),
         "power": power,
+        "competing_processes": competitors,
         "idle": not blockers,
         "blockers": blockers,
     }

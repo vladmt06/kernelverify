@@ -504,6 +504,18 @@ def main() -> int:
 
     print("\n" + render(rows))
     print(f"\n{len(rows)} rows appended to {out_path.relative_to(ROOT)}")
+
+    # Exit non-zero when anything was rejected, so an automated runner notices
+    # instead of publishing a table with quiet holes in it. The rows are still
+    # written: a rejection is evidence, not an absence.
+    rejected = [r for r in rows if not r["binding"]]
+    if rejected:
+        print(f"\n{len(rejected)} of {len(rows)} rows REJECTED, not binding:",
+              file=sys.stderr)
+        for r in rejected:
+            print(f"  {r['row_id'].split('/', 1)[1]}: "
+                  f"{'; '.join(r['binding_blockers'])}", file=sys.stderr)
+        return 1
     return 0
 
 

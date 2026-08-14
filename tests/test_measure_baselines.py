@@ -43,6 +43,7 @@ def test_idle_threshold_scales_with_core_count(monkeypatch):
         machine_state, "power_state",
         lambda: {"source": "AC", "low_power_mode": "0", "thermal_warning": False},
     )
+    monkeypatch.setattr(machine_state, "competing_processes", lambda *a, **k: [])
     # 2.0 is idle on 12 cores and busy on 4: a fixed threshold would call one
     # of those wrong, and this machine has both kinds of core.
     assert machine_state.idle_check(cores=12)["idle"] is True
@@ -102,6 +103,49 @@ def test_tight_repeats_still_bind():
 def test_a_single_sample_has_no_spread_and_is_not_blocked_by_it():
     # one rep cannot disagree with itself; the other gates still apply
     assert machine_state.dispersion_verdict(None)["over_spread_limit"] is False
+
+
+# --- the GPU contention gate ----------------------------------------------
+
+
+def test_an_interactive_app_on_the_gpu_blocks_even_at_low_load(monkeypatch):
+    """The case the kernels lane measured.
+
+    An AC-powered machine at load average 1.79 produced 2.2x-9.7x spreads
+    because Terminal and VS Code were driving the display stack. Load average
+    and power state both passed it, so neither is sufficient on its own.
+    """
+    monkeypatch.setattr(machine_state, "load_averages", lambda: (1.79, 1.8, 1.8))
+    monkeypatch.setattr(
+        machine_state, "power_state",
+        lambda: {"source": "AC", "low_power_mode": "0", "thermal_warning": False},
+    )
+    monkeypatch.setattr(
+        machine_state, "competing_processes",
+        lambda *a, **k: [{"name": "Terminal", "pcpu": 36.0},
+                         {"name": "Code Helper (GPU)", "pcpu": 25.0}],
+    )
+    check = machine_state.idle_check(cores=12)
+    assert check["idle"] is False
+    assert any("Terminal" in b and "36%" in b for b in check["blockers"])
+
+
+def test_the_harness_does_not_flag_its_own_subprocesses(monkeypatch):
+    monkeypatch.setattr(machine_state, "load_averages", lambda: (1.0, 1.0, 1.0))
+    monkeypatch.setattr(
+        machine_state, "power_state",
+        lambda: {"source": "AC", "low_power_mode": "0", "thermal_warning": False},
+    )
+    # competing_processes already excludes our own tree; with nothing else busy
+    # the machine is idle even though our own benchmark pegs a core
+    monkeypatch.setattr(machine_state, "competing_processes", lambda *a, **k: [])
+    assert machine_state.idle_check(cores=12)["idle"] is True
+
+
+def test_own_process_tree_contains_this_process():
+    import os
+
+    assert os.getpid() in machine_state._own_process_tree()
 
 
 # --- the timing floor -----------------------------------------------------
