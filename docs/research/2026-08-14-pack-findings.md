@@ -18,15 +18,17 @@ Prior work in `2026-08-14-mlx-pack-feasibility.md`, which measured the surfaces 
 |---|---|---|---|
 | Wide-tile quantized matvec, bits 2, 3, 4 | `kernelverify/pack/wide_qmv.py` | MLX-affine quantization | verified, directional numbers |
 | Fused top-2 MoE decode over quantized experts | `kernelverify/pack/moe_dispatch.py` | Qwen3-class routing + MLX-affine | verified, directional numbers |
+| Quantized-KV attention decode, bits 2, 3, 4, 8 | `kernelverify/pack/kv_attention.py` | frozen `kv_attention` contract (8ec7eca) over MLX-affine caches | verified, directional numbers (section 9) |
 
-Both are authored against `mx.fast.metal_kernel` and verified through the crash-isolated runner before any timing was taken.
-That order is enforced in the harnesses: `bench/pack_wide_qmv.py` and `bench/pack_moe_dispatch.py` refuse to print a ratio if any case fails.
+All three are authored against `mx.fast.metal_kernel` and verified through the crash-isolated runner before any timing was taken.
+That order is enforced in the harnesses: `bench/pack_wide_qmv.py`, `bench/pack_moe_dispatch.py` and `bench/pack_kv_attention.py` refuse to print a ratio if any case fails.
 
 Verification coverage:
 
 - Wide-tile matvec: 72 runner-isolated cases, being 2 shapes by 3 bit widths by 6 tile widths by 2 input scales, all passing against the Phase 0 contract oracle at K = 3.
 - MoE decode: 6 runner-isolated cases, 3 shapes by 2 input modes, all passing against the shipped `NATIVE_OPS["moe_dispatch"]` reference and tolerance, with routing bit-exact against the contract in every case.
-- 32 unit tests across the two kernels, inside a suite of 187.
+- KV attention decode: 6 runner-isolated cases, 3 shapes by 2 bit widths, all passing against the shipped `NATIVE_OPS["kv_attention"]` reference and tolerance, with the incumbent op-composition arm judged by the same oracle in every case.
+- 47 unit tests across the three kernels, inside a suite of 298.
 
 ## 2. The wide-tile matvec, and the defect it fixes
 
@@ -198,3 +200,30 @@ The magic-number variant has a trap worth recording: folding its constant into t
 At M = 8 the shipped kernel sits at 63% of the bandwidth bound and 39% of the machine's measured 5.89 TFLOP/s matmul peak.
 Neither resource is saturated, which says the remaining 1.56x is a latency bound rather than an instruction-count or bandwidth one.
 The ALU lever is therefore shelved as unmeasurable in current conditions rather than falsified; it needs the idle gate before it can be pushed further.
+
+## 9. The quantized-KV attention decode, one launch for the whole step
+
+Added after sections 1 to 8 were written; the section numbers above are cited from code and stay fixed.
+
+One launch runs the whole quantized-KV decode step: scores against the quantized K cache, the step's own new entry read from `new_k` at full precision inside the same T+1 softmax, fp32 max-subtracted softmax, and the combine against the quantized V cache.
+The incumbent is the mlx-lm composition of the same operator, two `mx.quantized_matmul` calls around a precise softmax plus the concat/split arithmetic for the new entry, adapted to the contract's semantics (fp32 scores, the step's own K/V at full precision) so that both arms pass the same oracle.
+That composition costs roughly ten dispatched ops per attention call, paid every layer of every decoded token.
+
+Verification: 6 of 6 runner-isolated cases, 3 shapes by 2 bit widths, against the frozen `kv_attention` contract (8ec7eca), with the incumbent arm judged by the same oracle in every case and both arms reading artefact bytes checked identical to `mx.quantize`.
+15 unit tests cover both dtypes, all four supported widths (2, 3, 4, 8), the off-by-one seam behaviourally, batch-row independence, and T = 1.
+
+Directional, pending binding, spread-gated by rule 4 of section 7, at B = 1, H = 8, DH = 128, as recorded at the kernel's landing commit (2dda2cd):
+
+| | T = 64-512 | T = 1024 |
+|---|---|---|
+| ratio vs the mlx-lm op composition | 9-10x | 3.3x |
+
+The B sweep at T = 512, 8-bit, narrows the ratio to 2.3x at B = 8.
+
+The structure of the win is launch fusion, one dispatch against roughly ten, which is the same structure section 4 measured for the MoE decode; this operator simply has more launches to collapse.
+The section 4 rule applies unchanged: the two components must not be collapsed, and no dispatch-only split like the MoE table's second row exists for this operator yet, so the fusion/kernel decomposition is unmeasured and the honest statement stops at the full-path ratio.
+The narrowing with batch is recorded as shape, not yet as a decomposition.
+
+The dispatch boundary, per the section 5 precedent that a claim is an interval plus the boundary function that enforces it: `should_dispatch(t)` is true only for T <= 1024.
+That bound is capacity, not profitability: the T+1 softmax scores live in a threadgroup-memory buffer whose size is fixed at compile time (TCAP = 1024), so a longer cache cannot run this kernel at all and the pack routes it to MLX.
+Within the interval no profitability boundary has been measured yet; the interval claim waits on the binding run.
