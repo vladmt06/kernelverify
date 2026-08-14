@@ -43,36 +43,54 @@ class QuantArtefact:
     contract: QuantContract
 
 
+def _round_half_away(x: np.ndarray) -> np.ndarray:
+    """Metal's round(): half away from zero, unlike numpy's half-to-even rint."""
+    return np.sign(x) * np.floor(np.abs(x) + np.float32(0.5))
+
+
 def canonical_quantize(w: np.ndarray, contract: QuantContract) -> QuantArtefact:
-    """MLX-affine quantization, replicated in numpy.
+    """MLX-affine quantization, replicated exactly from the affine_quantize
+    kernel in mlx/backend/metal/kernels/quantized.h (verified bit-exact by the
+    Phase 0 experiment).
 
-    Per group of `group_size` along the last axis: the group's [min, max] maps
-    affinely onto the integer levels [0, 2^bits - 1]:
+    The real algorithm differs from the naive min/max affine scheme:
 
-        scale = (max - min) / (2^bits - 1)
-        q     = round((w - min) / scale), clipped to the level range
-        w~    = scale * q + min
-
-    Scales and biases are stored in the weight dtype, matching mx.quantize.
-    The Phase 0 experiment checks this function bit-exact against MLX.
+    - w_max starts at 0, so an all-negative group clamps its max to zero;
+    - scale = max((w_max - w_min) / (2^bits - 1), 1e-7), then takes a NEGATIVE
+      sign when |w_max| >= |w_min| (the "side" convention);
+    - the scale is snapped so the dominant edge is exactly representable:
+      q0 = round(edge / scale); if q0 != 0, scale = edge / q0 and bias = edge,
+      else bias = 0;
+    - q = min(round((w - bias) / scale), 2^bits - 1), upper clip only, with
+      round-half-away-from-zero;
+    - all arithmetic in fp32; scales and biases are cast to the weight dtype
+      only at storage (the stored fp16 values are NOT the ones q was computed
+      with - that asymmetry is MLX's, and the contract preserves it).
     """
     g = contract.group_size
-    levels = (1 << contract.bits) - 1
+    n_bins = np.float32((1 << contract.bits) - 1)
     rows, cols = w.shape
     assert cols % g == 0, f"d_in {cols} must be a multiple of group_size {g}"
 
     grouped = w.astype(np.float32).reshape(rows, cols // g, g)
-    gmax = grouped.max(axis=2)
-    gmin = grouped.min(axis=2)
-    scale = (gmax - gmin) / np.float32(levels)
-    safe_scale = np.where(scale == 0, np.float32(1.0), scale)
+    w_min = grouped.min(axis=2)
+    w_max = np.maximum(grouped.max(axis=2), np.float32(0.0))
 
-    q = np.rint((grouped - gmin[:, :, None]) / safe_scale[:, :, None])
-    q = np.clip(q, 0, levels).astype(np.int32).reshape(rows, cols)
+    scale = np.maximum((w_max - w_min) / n_bins, np.float32(1e-7))
+    side = np.abs(w_min) > np.abs(w_max)
+    scale = np.where(side, scale, -scale).astype(np.float32)
+    edge = np.where(side, w_min, w_max).astype(np.float32)
+    q0 = _round_half_away((edge / scale).astype(np.float32))
+    at_zero = q0 == 0.0
+    scale = np.where(at_zero, scale, (edge / np.where(at_zero, 1.0, q0)).astype(np.float32))
+    bias = np.where(at_zero, np.float32(0.0), edge)
+
+    q = _round_half_away(((grouped - bias[:, :, None]) / scale[:, :, None]).astype(np.float32))
+    q = np.minimum(q, n_bins).astype(np.int32).reshape(rows, cols)
     return QuantArtefact(
         q=q,
         scales=scale.astype(w.dtype),
-        biases=gmin.astype(w.dtype),
+        biases=bias.astype(w.dtype),
         contract=contract,
     )
 
@@ -151,11 +169,30 @@ def member_dequant_reversed(x: np.ndarray, a: QuantArtefact) -> np.ndarray:
     return np.add.accumulate(prod, axis=2)[:, :, -1].astype(x.dtype)
 
 
+def member_factored_serial(x: np.ndarray, a: QuantArtefact) -> np.ndarray:
+    """Int-domain accumulation with strictly serial cross-group summation.
+
+    The second member of the int-domain class. Every legitimate evaluation
+    CLASS needs at least two ensemble members: leave-one-out K calibration
+    otherwise removes the whole class and measures class absence (K blew up
+    to 7 through exactly that artifact) instead of within-class spread.
+    """
+    g = a.contract.group_size
+    rows, cols = a.q.shape
+    xg = _f32(x).reshape(x.shape[0], cols // g, g)
+    qg = a.q.reshape(rows, cols // g, g).astype(np.float32)
+    xq = np.einsum("bgk,rgk->brg", xg, qg, optimize=True)
+    per_group = (xq * a.scales.astype(np.float32)[None, :, :]
+                 + xg.sum(axis=2)[:, None, :] * a.biases.astype(np.float32)[None, :, :])
+    return np.add.accumulate(per_group, axis=2)[:, :, -1].astype(x.dtype)
+
+
 ENSEMBLE = {
     "dequant-pairwise": member_dequant_pairwise,
     "dequant-serial": member_dequant_serial,
     "lut-gather": member_lut_gather,
     "factored-groups": member_factored_groups,
+    "factored-serial": member_factored_serial,
     "dequant-reversed": member_dequant_reversed,
 }
 
