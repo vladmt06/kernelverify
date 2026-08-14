@@ -36,13 +36,13 @@ Vlad's global instructions still apply; this file adds the project's layout, how
 - `bench/baseline_llamacpp.py` - llama.cpp at a pinned master commit, placed on the roofline.
 - `bench/baseline_kernels.py` - upstream's own per-kernel perf set, each case scored against the roofline at its own arithmetic intensity.
 - `bench/gguf_info.py` - GGUF tensor table reader; supplies the flop and byte models those two scripts need.
-- `bench/probe_baseline_gaps.py` - one-off probes that closed the three claims ADR 0005 first shipped as inferred; rerun it whenever the baseline moves.
+- `bench/probe_baseline_gaps.py` - one-off probes that closed the three claims ADR 0007 first shipped as inferred; rerun it whenever the baseline moves.
 - `bench/measure_baselines.py` - the one command that measures the machine's baselines across both stacks and appends them to `bench/.baselines/<date>.jsonl`.
   It interleaves specs round-robin, refuses to call a number binding on a busy or unplugged machine, and refuses sub-millisecond samples as absolute claims.
 - `bench/machine_state.py` - the idle gate and the timing floor, with the reason each exists.
 - `bench/mlx_info.py` - the MLX safetensors equivalent of `gguf_info`, so both stacks get modelled bytes rather than file size.
 - `bench/.baselines/SCHEMA.md` - the row contract the per-chip matrix renderer consumes. The producer validates against it on every write.
-- `bench/results/` - the recorded baselines, committed. ADR 0005 is the reading of them.
+- `bench/results/` - the recorded baselines, committed. ADR 0007 is the reading of them.
 - `docs/adr/` - decisions with the measurements that forced them.
   Read these before changing any method.
 - `vendor/gpuemu-corpus/` - vendored unmodified at the commit pinned in `vendor/PINNED.txt`.
@@ -112,13 +112,13 @@ Or, for the cross-stack matrix rows in one command:
 - Any claim about how much of the admissible class an ensemble covers must be scored against an independently seeded draw of that class.
   Scoring a sample against itself makes every ensemble look complete.
 - Charging `2 * model_n_params` flops per token overstates prompt processing badly enough to score a run at 110% of the machine's flop ceiling.
-  The embedding table is a gather and the output head runs once per decode call, not once per prompt token; take both from the GGUF tensor table (ADR 0005).
+  The embedding table is a gather and the output head runs once per decode call, not once per prompt token; take both from the GGUF tensor table (ADR 0007).
 - Score every backend against its own ceiling.
   The CPU path measured 13% when divided by the GPU's flop ceiling and 56% when divided by Accelerate's, and only the second number means anything.
 - The CPU probes need best-of-50; best-of-5 was still swinging 39% between invocations, while the GPU probes are stable at best-of-12.
 - Measure ceilings on AC power and record the power state; the first bandwidth probe on battery read about 6% low.
 - A kernel gap seen at one shape is not a kernel gap until a second shape shows it.
-  The q3_K deficit reproduced at large reduction dimensions and nearly vanished at small ones, which changes what it is worth (ADR 0005).
+  The q3_K deficit reproduced at large reduction dimensions and nearly vanished at small ones, which changes what it is worth (ADR 0007).
 - Generation carries a fixed 0.99 ms/token dispatch cost on this machine, so any small-model bandwidth percentage is depressed by it and is not evidence about the kernels.
 - `--pure` when quantizing for a kernel comparison, or the K-quant presets mix types per tensor and measure the wrong thing.
   Requantized files are timing artifacts only and are numerically junk; keep them out of any quality measurement.

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""One-off probes that resolve the three soft claims left open by ADR 0005.
+"""One-off probes that resolve the three soft claims left open by ADR 0007.
 
-ADR 0005 shipped one finding as measured and three as inferred. This closes
+ADR 0007 shipped one finding as measured and three as inferred. This closes
 the gap on all three, each with an experiment that could have falsified it:
 
   quant   is the q3_K mat-vec really 1.75x off its peers, or was that one

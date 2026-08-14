@@ -1,4 +1,4 @@
-"""The GGUF cost model behind the roofline placement (ADR 0005).
+"""The GGUF cost model behind the roofline placement (ADR 0007).
 
 The baseline's first flop model charged `2 * model_n_params` per token and
 scored prompt processing at 110% of the machine's measured flop ceiling, which

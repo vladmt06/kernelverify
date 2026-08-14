@@ -1,4 +1,4 @@
-# ADR 0005: The machine baseline - llama.cpp master against a measured roofline
+# ADR 0007: The machine baseline - llama.cpp master against a measured roofline
 
 Date: 2026-08-14
 Status: Accepted
