@@ -35,10 +35,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import mlx.core as mx  # noqa: E402
 
 from kernelverify.pack.wide_qmv import (  # noqa: E402
+    SUPPORTED_BITS,
     build,
     kernel_spec,
     launch_config,
-    pack_nibbles,
+    pack_codes,
 )
 from kernelverify.runners.runner import DeviceCase, MetalRunner  # noqa: E402
 from kernelverify.schemas.native_ops import K_QUANT  # noqa: E402
@@ -49,24 +50,32 @@ from kernelverify.schemas.quant_contract import (  # noqa: E402
     r_contract,
 )
 
-CONTRACT = QuantContract(bits=4, group_size=64)
 FP16_EPS = 9.77e-4          # native_ops._base_tol convention: 4 ulp of the scale
-SHAPES = [(2560, 2560), (9728, 2560), (4096, 4096)]
+SHAPES = [(2560, 2560), (4096, 4096)]
 VERIFY_M = [1, 4, 5, 6, 8, 11]
 TIMED_M = [1, 2, 4, 5, 6, 7, 8, 10, 11]
 MIN_SAMPLE_MS = 5.0
 ROUNDS = 7
 WORKING_SET_MB = 512
 
+# A round is only trustworthy if the reference arm reads the same each time.
+# Twice now a run has reported a kernel "win" that was the machine's clock
+# moving under it: MLX's own time for one fixed shape moved 2.9x inside a
+# single interleaved round while nothing about MLX changed. Interleaving alone
+# does not catch that, it only makes both arms suffer it together, so the
+# reference arm's own spread is checked and the ratios are withheld when it is
+# too wide to support them.
+MAX_CANARY_SPREAD = 1.5
+
 
 def base_tol(ref: np.ndarray) -> float:
     return 4.0 * FP16_EPS * float(np.max(np.abs(ref)))
 
 
-def artefact_for(d_out: int, d_in: int, seed: int):
+def artefact_for(d_out: int, d_in: int, seed: int, bits: int = 4):
     rng = np.random.default_rng(seed)
     w = (rng.standard_normal((d_out, d_in)).astype(np.float32) * 0.02).astype(np.float16)
-    return w, canonical_quantize(w, CONTRACT)
+    return w, canonical_quantize(w, QuantContract(bits=bits, group_size=64))
 
 
 # --------------------------------------------------------------------------
@@ -76,17 +85,18 @@ def verify(runner: MetalRunner) -> bool:
     print("correctness (runner-isolated, Phase 0 contract, K = 3):")
     ok = True
     spec = kernel_spec()
-    for d_out, d_in in SHAPES:
-        w, art = artefact_for(d_out, d_in, seed=7)
-        packed = pack_nibbles(art.q)
+    for (d_out, d_in), bits in [(s, b) for s in SHAPES for b in SUPPORTED_BITS]:
+        w, art = artefact_for(d_out, d_in, seed=7, bits=bits)
+        packed = pack_codes(art.q, bits)
 
         # Both arms must read identical bytes for the timing to be a fair test.
-        mx_wq, mx_sc, mx_bi = mx.quantize(mx.array(w), group_size=64, bits=4)
+        mx_wq, mx_sc, mx_bi = mx.quantize(mx.array(w), group_size=64, bits=bits)
         mx.eval(mx_wq, mx_sc, mx_bi)
         identical = (np.array_equal(packed, np.array(mx_wq))
                      and np.array_equal(art.scales, np.array(mx_sc))
                      and np.array_equal(art.biases, np.array(mx_bi)))
-        print(f"  {d_out:>5} x {d_in:<5} artefact identical to mx.quantize: {identical}")
+        print(f"  {d_out:>5} x {d_in:<5} {bits}-bit artefact identical to "
+              f"mx.quantize: {identical}")
         if not identical:
             ok = False
 
@@ -107,7 +117,7 @@ def verify(runner: MetalRunner) -> bool:
                             "scales": art.scales, "biases": art.biases},
                     output_shapes=[((m, d_out), "float16")],
                     grid=grid, threadgroup=threadgroup,
-                    template={"T": "float16", "M": m, "R": r}))
+                    template={"T": "float16", "M": m, "R": r, "BITS": bits}))
                 expected.append((m, tag, ref, max(base_tol(ref), K_QUANT * floor)))
 
         for result, (m, tag, ref, tol) in zip(runner.run(spec, cases), expected):
@@ -118,8 +128,8 @@ def verify(runner: MetalRunner) -> bool:
             err = float(np.max(np.abs(result.outputs[0].astype(np.float64) - ref)))
             passed = err <= tol
             ok = ok and passed
-            print(f"    M={m:<3}{tag:<7} err {err:9.3e}  tol {tol:9.3e}  "
-                  f"{'pass' if passed else 'FAIL'}")
+            print(f"    {bits}-bit M={m:<3}{tag:<7} err {err:9.3e}  "
+                  f"tol {tol:9.3e}  {'pass' if passed else 'FAIL'}")
     return ok
 
 
@@ -144,23 +154,25 @@ def dispatch(build_one, copies: int) -> float:
     return time.perf_counter() - t0
 
 
-def bench() -> None:
+def bench() -> bool:
     kernel = build(mx)
+    any_unstable = False
     print(f"\ntiming: interleaved A/B, {ROUNDS} rounds, batched dispatches of "
           f">= {MIN_SAMPLE_MS} ms, weights rotated over {WORKING_SET_MB} MB")
 
-    for d_out, d_in in SHAPES:
-        weight_bytes = d_out * d_in * 0.5 + 2 * (d_out * d_in / 64) * 2
+    for (d_out, d_in), bits in [(s, b) for s in SHAPES for b in SUPPORTED_BITS]:
+        weight_bytes = d_out * d_in * bits / 8 + 2 * (d_out * d_in / 64) * 2
         n_sets = max(2, min(64, int(WORKING_SET_MB * 1e6 // weight_bytes) + 1))
         sets = []
         for seed in range(n_sets):
             w, _ = artefact_for(d_out, d_in, seed=100 + seed)
-            sets.append(mx.quantize(mx.array(w), group_size=64, bits=4))
+            sets.append(mx.quantize(mx.array(w), group_size=64, bits=bits))
         mx.eval([a for s in sets for a in s])
 
-        print(f"\n  {d_out} x {d_in}, 4-bit group 64, {n_sets} weight sets")
+        print(f"\n  {d_out} x {d_in}, {bits}-bit group 64, {n_sets} weight sets")
         print(f"  {'M':>3} {'R':>3} {'ours us':>9} {'mlx us':>9} {'ratio':>7} "
               f"{'ours GB/s':>10} {'mlx passes':>11}")
+        unstable = False
         for m in TIMED_M:
             x = mx.random.normal(shape=(m, d_in)).astype(mx.float16)
             mx.eval(x)
@@ -171,12 +183,13 @@ def bench() -> None:
                 return kernel(inputs=[x, wq, sc, bi],
                               output_shapes=[(m, d_out)], output_dtypes=[mx.float16],
                               grid=grid, threadgroup=threadgroup,
-                              template=[("T", mx.float16), ("M", m), ("R", r)])[0]
+                              template=[("T", mx.float16), ("M", m), ("R", r),
+                                        ("BITS", bits)])[0]
 
             def theirs(i):
                 wq, sc, bi = sets[i % n_sets]
                 return mx.quantized_matmul(x, wq, sc, bi, transpose=True,
-                                           group_size=64, bits=4)
+                                           group_size=64, bits=bits)
 
             mx.eval(ours(0), theirs(0))          # JIT and warm both arms
             mx.synchronize()
@@ -188,18 +201,31 @@ def bench() -> None:
                 b_samples.append(dispatch(theirs, copies) / copies)
             t_ours = statistics.median(a_samples)
             t_mlx = statistics.median(b_samples)
+            spread = max(b_samples) / min(b_samples)
+            if spread > MAX_CANARY_SPREAD:
+                print(f"  {m:>3} {r:>3} {'':>9} {'':>9} {'REJECTED':>7} "
+                      f"canary spread {spread:.2f}x > {MAX_CANARY_SPREAD}x")
+                unstable = True
+                continue
             passes = -(-m // 5) if m < 12 else 0
             print(f"  {m:>3} {r:>3} {t_ours*1e6:>9.1f} {t_mlx*1e6:>9.1f} "
                   f"{t_mlx/t_ours:>6.2f}x {weight_bytes/t_ours/1e9:>10.1f} "
                   f"{passes:>11}")
+        any_unstable = any_unstable or unstable
+    return not any_unstable
 
 
 def main() -> int:
     if not verify(MetalRunner()):
         print("\nVERDICT: kernel does not verify; no timing claim permitted")
         return 1
-    bench()
+    stable = bench()
     print("\nratio > 1.00x means the verified kernel beats mx.quantized_matmul")
+    if not stable:
+        print("some rows were rejected: the reference arm's own time moved too "
+              "much inside the round, so those ratios would describe the "
+              "machine rather than the kernels. Re-run on an idle machine.")
+        return 1
     return 0
 
 

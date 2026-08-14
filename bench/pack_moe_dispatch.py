@@ -57,6 +57,11 @@ MIN_SAMPLE_MS = 5.0
 ROUNDS = 7
 WORKING_SET_MB = 512
 
+# See bench/pack_wide_qmv.py: interleaving makes both arms suffer a clock
+# excursion together, it does not detect one. The reference arm's own spread
+# is the detector, and rows that fail it are withheld rather than published.
+MAX_CANARY_SPREAD = 1.5
+
 
 def quantize_experts(experts: np.ndarray):
     """Packed artefact plus the exact dequantized weights the contract means."""
@@ -259,15 +264,22 @@ def bench() -> bool:
             _, _, _, (wq, sc, bi) = sets[i % n_sets]
             return mlx_gather(x, idx0, gate0, wq, sc, bi)
 
-        def median_of(fn):
+        def samples_of(fn):
             mx.eval(fn(0))
             mx.synchronize()
             copies = calibrate(lambda c: dispatch_once(fn, c))
-            return statistics.median(
-                [dispatch_once(fn, copies) / copies for _ in range(ROUNDS)])
+            return [dispatch_once(fn, copies) / copies for _ in range(ROUNDS)]
 
-        t_ours, t_mlx = median_of(ours), median_of(theirs)
-        t_od, t_md = median_of(ours_dispatch), median_of(mlx_dispatch)
+        s_ours, s_mlx = samples_of(ours), samples_of(theirs)
+        s_od, s_md = samples_of(ours_dispatch), samples_of(mlx_dispatch)
+        spread = max(max(s_mlx) / min(s_mlx), max(s_md) / min(s_md))
+        if spread > MAX_CANARY_SPREAD:
+            print(f"  {n_tokens:>7} | {'REJECTED: canary spread ':>38}"
+                  f"{spread:.2f}x > {MAX_CANARY_SPREAD}x")
+            ok = False
+            continue
+        t_ours, t_mlx = statistics.median(s_ours), statistics.median(s_mlx)
+        t_od, t_md = statistics.median(s_od), statistics.median(s_md)
         print(f"  {n_tokens:>7} | {t_ours*1e6:>9.1f} {t_mlx*1e6:>9.1f} "
               f"{t_mlx/t_ours:>6.2f}x {str(agree):>6} "
               f"| {t_od*1e6:>9.1f} {t_md*1e6:>9.1f} {t_md/t_od:>6.2f}x")
@@ -279,7 +291,9 @@ def main() -> int:
         print("\nVERDICT: kernel does not verify; no timing claim permitted")
         return 1
     if not bench():
-        print("\nWARNING: an arm disagreed with the other at timing shapes")
+        print("\nSome rows were withheld: either the arms disagreed, or the "
+              "reference arm's own time moved too much inside the round. "
+              "Re-run on an idle machine before quoting anything.")
         return 1
     print("\nratio > 1.00x means the verified kernel beats MLX's routing + gather_qmm")
     return 0
