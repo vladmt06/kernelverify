@@ -33,11 +33,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import mlx.core as mx  # noqa: E402
 
+from kernelverify.extraction.surface import LiveCall  # noqa: E402
+from kernelverify.pack.evidence import (  # noqa: E402
+    CaseEvidence,
+    GateEvidence,
+    output_fingerprint,
+    render_banner,
+)
 from kernelverify.pack.kv_attention import (  # noqa: E402
+    KERNEL_NAME,
     build,
     kernel_spec,
     launch_config,
     quantize_cache,
+    require_capacity,
     should_dispatch,
 )
 from kernelverify.pack.verify import (  # noqa: E402
@@ -124,9 +133,24 @@ def artefacts_identical(cache, bits, packed, scales, biases) -> bool:
 # --------------------------------------------------------------------------
 # verification
 # --------------------------------------------------------------------------
-def verify(runner: MetalRunner) -> bool:
-    print("correctness (runner-isolated, shipped kv_attention contract):")
-    ok = True
+GATE_POLICY = (
+    "pack-gate fixed-case sweep: 3 fixed (B, H, T, DH) shapes x 2 bit widths "
+    "(4, 8), judged against the shipped NATIVE_OPS['kv_attention'] reference "
+    "and tolerance, with the mlx-ops incumbent arm judged by the same oracle "
+    "and artefact bytes checked identical to mx.quantize per case. This is "
+    "NOT the 16-eval mutation-scored battery, which has not run against this "
+    "operator; 2/3-bit widths have unit-test coverage only, no gate evidence."
+)
+SEED_PROTOCOL = (
+    "np.random.default_rng(t + bits) per (shape, bits) in make_case(), q and "
+    "new_k rescaled to peak 0.6 (the contract's QUERY_SCALE), caches at unit "
+    "scale, in bench/pack_kv_attention.py verify()"
+)
+
+
+def verify(runner: MetalRunner) -> GateEvidence:
+    evidence = GateEvidence(gate="pack_kv_attention", policy=GATE_POLICY,
+                            seed_protocol=SEED_PROTOCOL)
     template = kernel_spec()
     # One spec per distinct (BITS, DH) - the raw door's compile-time
     # constants - with cases grouped under it, all sharing one worker
@@ -134,49 +158,67 @@ def verify(runner: MetalRunner) -> bool:
     grouped: dict[tuple, tuple] = {}
     for b, h, t, dh in VERIFY_SHAPES:
         for bits in VERIFY_BITS:
+            require_capacity(t)  # the capacity bound is correctness (TCAP)
             q, kc, vc, nk, nv = make_case(b, h, t, dh, seed=t + bits)
             (k_wq, k_sc, k_bi, v_wq, v_sc, v_bi), theirs_q = \
                 quantized_arms_inputs(kc, vc, bits)
-            if not artefacts_identical(kc, bits, k_wq, k_sc, k_bi):
-                print(f"    B={b} H={h} T={t} DH={dh} {bits}-bit artefact "
-                      f"DISAGREES with mx.quantize")
-                ok = False
+            label = f"B={b} H={h} T={t} DH={dh} {bits}-bit"
+            evidence.checks.append(CaseEvidence(
+                label=f"{label} artefact identical to mx.quantize",
+                passed=artefacts_identical(kc, bits, k_wq, k_sc, k_bi)))
             ref, tol = reference_and_tolerance(
                 "kv_attention", kv_inputs(q, kc, vc, nk, nv, bits))
+            raw_template = {"T": "half", "BITS": bits, "DH": dh}
             if (bits, dh) not in grouped:
-                grouped[(bits, dh)] = (
-                    specialize(template, {"T": "half", "BITS": bits, "DH": dh}),
-                    [], [])
+                grouped[(bits, dh)] = (specialize(template, raw_template), [], [])
             _, cases, exp = grouped[(bits, dh)]
+            grid, threadgroup = launch_config(b, h)
+            spec_ev = evidence.specialization(KERNEL_NAME, "kv_attention",
+                                              raw_template, threadgroup)
             cases.append(RunCase(
                 inputs={"q": q, "k_wq": k_wq, "k_scales": k_sc, "k_biases": k_bi,
                         "v_wq": v_wq, "v_scales": v_sc, "v_biases": v_bi,
                         "new_k": nk, "new_v": nv},
                 params={"b_rows": b, "n_heads": h, "t_cached": t},
                 output_shapes=[((b, h, dh), "float16")],
-                label=f"B={b} H={h} T={t} DH={dh} {bits}-bit"))
+                label=label))
+            spec_ev.calls.append(LiveCall(
+                inputs={"q": q, "k_wq": k_wq, "k_scales": k_sc, "k_biases": k_bi,
+                        "v_wq": v_wq, "v_scales": v_sc, "v_biases": v_bi,
+                        "new_k": nk, "new_v": nv},
+                output_shapes=[((b, h, dh), "float16")],
+                grid=grid, threadgroup=threadgroup,
+                template=(("T", "float16"), ("BITS", bits), ("DH", dh)),
+                label=label))
             # The incumbent is judged by the same oracle, so the timing
             # compares two contract-passing implementations.
             incumbent = mlx_arm(mx.array(q), mx.array(nk), mx.array(nv),
                                 *theirs_q, bits)
             mx.eval(incumbent)
-            exp.append((b, h, t, dh, bits, ref, tol, np.array(incumbent)))
+            exp.append((spec_ev, label, ref, tol, np.array(incumbent)))
 
     spec_batches = [(spec, cases) for spec, cases, _ in grouped.values()]
     expected = [e for _, _, exp in grouped.values() for e in exp]
     results = [r for batch in runner.run_candidate(spec_batches) for r in batch]
-    for result, (b, h, t, dh, bits, ref, tol, incumbent) in zip(results, expected):
-        tag = f"B={b} H={h} T={t:<4} DH={dh:<4} {bits}-bit"
+    for result, (spec_ev, label, ref, tol, incumbent) in zip(results, expected):
         if not result.ok:
-            print(f"    {tag} RUNNER FAIL: {result.status.value}: {result.detail}")
-            ok = False
+            spec_ev.cases.append(CaseEvidence(
+                label=label, passed=False, tol=tol,
+                detail=f"runner {result.status.value}: {result.detail}"))
             continue
         v_ours = judge(result.outputs[0], ref, tol)
+        spec_ev.cases.append(CaseEvidence(
+            label=label, passed=v_ours.ok, err=v_ours.err, tol=v_ours.tol,
+            output_sha256=output_fingerprint(result.outputs[0])))
+        # The incumbent arm is a gate fairness condition, not kernel evidence.
         v_mlx = judge(incumbent, ref, tol)
-        ok = ok and v_ours.ok and v_mlx.ok
-        print(f"    {tag} ours: {v_ours}   mlx-ops arm: "
-              f"{'pass' if v_mlx.ok else 'FAIL'}")
-    return ok
+        evidence.checks.append(CaseEvidence(
+            label=f"{label} mlx-ops incumbent arm passes the same oracle",
+            passed=v_mlx.ok, err=v_mlx.err, tol=v_mlx.tol))
+
+    render_banner(evidence,
+                  "correctness (runner-isolated, shipped kv_attention contract):")
+    return evidence
 
 
 # --------------------------------------------------------------------------
@@ -286,7 +328,7 @@ def main(argv=None) -> int:
     parser.add_argument("--verify-only", action="store_true",
                         help="run the correctness gate and stop; no timing")
     args = parser.parse_args(argv)
-    if not verify(MetalRunner()):
+    if not verify(MetalRunner()).ok:
         print("\nVERDICT: kernel does not verify; no timing claim permitted")
         return 1
     if args.verify_only:

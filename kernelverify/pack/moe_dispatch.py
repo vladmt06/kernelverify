@@ -234,13 +234,23 @@ kernel void {DISPATCH_NAME}(
     )
 
 
+def routing_door_source() -> str:
+    """The routing body in the MLX door's spelling; `build_routing`'s source."""
+    return ROUTING_MSL.replace("D_IN", "x_shape[1]")
+
+
+def dispatch_door_source() -> str:
+    """The dispatch body in the MLX door's spelling; `build_dispatch`'s source."""
+    return DISPATCH_MSL.replace("D_IN", "x_shape[1]").replace("D_OUT", "scales_shape[1]")
+
+
 def build_routing(mx):
-    source = ROUTING_MSL.replace("D_IN", "x_shape[1]")
     return mx.fast.metal_kernel(name=ROUTING_NAME, input_names=ROUTING_INPUTS,
-                                output_names=ROUTING_OUTPUTS, source=source)
+                                output_names=ROUTING_OUTPUTS,
+                                source=routing_door_source())
 
 
 def build_dispatch(mx):
-    source = DISPATCH_MSL.replace("D_IN", "x_shape[1]").replace("D_OUT", "scales_shape[1]")
     return mx.fast.metal_kernel(name=DISPATCH_NAME, input_names=DISPATCH_INPUTS,
-                                output_names=DISPATCH_OUTPUTS, source=source)
+                                output_names=DISPATCH_OUTPUTS,
+                                source=dispatch_door_source())

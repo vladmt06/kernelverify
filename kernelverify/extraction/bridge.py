@@ -32,7 +32,12 @@ from kernelverify.extraction.surface import LiveCall, MLXKernelSurface
 from kernelverify.runners.spec import Binding, BindingKind, KernelSpec, LaunchSpec
 
 #: What a standalone Metal compile needs that MLX's pipeline supplies itself.
-MSL_PREAMBLE = "#include <metal_stdlib>\nusing namespace metal;\n"
+#: `float16_t` is MLX's scalar spelling for half (its jit headers typedef it);
+#: metal_stdlib does not define it and reserves the bare name `float16`, so a
+#: captured fp16 specialization only compiles standalone with the typedef.
+MSL_PREAMBLE = ("#include <metal_stdlib>\n"
+                "using namespace metal;\n"
+                "typedef half float16_t;\n")
 
 # One signature parameter: type tokens, the name, and its buffer index.
 _BUFFER_PARAM = re.compile(

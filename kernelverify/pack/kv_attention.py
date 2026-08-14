@@ -43,11 +43,12 @@ to whole aligned words, so one reader covers every supported width.
 Bounds: T <= TCAP (the softmax buffer is threadgroup memory, sized at
 compile time), DH in {64, 128} (one or two 64-wide quantization groups, and
 32 lanes must cover DH with a whole number of dims each).
-In the raw door `t_cached` is a runtime binding and the kernel does not
-reject t > TCAP, which would overrun the compile-time-sized softmax buffer;
-respecting `should_dispatch` is part of a caller's validity obligation when
-feeding `kernel_spec()` directly, the same class as SUPPORTED_BITS and
-SUPPORTED_DH.
+In the raw door `t_cached` is a runtime binding and the kernel itself cannot
+reject t > TCAP, which would overrun the compile-time-sized softmax buffer.
+Both doors therefore reject it loudly on the host: `build()` checks every
+call before dispatching, and `require_capacity()` is the same check for
+anyone feeding `kernel_spec()` cases directly, the same obligation class as
+SUPPORTED_BITS and SUPPORTED_DH.
 """
 
 from __future__ import annotations
@@ -210,6 +211,23 @@ OUTPUT_NAMES = ["out"]
 KERNEL_NAME = "kv_attn_decode"
 
 
+def require_capacity(t: int) -> None:
+    """Reject a cache longer than the kernel can ever hold, loudly.
+
+    TCAP bounds correctness, not profit: the T+1 softmax scores live in a
+    threadgroup buffer sized at compile time, so a dispatch at t > TCAP
+    would overrun threadgroup memory silently. `build()` calls this on
+    every dispatch; a caller building raw-door cases from `kernel_spec()`
+    must call it too.
+    """
+    if t > TCAP:
+        raise ValueError(
+            f"t={t} exceeds kv_attention's capacity bound TCAP={TCAP}: the "
+            "softmax buffer is compile-time threadgroup memory, so this "
+            "dispatch would overrun it; route T > TCAP to MLX "
+            "(should_dispatch)")
+
+
 def should_dispatch(t: int) -> bool:
     """Whether the pack should use this kernel at all, or defer to MLX.
 
@@ -298,9 +316,25 @@ kernel void {KERNEL_NAME}(
     )
 
 
+def mlx_door_source() -> str:
+    """The body in the MLX door's spelling, the single source `build()` uses."""
+    return (KV_ATTENTION_MSL.replace("NUM_HEADS", "q_shape[1]")
+            .replace("T_CACHED", "k_wq_shape[1]"))
+
+
 def build(mx):
-    """The MLX callable. Takes mx so this module imports without it."""
-    source = (KV_ATTENTION_MSL.replace("NUM_HEADS", "q_shape[1]")
-              .replace("T_CACHED", "k_wq_shape[1]"))
-    return mx.fast.metal_kernel(name=KERNEL_NAME, input_names=INPUT_NAMES,
-                                output_names=OUTPUT_NAMES, source=source)
+    """The MLX callable. Takes mx so this module imports without it.
+
+    The returned callable rejects t > TCAP loudly before dispatching: the
+    capacity bound is correctness, not profit, and the kernel itself cannot
+    check it (the softmax buffer is sized at compile time).
+    """
+    kernel = mx.fast.metal_kernel(name=KERNEL_NAME, input_names=INPUT_NAMES,
+                                  output_names=OUTPUT_NAMES,
+                                  source=mlx_door_source())
+
+    def checked(*, inputs, **kwargs):
+        require_capacity(int(inputs[1].shape[1]))  # k_wq is (H, T, words)
+        return kernel(inputs=inputs, **kwargs)
+
+    return checked

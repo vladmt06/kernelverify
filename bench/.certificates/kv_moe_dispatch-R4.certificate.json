@@ -1,0 +1,138 @@
+{
+  "schema_version": 2,
+  "kernel": "kv_moe_dispatch-R4",
+  "kernel_family": "kv_moe_dispatch",
+  "byte_bound": {
+    "_meaning": "these hashes identify WHAT was verified; they assert nothing about output values",
+    "translation_unit_sha256": "203daf8d65695e2866bce011420ac1b7fd4d11a8f429cfcac58b071d8df60802",
+    "catalogue_fingerprint": "none: no mutation-scored fault catalogue exists for this operator yet",
+    "harness_commit": "7d7c453",
+    "contract_version": "moe_dispatch contract (NATIVE_OPS['moe_dispatch'], Qwen3-class routing over dense experts)",
+    "compile_options": {
+      "math_mode": "safe"
+    },
+    "extraction_provenance": "extracted-behaviorally-validated",
+    "extraction_provenance_meaning": "the translation unit was captured from the framework's own generator and reproduces the framework's outputs under this protocol on the pinned toolchain; it is not claimed to be byte-identical to what the framework compiled, because numerically equivalent programs pass that check by construction and compile options never appear in the captured source",
+    "not_attested_by_these_hashes": [
+      "host-side contiguity copies the framework may insert before launch",
+      "launch configuration beyond the declared spec",
+      "compile options, which do not appear in generated source and are recorded separately as inputs"
+    ]
+  },
+  "protocol_bound": {
+    "_assertion": "re-running the published protocol on a machine matching the recorded chip generation and toolchain reproduces these verdicts; output values are NOT asserted to be identical, which is not achievable on a GPU",
+    "operator": "moe_dispatch",
+    "policy": "pack-gate fixed-case sweep: 3 (n_tokens, d_model, n_experts, d_ffn) shapes x {normal, constant_rows} input modes; routing judged bit-exact against the contract's top-2-by-probability with ties to the lower index, dispatch judged against the shipped NATIVE_OPS['moe_dispatch'] reference and tolerance over the exact dequantized experts. This is NOT the 16-eval mutation-scored battery, which has not run against this operator.",
+    "budget_evaluations_per_operator": 6,
+    "cases_run": 6,
+    "cases_passed": 6,
+    "all_passed": true,
+    "seed_protocol": "np.random.default_rng(n_tokens * 31 + len(mode)) per (shape, mode) in make_case(); constant_rows repeats one column so every logit ties, in bench/pack_moe_dispatch.py verify()",
+    "tolerance_model": {
+      "anchor": "NATIVE_OPS['moe_dispatch'] fp64 reference",
+      "floor": "operator ensemble floor",
+      "K_quant": 4.0,
+      "form": "max(base_tol(dtype), K_QUANT * floor)"
+    }
+  },
+  "attestation": {
+    "_meaning": "not every clause is established the same way; a clause no test can separate is attested from source or not at all",
+    "clauses": [
+      {
+        "clause": "C1",
+        "statement": "every intermediate at binary32 or wider",
+        "mechanism": "source-attestation",
+        "evidence": "every accumulator in the kernel source is float (fp32); tree-reduced half-precision accumulation is separable on 0/280 fp16-activation cases, so source attestation is the only honest mechanism at this dtype",
+        "scope": "fp16 activations, tree-reduced accumulators"
+      },
+      {
+        "clause": "C5",
+        "statement": "the specified formula, not a defensible relative",
+        "mechanism": "numeric-battery",
+        "evidence": "judged against the operator's fp64 shipped reference within the shipped tolerance on every case in the protocol block"
+      }
+    ],
+    "counts": {
+      "numeric": 1,
+      "source_attested": 1
+    }
+  },
+  "validity": {
+    "binding_on": {
+      "chip_generation": "Apple M3 Pro",
+      "toolchain": {
+        "mlx": "0.32.0",
+        "python": "3.14.6",
+        "numpy": "2.5.2",
+        "macos": "26.5.2"
+      }
+    },
+    "elsewhere": "advisory: a mismatched chip generation or toolchain may move numerics legitimately, so a failure there is a new matrix row to investigate, not a refutation",
+    "domain": {
+      "R": 4,
+      "BITS": 4,
+      "experts": "MLX-affine 4-bit group-64 expert artefacts",
+      "d_model": "any multiple of 64 (gate evidence at 512 and 256)",
+      "routing_inputs": "consumes (idx, gate) produced by kv_moe_routing; meaningful only alongside a certified routing kernel"
+    }
+  },
+  "performance": [],
+  "notes": [
+    "evidence source: the pack_moe_dispatch pack gate, not the 16-eval mutation-scored battery; no fault catalogue has run against this operator yet (TODOS.md: pack-operator battery extension is the upgrade path)",
+    "extraction behaviorally validated on 6 of 6 gate cases (see validation_calls in the emitter)",
+    "no timings recorded: certification may run under contention (D12.2), so no performance claim is made or implied"
+  ],
+  "advisory": {
+    "_meaning": "advisory, NOT reproducible: GPU outputs are not bit-stable across runs, so these fingerprints and margins describe the certifying run only and are never a re-check criterion",
+    "cases": [
+      {
+        "label": "dispatch normal n=1 E=16",
+        "output_sha256": "cdb92fba1a295abe2722ac2fdf5c977d120f30c70d00a592dfb4ad13e73406df",
+        "err": 0.0001152831809968502,
+        "tol": 0.0017427198924592638,
+        "margin_err_over_tol": 0.066151,
+        "routing_exact": true
+      },
+      {
+        "label": "dispatch constant_rows n=1 E=16",
+        "output_sha256": "85621e299db651a7feae91fa141f4922a45b709054bf84f9724aeb84bbc17bee",
+        "err": 0.00046478770673274994,
+        "tol": 0.004245660140357912,
+        "margin_err_over_tol": 0.109474,
+        "routing_exact": true
+      },
+      {
+        "label": "dispatch normal n=8 E=16",
+        "output_sha256": "279e09a5fe66f84a6d61a51aecf22617534a74476732a639c9df9fdaaeea735d",
+        "err": 0.00023717366076658752,
+        "tol": 0.002256310342388868,
+        "margin_err_over_tol": 0.105116,
+        "routing_exact": true
+      },
+      {
+        "label": "dispatch constant_rows n=8 E=16",
+        "output_sha256": "fed50f3cfbfa997dd08599c342689e9c72f197160cf1b3a3280913c68afb5a24",
+        "err": 0.0008919686079025269,
+        "tol": 0.011088266068041325,
+        "margin_err_over_tol": 0.080443,
+        "routing_exact": true
+      },
+      {
+        "label": "dispatch normal n=4 E=8",
+        "output_sha256": "0d37d3b660a14620c78d402295f89180e252874e25af966ff8c6fc6c5ee5af72",
+        "err": 0.00010511384009392888,
+        "tol": 0.001450777691675413,
+        "margin_err_over_tol": 0.072453,
+        "routing_exact": true
+      },
+      {
+        "label": "dispatch constant_rows n=4 E=8",
+        "output_sha256": "a005c4925e6747bc52a007a15513a32c413e70f3d81603cd8becfa853debeeea",
+        "err": 0.00011430680751800537,
+        "tol": 0.0018608602607250214,
+        "margin_err_over_tol": 0.061427,
+        "routing_exact": true
+      }
+    ]
+  }
+}
