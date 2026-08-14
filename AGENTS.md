@@ -109,6 +109,8 @@ bench/start_binding_run.sh     # arms a launchd job, then quit Terminal
 - Excluding a mutation as equivalent requires a stated reason for why no oracle could ever see it.
 - Test policies must never reference a known fault; they may only use the operator schema, dtypes, and input modes.
 - Never add AI co-author attribution to commits.
+- Every worker-lane task is planned through the gstack head-engineering review (/plan-eng-review) before dispatch, Vlad's standing rule from 2026-08-14.
+  The coordinator writes the lane plans into a design doc under ~/.gstack/projects/kernelverify/, the review rules every open decision with Vlad, and a lane brief must trace to a ruled plan with no unresolved decisions, the way W1-W8 traced to the runner-consolidation review.
 
 ## Mistakes already encountered
 
