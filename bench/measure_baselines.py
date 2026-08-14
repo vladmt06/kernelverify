@@ -78,6 +78,7 @@ REQUIRED_TOP = (
 )
 REQUIRED_RESULT = ("metric", "median", "reps", "samples", "min_sample_ms",
                    "below_timing_floor")
+REQUIRED_SAMPLING = ("interleaved", "group", "rounds")
 PROVENANCE_TIERS = ("owner-run", "rental-run", "community-unattested")
 
 
@@ -92,8 +93,18 @@ def validate_row(row: dict) -> dict:
         raise ValueError(f"unknown provenance tier {row['provenance_tier']}")
     if row["binding"] and row["binding_blockers"]:
         raise ValueError("a row cannot bind and carry blockers")
-    if row["measurement"]["kind"] != "ceiling" and "roofline" not in row:
-        raise ValueError(f"row {row['row_id']} has no roofline placement")
+    if row["measurement"]["kind"] != "ceiling":
+        if "roofline" not in row:
+            raise ValueError(f"row {row['row_id']} has no roofline placement")
+        # Comparability is a separate property from bindingness, and it has its
+        # own falsification: the kernels lane ran an A/B whose dispatches were
+        # all past 5 ms and still got the sign wrong, because the two arms ran
+        # in separate passes. Batching is not enough; the arms have to be
+        # interleaved. A row that cannot say how it was sampled must not be
+        # compared against another row.
+        missing = [k for k in REQUIRED_SAMPLING if k not in row.get("sampling", {})]
+        if missing:
+            raise ValueError(f"row {row['row_id']} sampling missing {missing}")
     return row
 
 
@@ -455,6 +466,13 @@ def main() -> int:
                 "metric": "tokens_per_s", "median": round(median, 2),
                 "spread_pct": round(spread, 2) if spread is not None else None,
                 "reps": len(vals), "samples": [round(v, 2) for v in vals], **timing,
+            },
+            "sampling": {
+                "interleaved": True,
+                "rotation": "per-round",
+                "rounds": rounds,
+                "group": run_id,
+                "group_members": [s["id"] for s in specs],
             },
             "roofline": util,
             **machine_state.binding_verdict(before, after, timing),

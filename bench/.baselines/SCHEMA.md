@@ -6,6 +6,18 @@ Rows are never edited or deleted; a re-measurement is a new row with a new `run_
 
 The producer validates every row against this contract before writing it (`validate_row`), so a missing field fails the measurement run rather than silently blanking a published column.
 
+## Two different questions: may this row be published, and may it be compared
+
+They have different answers and different fields, so a consumer must not use one to decide the other.
+
+**Publishable as an absolute number** needs `provenance_tier` in (`owner-run`, `rental-run`) and `binding: true`.
+
+**Comparable against another row** additionally needs both rows to carry `sampling.interleaved: true` and the same `sampling.group`.
+This is not pedantry: the kernels lane ran an A/B whose every dispatch was already past 5 ms, and it still reversed sign against an interleaved rerun, turning a 1.45x win into 0.77-0.94x.
+One fixed shape drifted 131.7 to 93.1 us between runs minutes apart.
+An A/B in separate passes measures the clock, not the kernels, so batching to a millisecond does not rescue it.
+Rows from different `group`s may both be binding and still not be comparable to each other.
+
 ## The two fields that decide whether a row may be published as fact
 
 `provenance_tier` is one of `owner-run`, `rental-run`, `community-unattested`.
@@ -35,6 +47,7 @@ A published absolute number requires `provenance_tier` in (`owner-run`, `rental-
 | `model` | object or null | name, path, `sha256_32`, quant. Null on ceiling rows |
 | `measurement` | object | kind, matmul_width, n_prompt, n_gen, width_mechanism |
 | `result` | object | metric, median, spread_pct, reps, samples, min_sample_ms, floor_ms, below_timing_floor |
+| `sampling` | object | interleaved, rotation, rounds, group, group_members. Required on every non-ceiling row |
 | `roofline` | object | present on every non-ceiling row, see below |
 
 ### `measurement.kind`
@@ -73,6 +86,7 @@ Use `bandwidth_read` for decode-dominated rows: decode streams weights and barel
 
 ## Notes for the renderer
 
-- Rows from one `run_id` were measured interleaved round-robin, so they are comparable to each other even when the machine drifted. Rows from different `run_id`s are not paired.
+- Rows from one `sampling.group` were measured interleaved round-robin, one sample per spec per round with the order rotated each round, so they are comparable to each other even when the machine drifted underneath them. Rows from different groups are not paired.
+- Refuse to render a comparative claim across rows whose `sampling.interleaved` is false or absent, the same way absolutes are refused when `binding` is false. A contributed row from someone else's harness is the case this exists for.
 - `result.spread_pct` is `(max - min) / median` across repeats. Treat a difference smaller than the spread as no difference.
 - A `run_id` may contain both binding and non-binding rows only if the machine changed state mid-run; `idle_before` and `idle_after` say which end moved.

@@ -104,6 +104,8 @@ def valid_row():
                    "samples": [1.0], "min_sample_ms": 50.0, "floor_ms": 1.0,
                    "below_timing_floor": False},
         "roofline": {"bandwidth_utilisation_pct": 80.0},
+        "sampling": {"interleaved": True, "rotation": "per-round", "rounds": 3,
+                     "group": "r", "group_members": ["x"]},
         "binding": True, "binding_blockers": [],
     }
 
@@ -138,3 +140,25 @@ def test_a_model_row_without_a_roofline_placement_is_rejected():
     del row["roofline"]
     with pytest.raises(ValueError, match="no roofline placement"):
         measure_baselines.validate_row(row)
+
+
+def test_a_row_that_cannot_say_how_it_was_sampled_is_rejected():
+    """Comparability is a separate gate from bindingness.
+
+    The kernels lane ran an A/B whose every dispatch was past 5 ms and still
+    got the sign backwards, because the arms ran in separate passes. A row
+    that cannot state it was interleaved must not be compared against another.
+    """
+    row = valid_row()
+    del row["sampling"]
+    with pytest.raises(ValueError, match="sampling missing"):
+        measure_baselines.validate_row(row)
+
+
+def test_a_binding_row_can_still_be_incomparable():
+    # binding is about absolutes, interleaving is about comparisons; a row may
+    # legitimately pass one gate and fail the other
+    row = valid_row()
+    row["sampling"] = {"interleaved": False, "group": None, "rounds": 1}
+    assert measure_baselines.validate_row(row)["binding"] is True
+    assert row["sampling"]["interleaved"] is False
