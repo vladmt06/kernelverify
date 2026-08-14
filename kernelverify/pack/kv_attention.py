@@ -43,11 +43,14 @@ to whole aligned words, so one reader covers every supported width.
 Bounds: T <= TCAP (the softmax buffer is threadgroup memory, sized at
 compile time), DH in {64, 128} (one or two 64-wide quantization groups, and
 32 lanes must cover DH with a whole number of dims each).
-In the raw door `t_cached` is a runtime binding and the kernel does not
-reject t > TCAP, which would overrun the compile-time-sized softmax buffer;
-respecting `should_dispatch` is part of a caller's validity obligation when
-feeding `kernel_spec()` directly, the same class as SUPPORTED_BITS and
-SUPPORTED_DH.
+t > TCAP is rejected loudly at both doors rather than left to the caller,
+because overrunning a compile-time-sized threadgroup buffer is silent
+memory corruption: the kernel body itself poisons the output with NaN and
+returns (a kernel cannot raise, and a poisoned output fails every oracle
+and every generation instantly), and the MLX door additionally raises
+before dispatch, where the cache shape is visible host-side.
+`should_dispatch` remains the routing predicate; the doors' rejection is
+the backstop for callers that skip it.
 """
 
 from __future__ import annotations
@@ -84,6 +87,16 @@ KV_ATTENTION_MSL = """
     uint H    = NUM_HEADS;
     uint h    = z % H;
     uint Tc   = T_CACHED;                // cached positions
+
+    // Capacity bound, in the shared body so both doors inherit it: Tc > TCAP
+    // would overrun sc_arr, whose size is fixed at compile time. A kernel
+    // cannot raise, so the loudest defined behaviour is to poison the output
+    // and return; the condition is uniform across the grid, so every thread
+    // leaves together and no barrier below is stranded.
+    if (Tc > TCAP) {
+        for (uint d = lin; d < DH; d += NT) { out[z * DH + d] = (T)NAN; }
+        return;
+    }
 
     threadgroup float qsh[DH];
     threadgroup float sc_arr[TCAP + 1];
@@ -299,8 +312,26 @@ kernel void {KERNEL_NAME}(
 
 
 def build(mx):
-    """The MLX callable. Takes mx so this module imports without it."""
+    """The MLX callable. Takes mx so this module imports without it.
+
+    The callable rejects t > TCAP before dispatch: the cache shape is visible
+    host-side here, so the capacity bound can raise instead of relying on the
+    in-body NaN guard alone.
+    """
     source = (KV_ATTENTION_MSL.replace("NUM_HEADS", "q_shape[1]")
               .replace("T_CACHED", "k_wq_shape[1]"))
-    return mx.fast.metal_kernel(name=KERNEL_NAME, input_names=INPUT_NAMES,
-                                output_names=OUTPUT_NAMES, source=source)
+    kernel = mx.fast.metal_kernel(name=KERNEL_NAME, input_names=INPUT_NAMES,
+                                  output_names=OUTPUT_NAMES, source=source)
+    k_wq_pos = INPUT_NAMES.index("k_wq")
+
+    def guarded(*, inputs, **kwargs):
+        t = inputs[k_wq_pos].shape[1]
+        if t > TCAP:
+            raise ValueError(
+                f"kv_attention: t_cached={t} exceeds TCAP={TCAP}; the softmax "
+                f"buffer is threadgroup memory sized at compile time, so this "
+                f"launch would corrupt it - route long caches to MLX "
+                f"(should_dispatch)")
+        return kernel(inputs=inputs, **kwargs)
+
+    return guarded

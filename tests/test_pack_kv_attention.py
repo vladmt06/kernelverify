@@ -22,7 +22,9 @@ from kernelverify.schemas.native_ops import NATIVE_OPS
 
 from kernelverify.pack.kv_attention import (
     SUPPORTED_BITS,
+    TCAP,
     build,
+    kernel_spec,
     launch_config,
     quantize_cache,
 )
@@ -134,3 +136,34 @@ def test_single_cached_position(kernel):
     out = _run(kernel, q, kc, vc, nk, nv, 4, "float16")
     v = verify_output("kv_attention", kv_inputs(q, kc, vc, nk, nv, 4), out)
     assert v.ok, v
+
+
+def test_mlx_door_rejects_over_capacity(kernel):
+    """t > TCAP must raise before dispatch: the softmax buffer is sized at
+    compile time, and the overrun it prevents is silent memory corruption."""
+    q, kc, vc, nk, nv = _case(1, 1, TCAP + 1, 64, "float16", seed=7)
+    with pytest.raises(ValueError, match="TCAP"):
+        _run(kernel, q, kc, vc, nk, nv, 8, "float16")
+
+
+def test_raw_door_poisons_over_capacity_output():
+    """The raw door's t_cached is a runtime scalar binding, so the rejection
+    lives in the kernel body: an over-capacity launch must come back all-NaN,
+    never as plausible numbers computed over a corrupted buffer."""
+    from kernelverify.runners import MetalRunner, RunCase, specialize
+
+    b, h, t, dh, bits = 1, 1, TCAP + 1, 64, 8
+    q, kc, vc, nk, nv = _case(b, h, t, dh, "float16", seed=7)
+    k_wq, k_sc, k_bi = quantize_cache(kc, bits)
+    v_wq, v_sc, v_bi = quantize_cache(vc, bits)
+    spec = specialize(kernel_spec(), {"T": "half", "BITS": bits, "DH": dh})
+    case = RunCase(
+        inputs={"q": q, "k_wq": k_wq, "k_scales": k_sc, "k_biases": k_bi,
+                "v_wq": v_wq, "v_scales": v_sc, "v_biases": v_bi,
+                "new_k": nk, "new_v": nv},
+        params={"b_rows": b, "n_heads": h, "t_cached": t},
+        output_shapes=[((b, h, dh), "float16")],
+        label=f"T={t} over capacity")
+    [[result]] = MetalRunner().run_candidate([(spec, [case])])
+    assert result.ok, result
+    assert np.all(np.isnan(result.outputs[0]))
