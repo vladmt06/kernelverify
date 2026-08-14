@@ -101,7 +101,8 @@ Or, for the cross-stack matrix rows in one command:
 
 ## Mistakes already encountered
 
-- The shell cwd resets between tool calls, so `cd /Users/vlad/kernelverify` in every command.
+- The shell cwd resets between tool calls, so `cd` into YOUR OWN checkout in every command.
+  For the main session that is `/Users/vlad/kernelverify`; a worktree lane uses its own path (`/Users/vlad/kv-*`), never main's.
 - The verdict cache stores plain tuples, not dataclasses, because pickled dataclasses remember their defining module and break when loaded from an import context.
 - Structured input modes can make a correct fp32 kernel exceed the published tolerance against the fp64 reference.
   That is ill-conditioning, not a port bug; the shipped oracle handles it with the ensemble-floor tolerance (ADR 0004), and a control failing that tolerance on any mode now always means the oracle or the port is broken.
@@ -134,3 +135,7 @@ Or, for the cross-stack matrix rows in one command:
   `lut-gather` and `dequant-pairwise` in the quant contract are bit-identical at every bit width, so the six-member ensemble is five.
 - `mx.quantize` packs one contiguous little-endian bit stream per row, not 32 // bits values per word; the two agree only when bits divides 32.
   Reading it the wrong way is silent rather than loud, because `verify_canonical_against_mlx` falls back to treating MLX's output as canonical whenever the comparison fails.
+- An A/B timing comparison in separate passes measures the clock, not the kernels: GPU power-state drift moved one fixed shape's time from 131.7 to 93.1 us minutes apart, reversing a comparison's sign completely at every point.
+  Batching dispatches past 5 ms did NOT prevent this; interleaving the arms within each round is independently load-bearing.
+  Interleaving is necessary and NOT sufficient: it equalizes a clock excursion across arms but cannot detect one, so the reference arm's own spread is the detector - reject any round whose reference samples exceed the class spread limit (1.5x max-to-min for kernel arms, tighter for steadier quantities).
+  Interleave every comparative measurement, always, even when each dispatch is ms-scale.
