@@ -9,8 +9,6 @@ renormalize the top-2 weights.
 Skipped wholesale when MLX/Metal is unavailable, matching test_metal_runner.py.
 """
 
-from collections import namedtuple
-
 import numpy as np
 import pytest
 
@@ -24,13 +22,12 @@ from kernelverify.pack.moe_dispatch import (
     dispatch_launch,
     routing_launch,
 )
+from kernelverify.pack.verify import moe_inputs, verify_output
 from kernelverify.pack.wide_qmv import pack_nibbles
 from kernelverify.reference.native_kernels import _topk_by_prob
-from kernelverify.schemas.native_ops import NATIVE_OPS
 from kernelverify.schemas.quant_contract import QuantContract, canonical_quantize
 
 CONTRACT = QuantContract(bits=4, group_size=64)
-Case = namedtuple("Case", "dtype")
 
 
 @pytest.fixture(scope="module")
@@ -39,14 +36,13 @@ def kernels():
 
 
 def _quantize(experts):
+    """The packed artefact for the kernel, plus the per-expert artefacts the
+    shared gate dequantizes into the contract's dense experts."""
     arts = [canonical_quantize(e, CONTRACT) for e in experts]
     packed = np.stack([pack_nibbles(a.q) for a in arts])
     scales = np.stack([a.scales for a in arts])
     biases = np.stack([a.biases for a in arts])
-    dequantized = np.stack([
-        a.scales.astype(np.float64).repeat(64, axis=1) * a.q.astype(np.float64)
-        + a.biases.astype(np.float64).repeat(64, axis=1) for a in arts])
-    return packed, scales, biases, dequantized
+    return packed, scales, biases, arts
 
 
 def _inputs(n_tokens, d_model, n_experts, d_ffn, seed=2, constant=False):
@@ -114,11 +110,7 @@ def test_dispatch_agrees_with_the_shipped_reference(kernels, n_tokens):
     _, dispatch = kernels
     d_model, n_experts, d_ffn = 512, 16, 256
     x, router, experts = _inputs(n_tokens, d_model, n_experts, d_ffn, seed=n_tokens)
-    packed, scales, biases, dequantized = _quantize(experts)
-    op = NATIVE_OPS["moe_dispatch"]
-    ref = op.reference({"x": x, "router": router, "experts": dequantized})
-    tol = op.tolerance(Case(dtype="float16"),
-                       {"x": x, "router": router, "experts": dequantized}, ref)
+    packed, scales, biases, arts = _quantize(experts)
 
     idx, gate = _route(kernels, x, router, n_experts)
     grid, threadgroup, r = dispatch_launch(d_ffn, n_tokens)
@@ -128,17 +120,15 @@ def test_dispatch_agrees_with_the_shipped_reference(kernels, n_tokens):
                    grid=grid, threadgroup=threadgroup,
                    template=[("T", mx.float16), ("R", r)])[0]
     mx.eval(out)
-    assert float(np.max(np.abs(np.array(out).astype(np.float64) - ref))) <= tol
+    v = verify_output("moe_dispatch", moe_inputs(x, router, arts), np.array(out))
+    assert v.ok, v
 
 
 def test_handles_d_ffn_not_divisible_by_r(kernels):
     _, dispatch = kernels
     d_model, n_experts, d_ffn = 256, 8, 130   # 130 % 4 == 2
     x, router, experts = _inputs(4, d_model, n_experts, d_ffn, seed=6)
-    packed, scales, biases, dequantized = _quantize(experts)
-    op = NATIVE_OPS["moe_dispatch"]
-    inputs = {"x": x, "router": router, "experts": dequantized}
-    ref = op.reference(inputs)
+    packed, scales, biases, arts = _quantize(experts)
     idx, gate = _route(kernels, x, router, n_experts)
     grid, threadgroup, r = dispatch_launch(d_ffn, 4)
     out = dispatch(inputs=[mx.array(x), idx, gate, mx.array(packed),
@@ -148,5 +138,5 @@ def test_handles_d_ffn_not_divisible_by_r(kernels):
                    template=[("T", mx.float16), ("R", r)])[0]
     mx.eval(out)
     assert np.array(out).shape == (4, d_ffn)
-    assert float(np.max(np.abs(np.array(out).astype(np.float64) - ref))) <= \
-        op.tolerance(Case(dtype="float16"), inputs, ref)
+    v = verify_output("moe_dispatch", moe_inputs(x, router, arts), np.array(out))
+    assert v.ok, v
