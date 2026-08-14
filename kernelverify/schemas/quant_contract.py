@@ -226,9 +226,40 @@ def fault_group_size_halved(a: QuantArtefact) -> QuantArtefact:
     return QuantArtefact(a.q, scales, biases, a.contract)
 
 
+def fault_unpack_mask_too_wide(a: QuantArtefact) -> QuantArtefact:
+    """Unpack mask one bit too wide, so each code absorbs its neighbour's low bit.
+
+    Measured on the MLX pack surface by the kv-kernels lane at 4.87e+2 against
+    an output scale of 150. The mask is written as (1 << bits) - 1 in every
+    kernel that unpacks a bit stream, and getting `bits` wrong by one is the
+    single most available transcription error in that line.
+    """
+    n_bins = (1 << a.contract.bits) - 1
+    neighbour = np.roll(a.q, -1, axis=1) & 1
+    q = np.minimum(a.q + (neighbour << a.contract.bits) // 2, n_bins)
+    return QuantArtefact(np.ascontiguousarray(q.astype(a.q.dtype)),
+                         a.scales, a.biases, a.contract)
+
+
+def fault_all_groups_read_group_zero(a: QuantArtefact) -> QuantArtefact:
+    """Every group reads group 0's scale and bias: a dropped group stride.
+
+    Measured by the kv-kernels lane at 2.75e+2. Distinct from
+    `fault_scales_rotated`, which is off by one group and still varies down the
+    row; this one collapses the whole row onto a single group's parameters, so
+    it survives any test whose weights happen to be group-uniform.
+    """
+    scales = np.broadcast_to(a.scales[:, :1], a.scales.shape)
+    biases = np.broadcast_to(a.biases[:, :1], a.biases.shape)
+    return QuantArtefact(a.q, np.ascontiguousarray(scales),
+                         np.ascontiguousarray(biases), a.contract)
+
+
 FAULTS = {
     "scales-rotated-one-group": fault_scales_rotated,
     "nibble-order-swapped": fault_nibble_swapped,
     "bias-dropped": fault_bias_dropped,
     "group-size-halved": fault_group_size_halved,
+    "unpack-mask-too-wide": fault_unpack_mask_too_wide,
+    "all-groups-read-group-0": fault_all_groups_read_group_zero,
 }
