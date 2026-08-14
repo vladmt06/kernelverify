@@ -147,7 +147,82 @@ def moe_dispatch(inputs, *, renormalize=True, expert_offset=0,
     return out.astype(x.dtype)
 
 
+# ---------------------------------------------------------------------------
+# KV-cache attention, single decode step
+# ---------------------------------------------------------------------------
+def _cache_dequant(cache: np.ndarray, bits: int, fault=None) -> np.ndarray:
+    """Canonically quantize a (H, T, DH) cache and dequantize at fp32.
+
+    Contract-anchored the same way quantized_matmul is: the kernel is correct
+    only against the INTENDED quantized cache, so cache artefact faults reuse
+    the quant_contract fault builders on the 2D (H*T, DH) artefact.
+    """
+    h, t, dh = cache.shape
+    artefact = canonical_quantize(cache.reshape(h * t, dh),
+                                  QuantContract(bits=bits, group_size=64))
+    if fault is not None:
+        artefact = fault(artefact)
+    return dequantize(artefact, np.float32).reshape(h, t, dh)
+
+
+def kv_attention(inputs, *, scores_dtype="float32", accum_dtype="float32",
+                 k_scales_rotated=False, v_bias_dropped=False,
+                 new_entry_skipped=False, dhead_scale_dropped=False):
+    """One decode step of attention over a quantized KV cache.
+
+    Correct path: dequantize the canonical K/V cache artefacts at fp32; scores
+    for the T cached positions plus the step's own new entry, scaled by
+    1/sqrt(DH); softmax over T+1; combine cached V (fp32 accumulation) plus
+    the new entry's V. The cache is shared across the batch (a correctness
+    simplification the schema documents); the new K/V arrive unquantized, as a
+    rotating cache appends them.
+
+    Seams: `scores_dtype` fp16 is this operator's precision canary (the
+    corpus attention canary's quantized twin); `accum_dtype` fp16/fp16-seq is
+    the topology pair from the quantized_matmul measurement; the two cache
+    faults corrupt one artefact each; `new_entry_skipped` is the off-by-one
+    cache-length incident class; `dhead_scale_dropped` drops the 1/sqrt(DH).
+    """
+    q, new_k, new_v = inputs["q"], inputs["new_k"], inputs["new_v"]
+    bits = int(inputs["bits"][0])
+    dh = q.shape[-1]
+
+    kd = _cache_dequant(inputs["k_cache"], bits,
+                        fault_scales_rotated if k_scales_rotated else None)
+    vd = _cache_dequant(inputs["v_cache"], bits,
+                        fault_bias_dropped if v_bias_dropped else None)
+
+    qf = q.astype(np.float32)
+    scale = 1.0 if dhead_scale_dropped else 1.0 / np.sqrt(np.float32(dh))
+    scores = np.einsum("bhd,htd->bht", qf, kd) * scale
+    score_new = np.sum(qf * new_k.astype(np.float32), axis=-1) * scale
+    if not new_entry_skipped:
+        scores = np.concatenate([scores, score_new[..., None]], axis=-1)
+    if scores_dtype != "float32":
+        scores = scores.astype(scores_dtype).astype(np.float32)
+
+    shifted = scores - scores.max(axis=-1, keepdims=True)
+    probs = np.exp(shifted)
+    probs /= probs.sum(axis=-1, keepdims=True)
+
+    probs_cached = probs[..., : kd.shape[1]]
+    if accum_dtype in ("float16", "float16-seq"):
+        contrib = (probs_cached.astype(np.float16)[..., None]
+                   * vd.astype(np.float16)[None, ...])
+        if accum_dtype == "float16-seq":
+            out = np.add.accumulate(contrib, axis=2, dtype=np.float16)[:, :, -1]
+        else:
+            out = np.add.reduce(contrib, axis=2, dtype=np.float16)
+        out = out.astype(np.float32)
+    else:
+        out = np.einsum("bht,htd->bhd", probs_cached, vd)
+    if not new_entry_skipped:
+        out = out + probs[..., -1][..., None] * new_v.astype(np.float32)
+    return out.astype(q.dtype)
+
+
 NATIVE_KERNELS = {
     "quantized_matmul": quantized_matmul,
     "moe_dispatch": moe_dispatch,
+    "kv_attention": kv_attention,
 }

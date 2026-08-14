@@ -55,6 +55,8 @@ def _oracle_member_labels() -> list:
             labels.append(f"floor:{op}:{name}")
     labels += [f"quant:{name}" for name in sorted(QUANT_ENSEMBLE)]
     labels += ["moe:default", "moe:reversed-slots"]
+    from kernelverify.schemas.native_ops import KV_MEMBERS
+    labels += sorted(KV_MEMBERS)
     return labels
 
 BUDGETS = (4, 8, 16, 32)

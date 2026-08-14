@@ -146,6 +146,24 @@ CATALOGUE: list[Mutation] = [
     _m("quantized_matmul", {"accum_dtype": "float16-seq"},
        "MAC accumulator held at fp16, sequential (naive kernel shape; "
        "separable broadly, up to 23x over tolerance at long reductions)"),
+    # KV-cache attention, decode step. The precision canary carries over from
+    # the corpus attention operator (ADR 0004's standing invariant, quantized
+    # twin); the accumulator pair reproduces the topology split (b3fc3b8); the
+    # cache faults are the artefact class anchored on the contract.
+    _m("kv_attention", {"scores_dtype": "float16"},
+       "attention scores held at fp16 (the precision canary, quantized twin)"),
+    _m("kv_attention", {"accum_dtype": "float16"},
+       "combine accumulator at fp16, tree-reduced (structural-attestation class)"),
+    _m("kv_attention", {"accum_dtype": "float16-seq"},
+       "combine accumulator at fp16, sequential (naive kernel shape)"),
+    _m("kv_attention", {"k_scales_rotated": True},
+       "K-cache artefact fault: every group reads its neighbour's scale"),
+    _m("kv_attention", {"v_bias_dropped": True},
+       "V-cache artefact fault: the affine bias is discarded"),
+    _m("kv_attention", {"new_entry_skipped": True},
+       "the step's own K/V never enter scores or combine (cache off-by-one)"),
+    _m("kv_attention", {"dhead_scale_dropped": True},
+       "missing 1/sqrt(DH) score scaling"),
     # MoE routing. These are the divergences that actually ship in mixture
     # models, including two that only express on structured inputs.
     _m("moe_dispatch", {"renormalize": False},
@@ -187,6 +205,7 @@ KERNEL_TO_CORPUS_OP = {
 KERNEL_TO_NATIVE_OP = {
     "quantized_matmul": "quantized_matmul",
     "moe_dispatch": "moe_dispatch",
+    "kv_attention": "kv_attention",
 }
 
 # The single mapping every consumer should use: kernel name -> operator key,

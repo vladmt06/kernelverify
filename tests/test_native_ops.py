@@ -82,7 +82,7 @@ def test_every_native_seam_expresses_somewhere():
     natives = [m for m in CATALOGUE if KERNEL_TO_OP[m.kernel] in NATIVE_OPS
                and m.params != {"softmax_topk_order": True}
                and m.params != {"tie_high": True}]
-    assert len(natives) == 11
+    assert len(natives) == 18
     for m in natives:
         op = NATIVE_OPS[KERNEL_TO_OP[m.kernel]]
         faulty = m.build()
@@ -98,6 +98,65 @@ def test_every_native_seam_expresses_somewhere():
                 caught = True
                 break
         assert caught, f"{m.name} undetected on every sampled case"
+
+
+def kv_inputs(b=2, h=2, t=64, dh=64, bits=4, dtype=np.float16):
+    return {
+        "q": (RNG.standard_normal((b, h, dh)).astype(np.float32) * 0.2).astype(dtype),
+        "k_cache": (RNG.standard_normal((h, t, dh)).astype(np.float32) * 3).astype(dtype),
+        "v_cache": (RNG.standard_normal((h, t, dh)).astype(np.float32) * 3).astype(dtype),
+        "new_k": (RNG.standard_normal((b, h, dh)).astype(np.float32) * 0.2).astype(dtype),
+        "new_v": (RNG.standard_normal((b, h, dh)).astype(np.float32) * 3).astype(dtype),
+        "bits": np.array([bits], dtype=np.int32),
+    }
+
+
+def test_kv_kernel_agrees_with_reference():
+    from kernelverify.reference.native_kernels import kv_attention
+
+    for bits in (4, 8):
+        inputs = kv_inputs(bits=bits)
+        ref = NATIVE_OPS["kv_attention"].reference(inputs)
+        out = kv_attention(inputs).astype(np.float64)
+        assert np.max(np.abs(out - ref)) < 5e-3
+
+
+def test_kv_reference_cross_checked_against_mlx():
+    mx = pytest.importorskip("mlx.core")
+    from kernelverify.reference.native_kernels import _cache_dequant
+
+    inputs = kv_inputs()
+    ref = NATIVE_OPS["kv_attention"].reference(inputs)
+    bits = int(inputs["bits"][0])
+    kd = _cache_dequant(inputs["k_cache"], bits)
+    vd = _cache_dequant(inputs["v_cache"], bits)
+    # Full K/V per batch row: cached entries plus the row's own new entry.
+    b, h, dh = inputs["q"].shape
+    outs = []
+    for row in range(b):
+        k_full = np.concatenate([kd, inputs["new_k"][row].astype(np.float32)[:, None, :]], axis=1)
+        v_full = np.concatenate([vd, inputs["new_v"][row].astype(np.float32)[:, None, :]], axis=1)
+        q_row = mx.array(inputs["q"][row].astype(np.float32))[None, :, None, :]
+        o = mx.fast.scaled_dot_product_attention(
+            q_row, mx.array(k_full)[None], mx.array(v_full)[None],
+            scale=1.0 / np.sqrt(dh))
+        mx.eval(o)
+        outs.append(np.array(o)[0, :, 0, :])
+    assert np.max(np.abs(np.stack(outs).astype(np.float64) - ref)) < 1e-4
+
+
+def test_kv_members_are_distinct_and_two_classes():
+    from kernelverify.schemas.native_ops import KV_MEMBERS, _kv_member
+
+    inputs = kv_inputs(t=512, dh=128, dtype=np.float32)
+    outs = {name: _kv_member(inputs, **kw) for name, kw in KV_MEMBERS.items()}
+    names = list(outs)
+    for i, a in enumerate(names):
+        for b_ in names[i + 1:]:
+            assert not np.array_equal(outs[a], outs[b_]), f"{a} == {b_}"
+    scores_class = [n for n in names if "scores" in n or n.endswith("pairwise-pairwise")]
+    combine_class = [n for n in names if "combine" in n or n.endswith("pairwise-pairwise")]
+    assert len(scores_class) >= 2 and len(combine_class) >= 2
 
 
 def test_predicted_equivalents_measure_equivalent():
