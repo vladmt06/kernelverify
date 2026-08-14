@@ -1,7 +1,7 @@
 # ADR 0009: Per-bits ensemble adequacy for the quantization contract
 
 Date: 2026-08-14
-Status: Accepted; the fp16 clause carries an open condition, stated at the end
+Status: Accepted; the fp16 clause's open condition was discharged the same day, stated at the end
 
 ## Context
 
@@ -152,6 +152,28 @@ The ruling, from the tolerance lane, is conditional.
 The clause stays numeric until a battery that includes opposed-signs and constant-rows at the largest reduction length, at fp16 activations, fails to separate the accumulator seam on any case.
 If such a run separates nothing, structural attestation is accepted for quantized matmul and the certificate must then distinguish numerically-attested clauses from structurally-attested ones, per dtype.
 A relative tolerance component is worth building for the vacuity that ADR 0004 already identified, but it does not fix this: no tolerance of any shape separates two distributions that overlap, and a relative term would not have moved a single one of the zero rows above.
+
+## The open condition, discharged: enforceability follows accumulation topology
+
+The battery run the clause demanded landed as `bench/probe_accum_separation.py` (catalogue/accum-dtype-fault, commit b3fc3b8): 560 cases over the quantized_matmul battery space, including opposed-signs and constant-rows at the battery's largest reduction length D_IN = 1024, at both activation dtypes, with zero control failures.
+This lane reran the probe independently before writing this section, and every number below reproduced exactly.
+
+The accumulator seam turned out to be two classes with opposite enforceability, split by accumulation topology:
+
+| Half-accumulator class | Caught, fp32 activations | Caught, fp16 activations |
+|---|---|---|
+| Sequential (naive one-thread-per-output shape) | 280 / 280 | 192 / 280, up to 23.1x over tolerance |
+| Tree (simdgroup-reduction shape) | 280 / 280 | 0 / 280 |
+
+The mechanism is legible.
+Sequential fp16 error grows with reduction LENGTH and punches past the legitimate envelope, hardest exactly where the class-necessity diagnostic pointed: constant rows at D_IN = 1024 reach 23.1x over tolerance.
+Tree fp16 error grows with reduction DEPTH only, and at every depth this battery can express it stays inside the fp16 rounding envelope the conditioned floor must legitimately allow.
+
+The clause as pre-agreed spoke of "the accumulator seam" as one thing, and the measurement shows it is not; the discharge therefore applies the clause per class rather than pretending it anticipated the split.
+The sequential class separates broadly, so C1-at-fp16 stays NUMERICALLY ENFORCED against it.
+The tree class separates on no case at all - under the structured modes, at the longest reduction, at every bit width - which is precisely the "separates nothing" condition, so STRUCTURAL ATTESTATION (source-level accumulator dtype) is accepted for quantized matmul for that class alone.
+
+The certificate consequence, an input to the certificates ADR (ADR 0011): the certificate must distinguish numerically-attested clauses from structurally-attested ones per dtype and per accumulation topology, because "C1 holds" is now three different sentences - checked numerically at fp32 everywhere, checked numerically at fp16 against sequential accumulators, and attested from source at fp16 against tree accumulators.
 
 ## Consequences
 
