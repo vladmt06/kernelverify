@@ -1,0 +1,496 @@
+#!/usr/bin/env python3
+"""One command that measures this machine's baselines and appends them as JSONL.
+
+Replaces hand-run numbers. Everything the per-chip matrix consumes is produced
+here, and every row carries what is needed to decide whether to believe it.
+
+Four rules are built in rather than remembered:
+
+  interleaved     specs are measured round-robin, not one spec to completion,
+                  because GPU timings drift together with power state and a
+                  sequential sweep turns that drift into a fake ranking.
+  timing floor    a sample under a millisecond is reporting the power manager,
+                  so it is recorded and marked non-binding (bench/machine_state.py).
+  idle gate       load, power source, low power mode and thermal state are
+                  sampled before and after; a row measured on a busy or
+                  unplugged machine is kept, labelled, and never binds.
+  modelled bytes  utilisation is computed from the model's own tensor table,
+                  never from file size, on both stacks.
+
+    .venv/bin/python bench/measure_baselines.py              # everything
+    .venv/bin/python bench/measure_baselines.py --quick      # fewer rounds
+    .venv/bin/python bench/measure_baselines.py --only mlx   # one stack
+
+Appends to bench/.baselines/<date>.jsonl. Schema is documented in
+bench/.baselines/SCHEMA.md, which matrix.py consumes.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import statistics
+import subprocess
+import sys
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+import gguf_info
+import machine_state
+import mlx_info
+import roofline
+
+ROOT = Path(__file__).resolve().parent.parent
+OUT_DIR = ROOT / "bench" / ".baselines"
+HASH_CACHE = ROOT / "bench" / ".cache" / "model_hashes.json"
+
+LLAMA_CPP = Path("/Users/vlad/llama.cpp")
+LLAMA_BENCH = LLAMA_CPP / "build" / "bin" / "llama-bench"
+GGUF_DIR = Path("/Users/vlad/models/gguf")
+
+SCHEMA_VERSION = 1
+PROVENANCE_TIER = "owner-run"
+
+# The model both stacks run, so the two are comparable at all.
+GGUF_MODEL = "Qwen3-4B-Q4_K_M.gguf"
+MLX_REPO = "mlx-community/Qwen3-4B-4bit"
+
+# The matmul's n dimension, reached by prompt width on llama.cpp and by batch
+# size on MLX. n=8 and n=16 are first-class rows because that is where both
+# stacks collapse, not an appendix.
+BATCH_POINTS = [1, 8, 16, 512]
+MLX_BATCH_POINTS = [1, 8, 16]
+
+PREFILL_TOKENS = 1024
+DECODE_TOKENS = 128
+
+
+# The consumer contract. matrix.py reads these rows, so a field going missing
+# has to fail here, in the producer, rather than silently blanking a published
+# column.
+REQUIRED_TOP = (
+    "schema_version", "run_id", "row_id", "measured_at", "provenance_tier",
+    "machine", "idle_before", "idle_after", "stack", "measurement", "result",
+    "binding", "binding_blockers",
+)
+REQUIRED_RESULT = ("metric", "median", "reps", "samples", "min_sample_ms",
+                   "below_timing_floor")
+PROVENANCE_TIERS = ("owner-run", "rental-run", "community-unattested")
+
+
+def validate_row(row: dict) -> dict:
+    missing = [k for k in REQUIRED_TOP if k not in row]
+    if missing:
+        raise ValueError(f"row {row.get('row_id')} missing {missing}")
+    missing = [k for k in REQUIRED_RESULT if k not in row["result"]]
+    if missing:
+        raise ValueError(f"row {row.get('row_id')} result missing {missing}")
+    if row["provenance_tier"] not in PROVENANCE_TIERS:
+        raise ValueError(f"unknown provenance tier {row['provenance_tier']}")
+    if row["binding"] and row["binding_blockers"]:
+        raise ValueError("a row cannot bind and carry blockers")
+    if row["measurement"]["kind"] != "ceiling" and "roofline" not in row:
+        raise ValueError(f"row {row['row_id']} has no roofline placement")
+    return row
+
+
+# --------------------------------------------------------------------------
+# provenance
+
+
+def model_hash(path: Path) -> str:
+    """sha256 of a file or of a directory's safetensors, cached by size+mtime."""
+    files = sorted(path.glob("*.safetensors")) if path.is_dir() else [path]
+    stat_key = json.dumps(
+        [[f.name, f.stat().st_size, int(f.stat().st_mtime)] for f in files],
+        sort_keys=True,
+    )
+    key = hashlib.sha256(f"{path}|{stat_key}".encode()).hexdigest()
+
+    HASH_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    cache = json.loads(HASH_CACHE.read_text()) if HASH_CACHE.exists() else {}
+    if key in cache:
+        return cache[key]
+
+    digest = hashlib.sha256()
+    for f in files:
+        with f.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(8 << 20), b""):
+                digest.update(chunk)
+    cache[key] = digest.hexdigest()[:32]
+    HASH_CACHE.write_text(json.dumps(cache, indent=1))
+    return cache[key]
+
+
+def llama_cpp_build() -> dict:
+    commit = subprocess.run(
+        ["git", "-C", str(LLAMA_CPP), "rev-parse", "--short", "HEAD"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    return {
+        "name": "llama.cpp",
+        "version": commit,
+        "path": str(LLAMA_CPP),
+        "build_flags": [
+            "-DCMAKE_BUILD_TYPE=Release", "-DGGML_METAL=ON",
+            "-DGGML_METAL_EMBED_LIBRARY=ON",
+        ],
+    }
+
+
+def mlx_build() -> dict:
+    import importlib.metadata as md
+
+    return {
+        "name": "mlx-lm",
+        "version": md.version("mlx-lm"),
+        "mlx_version": md.version("mlx"),
+        "path": None,
+        "build_flags": [],
+    }
+
+
+# --------------------------------------------------------------------------
+# single measurements, each returning one sample
+
+
+def run_llama_sample(model: Path, n_prompt: int, n_gen: int) -> dict:
+    cmd = [
+        str(LLAMA_BENCH), "-m", str(model), "-r", "1", "-o", "json",
+        "-p", str(n_prompt), "-n", str(n_gen),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"llama-bench failed: {proc.stderr[-1200:]}")
+    rows = [r for r in json.loads(proc.stdout) if (r["n_gen"] or r["n_prompt"])]
+    row = rows[0]
+    return {
+        "tokens_per_s": row["avg_ts"],
+        "sample_ms": min(row["samples_ns"]) / 1e6,
+        "raw": {k: row[k] for k in ("n_prompt", "n_gen", "model_size", "model_n_params")},
+    }
+
+
+MLX_TRIAL = re.compile(
+    r"prompt_tps=(?P<ptps>[\d.]+), generation_tps=(?P<gtps>[\d.]+),"
+    r" peak_memory=(?P<mem>[\d.]+), total_time=(?P<total>[\d.]+)"
+)
+
+
+def run_mlx_sample(repo: str, n_prompt: int, n_gen: int, batch: int) -> dict:
+    cmd = [
+        sys.executable, "-m", "mlx_lm.benchmark", "--model", repo,
+        "-p", str(n_prompt), "-g", str(n_gen), "-b", str(batch), "-n", "1",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"mlx_lm.benchmark failed: {proc.stderr[-1200:]}")
+    m = None
+    for line in proc.stdout.splitlines():
+        found = MLX_TRIAL.search(line)
+        if found and line.strip().startswith("Trial"):
+            m = found
+    if not m:
+        raise RuntimeError(f"could not parse mlx output:\n{proc.stdout[-1200:]}")
+    return {
+        "prompt_tps": float(m["ptps"]),
+        "generation_tps": float(m["gtps"]),
+        "peak_memory_gb": float(m["mem"]),
+        "sample_ms": float(m["total"]) * 1000.0,
+    }
+
+
+# --------------------------------------------------------------------------
+# spec construction
+
+
+def build_specs(only: str | None) -> list[dict]:
+    specs = []
+    gguf_path = GGUF_DIR / GGUF_MODEL
+    mlx_path = mlx_info.resolve_hf_model(MLX_REPO)
+
+    if only in (None, "llama.cpp"):
+        specs.append({
+            "id": "llamacpp/decode", "stack": "llama.cpp", "model_path": gguf_path,
+            "kind": "decode", "n_prompt": 0, "n_gen": DECODE_TOKENS, "batch": 1,
+        })
+        specs.append({
+            "id": "llamacpp/prefill", "stack": "llama.cpp", "model_path": gguf_path,
+            "kind": "prefill", "n_prompt": PREFILL_TOKENS, "n_gen": 0, "batch": PREFILL_TOKENS,
+        })
+        for n in BATCH_POINTS:
+            specs.append({
+                "id": f"llamacpp/width{n}", "stack": "llama.cpp", "model_path": gguf_path,
+                "kind": "matmul_width", "n_prompt": n, "n_gen": 0, "batch": n,
+            })
+
+    if only in (None, "mlx"):
+        specs.append({
+            "id": "mlx/decode", "stack": "mlx-lm", "model_path": mlx_path,
+            "kind": "decode", "n_prompt": PREFILL_TOKENS, "n_gen": DECODE_TOKENS, "batch": 1,
+        })
+        for b in MLX_BATCH_POINTS:
+            # A short prompt here on purpose: these rows are about the decode
+            # matmul's width, and a 1024-token prefill per stream would bury
+            # that in prefill time.
+            specs.append({
+                "id": f"mlx/width{b}", "stack": "mlx-lm", "model_path": mlx_path,
+                "kind": "matmul_width", "n_prompt": 32, "n_gen": 16, "batch": b,
+            })
+    return specs
+
+
+def measure_once(spec: dict) -> dict:
+    if spec["stack"] == "llama.cpp":
+        return run_llama_sample(spec["model_path"], spec["n_prompt"], spec["n_gen"])
+    return run_mlx_sample(MLX_REPO, spec["n_prompt"], spec["n_gen"], spec["batch"])
+
+
+def sample_value(spec: dict, sample: dict) -> float:
+    """The one number this spec is about, as an aggregate token rate.
+
+    mlx_lm.benchmark's generation_tps is already aggregated across the batch,
+    not per stream: at batch 8 it reports 16.07 for 128 tokens in 7.96 s.
+    Verified before trusting it, because assuming per-stream would have
+    multiplied the number by the batch size and turned a 3x collapse into a
+    3x speedup.
+    """
+    if spec["stack"] == "llama.cpp":
+        return sample["tokens_per_s"]
+    if spec["kind"] == "prefill":
+        return sample["prompt_tps"]
+    return sample["generation_tps"]
+
+
+# --------------------------------------------------------------------------
+# utilisation
+
+
+def utilisation(spec: dict, value: float, ceilings: dict) -> dict:
+    """Bytes and flops per pass from the model's tensor table, never file size."""
+    read_gbs = ceilings["read_gbs"]
+    flops_ceiling = ceilings["fp16_gflops"]
+
+    if spec["stack"] == "llama.cpp":
+        cost = gguf_info.cost_model(gguf_info.read(spec["model_path"]))
+        gen_bytes, kv_bytes = gguf_info.gen_bytes, gguf_info.kv_bytes
+    else:
+        cost = mlx_info.cost_model(spec["model_path"])
+        gen_bytes, kv_bytes = mlx_info.gen_bytes, mlx_info.kv_bytes
+
+    if spec["kind"] == "decode":
+        ctx = spec["n_prompt"] + spec["n_gen"] / 2
+        bytes_per_pass = gen_bytes(cost) + kv_bytes(cost, ctx)
+        passes_per_s = value
+        denominator = "read"
+    else:
+        width = max(spec["batch"], 1)
+        ctx = spec["n_prompt"] if spec["kind"] == "prefill" else spec["n_prompt"]
+        bytes_per_pass = gen_bytes(cost) + kv_bytes(cost, ctx)
+        passes_per_s = value / width
+        denominator = "read"
+
+    achieved_gbs = bytes_per_pass * passes_per_s / 1e9
+    out = {
+        "bytes_per_pass": int(bytes_per_pass),
+        "denominator_name": denominator,
+        "denominator_gbs": read_gbs,
+        "achieved_gbs": round(achieved_gbs, 1),
+        "bandwidth_utilisation_pct": round(100 * achieved_gbs / read_gbs, 1),
+        "byte_model": "tensor-table",
+    }
+
+    # Flops only where a parameter count exists; the MLX checkpoint gives bytes
+    # but not an unambiguous parameter count, and guessing one would put a
+    # fabricated number in a published column.
+    if spec["stack"] == "llama.cpp":
+        if spec["kind"] == "decode":
+            flops = gguf_info.gen_flops(cost, ctx)
+        else:
+            flops = gguf_info.prompt_flops(cost, max(spec["batch"], 1))
+        achieved_gflops = flops * passes_per_s / 1e9
+        ai = flops / bytes_per_pass
+        ridge = flops_ceiling / read_gbs
+        out |= {
+            "gflop_per_pass": round(flops / 1e9, 3),
+            "arithmetic_intensity_flop_per_byte": round(ai, 2),
+            "achieved_gflops": round(achieved_gflops, 1),
+            "flops_ceiling_gflops": flops_ceiling,
+            "roofline_ceiling_gflops": round(min(flops_ceiling, ai * read_gbs), 1),
+            "roofline_utilisation_pct": round(
+                100 * achieved_gflops / min(flops_ceiling, ai * read_gbs), 1
+            ),
+            # Which ceiling actually binds this row. A prefill row read as a
+            # bandwidth percentage looks like a 1% failure when it is a 60%
+            # compute result, so the consumer must be told which column to use.
+            "binding_resource": "memory" if ai < ridge else "compute",
+            "ridge_flop_per_byte": round(ridge, 1),
+        }
+    else:
+        out |= {
+            "achieved_gflops": None,
+            "roofline_utilisation_pct": None,
+            "binding_resource": "memory" if spec["kind"] != "prefill" else "unknown",
+            "flops_model": "absent: the MLX checkpoint gives bytes but no "
+                           "unambiguous parameter count",
+        }
+    return out
+
+
+# --------------------------------------------------------------------------
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--rounds", type=int, default=3)
+    ap.add_argument("--quick", action="store_true")
+    ap.add_argument("--only", choices=["llama.cpp", "mlx"])
+    ap.add_argument("--allow-busy", action="store_true",
+                    help="measure anyway; rows are recorded as non-binding")
+    args = ap.parse_args()
+    rounds = 1 if args.quick else args.rounds
+
+    fp = machine_state.fingerprint()
+    before = machine_state.idle_check(fp["cores"])
+    if not before["idle"] and not args.allow_busy:
+        print("machine is not in a binding state:", file=sys.stderr)
+        for b in before["blockers"]:
+            print(f"  - {b}", file=sys.stderr)
+        print("re-run when idle and on AC, or pass --allow-busy to record "
+              "labelled non-binding rows", file=sys.stderr)
+        return 2
+
+    print("[roofline] measuring machine ceilings", flush=True)
+    roof = roofline.measure()
+    ceilings = {
+        "read_gbs": roof["probe"]["bandwidth_gbs"]["read_shared"],
+        "copy_gbs": roof["probe"]["bandwidth_gbs"]["copy_private"],
+        "fp16_gflops": roof["measured"]["peak_fp16_gflops"],
+        "fp32_gflops": roof["measured"]["peak_fp32_gflops"],
+    }
+    ceilings["read_gbs"] = max(ceilings["read_gbs"], roof["probe"]["bandwidth_gbs"]["read_private"])
+    print(f"           read {ceilings['read_gbs']} GB/s, copy {ceilings['copy_gbs']} GB/s,"
+          f" fp16 {ceilings['fp16_gflops']} GFLOP/s", flush=True)
+
+    specs = build_specs(args.only)
+    samples: dict[str, list] = {s["id"]: [] for s in specs}
+
+    # Round-robin, rotating the order each round so no spec keeps the warmest
+    # or coolest slot.
+    for r in range(rounds):
+        order = specs[r % len(specs):] + specs[: r % len(specs)]
+        for spec in order:
+            sample = measure_once(spec)
+            value = sample_value(spec, sample)
+            samples[spec["id"]].append({"value": value, "sample": sample})
+            print(f"  round {r + 1} {spec['id']:22} {value:10.2f}", flush=True)
+
+    after = machine_state.idle_check(fp["cores"])
+    run_id = f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"
+    stacks = {"llama.cpp": llama_cpp_build(), "mlx-lm": mlx_build()}
+
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = OUT_DIR / f"{datetime.now(timezone.utc):%Y-%m-%d}.jsonl"
+    rows = []
+
+    # Ceiling rows first: every other row divides by them.
+    for name, value, metric in [
+        ("bandwidth_read", ceilings["read_gbs"], "gbs"),
+        ("bandwidth_copy", ceilings["copy_gbs"], "gbs"),
+        ("fp16_fma", ceilings["fp16_gflops"], "gflops"),
+        ("fp32_fma", ceilings["fp32_gflops"], "gflops"),
+    ]:
+        timing = machine_state.timing_verdict(10.0)  # probe dispatches are ms-scale
+        rows.append({
+            "schema_version": SCHEMA_VERSION,
+            "run_id": run_id,
+            "row_id": f"{run_id}/ceiling/{name}",
+            "measured_at": datetime.now(timezone.utc).isoformat(),
+            "provenance_tier": PROVENANCE_TIER,
+            "machine": fp,
+            "idle_before": before, "idle_after": after,
+            "stack": {"name": "roofline-probe", "version": "bench/metal/roofline_probe.mm"},
+            "model": None,
+            "measurement": {"kind": "ceiling", "name": name},
+            "result": {"metric": metric, "median": value, "spread_pct": None,
+                       "reps": 1, "samples": [value], **timing},
+            **machine_state.binding_verdict(before, after, timing),
+        })
+
+    for spec in specs:
+        vals = [s["value"] for s in samples[spec["id"]]]
+        sample_ms = min(s["sample"]["sample_ms"] for s in samples[spec["id"]])
+        timing = machine_state.timing_verdict(sample_ms)
+        median = statistics.median(vals)
+        spread = (max(vals) - min(vals)) / median * 100 if median else None
+        util = utilisation(spec, median, ceilings)
+        model_path = spec["model_path"]
+        rows.append({
+            "schema_version": SCHEMA_VERSION,
+            "run_id": run_id,
+            "row_id": f"{run_id}/{spec['id']}",
+            "measured_at": datetime.now(timezone.utc).isoformat(),
+            "provenance_tier": PROVENANCE_TIER,
+            "machine": fp,
+            "idle_before": before, "idle_after": after,
+            "stack": stacks[spec["stack"]],
+            "model": {
+                "name": model_path.name,
+                "path": str(model_path),
+                "sha256_32": model_hash(model_path),
+                "quant": "Q4_K_M" if spec["stack"] == "llama.cpp" else "mlx-affine-4bit",
+            },
+            "measurement": {
+                "kind": spec["kind"],
+                "matmul_width": spec["batch"],
+                "n_prompt": spec["n_prompt"],
+                "n_gen": spec["n_gen"],
+                "width_mechanism": "prompt-width" if spec["stack"] == "llama.cpp"
+                                   else "batch-size",
+            },
+            "result": {
+                "metric": "tokens_per_s", "median": round(median, 2),
+                "spread_pct": round(spread, 2) if spread is not None else None,
+                "reps": len(vals), "samples": [round(v, 2) for v in vals], **timing,
+            },
+            "roofline": util,
+            **machine_state.binding_verdict(before, after, timing),
+        })
+
+    with out_path.open("a") as fh:
+        for row in rows:
+            fh.write(json.dumps(validate_row(row)) + "\n")
+
+    print("\n" + render(rows))
+    print(f"\n{len(rows)} rows appended to {out_path.relative_to(ROOT)}")
+    return 0
+
+
+def render(rows: list[dict]) -> str:
+    out = [
+        "| stack | measurement | width | tok/s | spread | GB/s | binds on | % of that ceiling | binding row |",
+        "|---|---|---|---|---|---|---|---|---|",
+    ]
+    for r in rows:
+        if r["measurement"]["kind"] == "ceiling":
+            continue
+        m, res, roof = r["measurement"], r["result"], r["roofline"]
+        resource = roof.get("binding_resource", "memory")
+        if resource == "compute" and roof.get("roofline_utilisation_pct") is not None:
+            pct = f"{roof['roofline_utilisation_pct']}%"
+        else:
+            pct = f"{roof['bandwidth_utilisation_pct']}%"
+        out.append(
+            f"| {r['stack']['name']} | {m['kind']} | {m['matmul_width']} |"
+            f" {res['median']} | {res['spread_pct']}% | {roof['achieved_gbs']} |"
+            f" {resource} | {pct} |"
+            f" {'yes' if r['binding'] else 'NO'} |"
+        )
+    return "\n".join(out)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
