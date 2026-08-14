@@ -315,3 +315,47 @@ def test_a_damaged_record_fails_loudly(tmp_path):
     (tmp_path / "2026-08-14.jsonl").write_text('{"row_id": "truncated"\n')
     with pytest.raises(ValueError, match="not valid JSON"):
         load_rows(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Second-pass regressions: units, noise symmetry, run identity
+# ---------------------------------------------------------------------------
+def test_mismatched_metrics_never_form_a_ratio():
+    """The kernel lanes report latency in us while the baseline record reports
+    tokens/s; the moment both land in one group a unitless division would
+    publish a number that is not a ratio of anything."""
+    a = classify(row())
+    b = classify(row(row_id="other", result={"metric": "us"}))
+    ok, why = comparable(a, b)
+    assert not ok and "metric" in why
+
+
+def test_mismatched_metric_row_is_refused_in_the_rendered_table():
+    text = render([row(), row(row_id="b", stack={"name": "mlx-lm", "version": "0.31"},
+                              result={"metric": "us", "median": 11.0})])
+    assert "different metrics" in text
+
+
+def test_ratio_header_names_the_unit_it_divides():
+    """2.6x of a throughput is a win and 2.6x of a latency is a loss; the
+    header must say which one the column holds."""
+    text = render([row(), row(row_id="b", stack={"name": "mlx-lm", "version": "0.31"},
+                              result={"median": 91.3})])
+    assert "(tok/s)" in text
+
+
+def test_a_noisy_baseline_swallows_a_small_difference():
+    """The swallow gate was one-sided: a tight row against a noisy baseline
+    published a 'difference' inside the baseline's own noise band."""
+    base = row(result={"spread_pct": 20.0})
+    other = row(row_id="b", stack={"name": "mlx-lm", "version": "0.31"},
+                result={"median": 52.0, "spread_pct": 1.0})
+    text = render([base, other])
+    assert "no difference" in text
+
+
+def test_a_measurement_row_names_its_run():
+    """Two binding runs of the same workload must not render as
+    indistinguishable duplicate absolutes."""
+    text = render([row()])
+    assert "20260814T120000Z-abcdef12" in text

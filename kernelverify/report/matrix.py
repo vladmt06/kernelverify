@@ -156,6 +156,11 @@ def comparable(a: Claim, b: Claim) -> tuple[bool, str]:
         return False, (f"different workloads ({_workload_label(a.row)} vs "
                        f"{_workload_label(b.row)}); a ratio across kinds divides "
                        "two different jobs, not two stacks")
+    a_metric = (a.row.get("result") or {}).get("metric")
+    b_metric = (b.row.get("result") or {}).get("metric")
+    if a_metric != b_metric:
+        return False, (f"different metrics ({a_metric!r} vs {b_metric!r}); "
+                       "a ratio of two units is not a number")
     return True, ""
 
 
@@ -244,18 +249,22 @@ def render_measurements(claims: list[Claim]) -> list[str]:
     lines = ["## Measurements", "",
              "Absolute numbers, each measured on a machine the project controls and "
              "each passing every bindingness gate.", "",
-             "| Stack | Model | Kind | Width | Metric | Utilisation | Binds on | Spread |",
-             "|---|---|---|---|---|---|---|---|"]
+             "| Stack | Model | Kind | Width | Metric | Utilisation | Binds on | Spread | Run |",
+             "|---|---|---|---|---|---|---|---|---|"]
     for claim in publishable:
         row = claim.row
         result = row.get("result") or {}
         model = (row.get("model") or {}).get("name", "-")
         kind = (row.get("measurement") or {}).get("kind", "-")
         resource, pct = utilisation(row)
+        # The run identity keeps a second binding run from rendering as an
+        # indistinguishable duplicate of the first: two absolutes for the same
+        # workload must be attributable to their runs or neither is checkable.
         lines.append(
             f"| {_stack_label(row)} | {model} | {kind} | {_width_label(row)} "
             f"| {_fmt(result.get('median'))} {result.get('metric', '')} "
-            f"| {_fmt(pct, '%')} | {resource} | {_fmt(result.get('spread_pct'), '%')} |"
+            f"| {_fmt(pct, '%')} | {resource} | {_fmt(result.get('spread_pct'), '%')} "
+            f"| `{row.get('run_id', '-')}` |"
         )
     lines.append("")
     lines.append("Utilisation is measured against the resource that actually binds each "
@@ -313,8 +322,11 @@ def render_comparisons(claims: list[Claim]) -> list[str]:
         base_median = (baseline.row.get("result") or {}).get("median")
         lines.append(f"### {_workload_label(baseline.row)}, group `{name}`")
         lines.append("")
+        # The unit travels with the ratio: a table where "2.6x" might be a
+        # throughput or a latency lets the reader pick the flattering reading.
+        base_metric = (baseline.row.get("result") or {}).get("metric") or "?"
         lines.append(f"| Stack | Model | Width | Metric "
-                     f"| Ratio vs {_stack_label(baseline.row)} | Note |")
+                     f"| Ratio vs {_stack_label(baseline.row)} ({base_metric}) | Note |")
         lines.append("|---|---|---|---|---|---|")
         for claim in members:
             result = claim.row.get("result") or {}
@@ -335,9 +347,13 @@ def render_comparisons(claims: list[Claim]) -> list[str]:
             else:
                 value = median / base_median
                 spread = (result.get("spread_pct") or 0.0) / 100.0
-                # A difference smaller than the run's own spread is not a
-                # difference; saying "1.02x" there would publish noise.
-                if abs(value - 1.0) <= spread and claim is not baseline:
+                base_spread = ((baseline.row.get("result") or {})
+                               .get("spread_pct") or 0.0) / 100.0
+                # A difference smaller than the pair's own noise is not a
+                # difference, and the baseline's spread hides a ratio as surely
+                # as the row's does - a tight row against a noisy baseline is
+                # still a ratio of noise.
+                if abs(value - 1.0) <= spread + base_spread and claim is not baseline:
                     notes.append("within the measurement's own spread, treat as no difference")
                 if not claim.publishable:
                     notes.append("ratio only: this row is not publishable as an absolute")
