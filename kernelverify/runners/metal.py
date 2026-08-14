@@ -375,13 +375,17 @@ class MetalRunner:
         return outcome
 
     # -- process plumbing --------------------------------------------------
-    def _spawn(self, probe: bool = False) -> subprocess.Popen:
+    def _spawn(self, probe: bool = False, stream: bool = False) -> subprocess.Popen:
         environment = dict(os.environ)
         existing = environment.get("PYTHONPATH", "")
         environment["PYTHONPATH"] = (
             f"{REPO_ROOT}{os.pathsep}{existing}" if existing else str(REPO_ROOT)
         )
-        command = [self.python, "-m", WORKER_MODULE] + (["--probe"] if probe else [])
+        command = [self.python, "-m", WORKER_MODULE]
+        if probe:
+            command.append("--probe")
+        if stream:
+            command.append("--stream")
         return subprocess.Popen(
             command,
             stdin=subprocess.PIPE,

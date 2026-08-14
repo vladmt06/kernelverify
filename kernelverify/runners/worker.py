@@ -72,6 +72,8 @@ def main(argv: list[str]) -> int:
     if "--probe" in argv:
         emit({"event": "done"})
         return 0
+    if "--stream" in argv:
+        return stream(device)
 
     try:
         request = json.loads(sys.stdin.read())
@@ -122,6 +124,61 @@ def main(argv: list[str]) -> int:
                                    label=raw_case.get("label", ""))
             emit({"event": "case", "spec": spec_index, "index": index,
                   "result": result.to_json()})
+
+    emit({"event": "done"})
+    return 0
+
+
+def stream(device) -> int:
+    """One spec, cases arriving one line at a time, paced by the parent.
+
+    This mode exists for interleaved A/B timing: two of these workers stay
+    live, each holding one compiled pipeline, and the parent alternates
+    dispatches between them so a power-state excursion lands on both arms.
+    The batch mode above cannot do that, because it drains its whole request
+    as fast as the GPU allows.
+
+    First line: {"spec": ..., "warmup": w, "repeats": r, "math_mode": m}
+    Then per case: {"index": i, "case": {...}} ... and {"end": true} to finish.
+    Events mirror the batch mode, with spec index 0.
+    """
+    from kernelverify.runners.device import CompileError
+
+    header = json.loads(sys.stdin.readline())
+    warmup = int(header.get("warmup", 1))
+    repeats = int(header.get("repeats", 5))
+    try:
+        spec = KernelSpec.from_json(header["spec"])
+    except (SpecError, KeyError, TypeError) as error:
+        return fatal(RunStatus.INVALID_SPEC, str(error))
+    try:
+        kernel = device.compile(spec, math_mode=header.get("math_mode", "safe"))
+    except CompileError as error:
+        return fatal(RunStatus.COMPILE_ERROR, str(error))
+    emit({"event": "compiled", "spec": 0,
+          "max_threads_per_threadgroup": kernel.max_threads,
+          "thread_execution_width": kernel.execution_width,
+          "compile_options": {"math_mode": kernel.math_mode}})
+
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        message = json.loads(line)
+        if message.get("end"):
+            break
+        raw_case = message.get("case", {})
+        index = int(message.get("index", 0))
+        try:
+            case = RunCase.from_json(raw_case)
+            result = kernel.run(case, warmup=warmup, repeats=repeats)
+        except SpecError as error:
+            result = RunResult(status=RunStatus.INVALID_SPEC, detail=str(error),
+                               label=raw_case.get("label", ""))
+        except Exception:  # a PyObjC or driver failure is the kernel's problem
+            result = RunResult(status=RunStatus.LAUNCH_ERROR,
+                               detail=traceback.format_exc(limit=3).strip(),
+                               label=raw_case.get("label", ""))
+        emit({"event": "case", "spec": 0, "index": index, "result": result.to_json()})
 
     emit({"event": "done"})
     return 0

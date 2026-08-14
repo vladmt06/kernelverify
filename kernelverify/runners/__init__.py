@@ -20,6 +20,7 @@ start:
     pip install pyobjc-framework-Metal
 """
 
+from kernelverify.runners.compare import CompareReport, compare
 from kernelverify.runners.metal import BatchResult, MetalRunner
 from kernelverify.runners.result import DeviceInfo, RunResult, RunStatus, Timing
 from kernelverify.runners.spec import (
@@ -37,6 +38,7 @@ __all__ = [
     "BatchResult",
     "Binding",
     "BindingKind",
+    "CompareReport",
     "DeviceInfo",
     "KernelSpec",
     "LaunchMode",
@@ -47,5 +49,6 @@ __all__ = [
     "RunStatus",
     "SpecError",
     "Timing",
+    "compare",
     "specialize",
 ]
