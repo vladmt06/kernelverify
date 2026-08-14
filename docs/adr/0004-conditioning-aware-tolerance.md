@@ -51,14 +51,38 @@ The verdict-cache fingerprint carries an oracle tag, so an oracle change can nev
 `attention[scores_dtype=float16]` (scores held in half precision) joins the catalogue as fault 45.
 Any future tolerance change that absolves it is a regression by definition; `tests/test_tolerance.py` additionally pins the motivating constant-rows case: the ill-conditioning is real, the ensemble floor covers the correct kernel and a held-out correct implementation, the canary stays caught, and the probe floor stays >8x too small to cover the case.
 
-## Decision 4: the repaired probe is the opaque-reference fallback only
+## Decision 4: the repaired probe FAILED its gates and does not ship
 
 Some production references will be opaque (binary, remote, no numpy port), where the ensemble floor cannot be computed.
-For that path the probe survives with four repairs: probe at fp32 epsilon in fp64 input space regardless of working dtype; account for working-dtype output rounding as a separate additive `eps_work * max|ref|` term; derandomised probe core plus random draws with the spread recorded; and a transfer factor T per structural family, the measured high quantile of ensemble_floor/probe_floor on re-implementable operators, validated leave-one-op-out.
+The repaired probe was the candidate for that path: probe at fp32 epsilon in fp64 input space regardless of working dtype; a separate additive `eps_work * max|ref|` output-rounding term; a derandomised probe core plus 8 random draws; and a transfer factor T per structural family, the measured max of ensemble_floor/probe_floor over family peers, validated leave-one-op-out:
 
     opaque tolerance = max(base_tol, K * T(family) * probe_floor + eps_work * max|ref|)
 
-Measured leave-one-op-out results: PENDING-V3.
+Measured leave-one-op-out, full battery: T = 0.7-1.2 (elementwise), 52-57 (row-reduction), 54-57 (bilinear).
+False positives: zero at every K, so the transfer is conservative enough.
+But the two-sided rule requires detection to survive, and it does not:
+
+| Defect | Measurement | Mechanism |
+|---|---|---|
+| 23 fp16 detection losses on leaky_relu | alpha=0.011 fault absolved, err up to 9.0e-3 vs tol 9.3e-3 | the scalar eps term grants the max-magnitude element's ulp tensor-wide, but leaky_relu's max-magnitude outputs are exact pass-throughs with zero rounding |
+| 7 fp16 detection losses on attention-family scale faults | err ~0.09-0.11 vs tol ~0.20-0.23 | T=54, earned on fp32 constant-rows conditioning, transfers to fp16 cases whose true gap is ~1x |
+| fp16-score canary collapses 34 -> 10 | all 24 losses caused by T * probe_floor | same over-transfer: the opaque rule absolves the precision fault the oracle must never absolve |
+| Vacuity in the tails | at K=1, tolerance exceeds half the output scale on 98/440 softmax and 72/360 matmul cases, near-zero modes worst | probe floors explode near softmax argmax ties (probe spread up to 10^287) and near-zero outputs inherit the absolute-base hole |
+
+Verdict, per the decision rule pre-registered in the plan: no family passes, so the probe path ships nowhere.
+An opaque reference gets an honest "requires a re-implementable reference for full verification", with the vacuity ceiling classifying the affected cases as no-evidence rather than pass.
+The repairs that would revive it, pre-registered for when an opaque reference is an actual product need: per-element floors instead of scalar max terms, per-dtype and conditioning-bucketed transfer factors instead of a family max, and tie-aware probing for argmax-adjacent rows.
+
+## The harness rerun under the shipped oracle
+
+Old rule (fixed tolerance, control-based no-evidence discard) vs new rule (ensemble floor, no discards), same battery:
+
+- Population: 44 -> 45 faults (the canary joins, detectable at 103/440 cases); the same 5 equivalents; 39 -> 40 viable.
+- Per-fault detectability: every attention-family fault gains exactly the formerly discarded constant-rows case (+1); every other count is identical.
+- Policy table (40 viable faults): boundary pairs + random holds 95.0% / 97.5% / 100.0% / 100.0% at B = 4/8/16/32, against 94.9% / 97.4% / 100.0% / 100.0% on the 39-fault population under the old rule; the 100.0% cells are exact (zero misses over 40 seeded runs), and the corpus-subset row stays 100% from B=4.
+- The only systematic small-budget survivors remain l2norm[eps=1e-06] and flash init-max-zero at B=4, and l2norm[eps=1e-06] at B=8, both pair-located and covered from B=16.
+
+The rerun also completed without a single control assertion, which is the integrated proof of gate (a): the shipped tolerance clears every correct implementation on all 4,100 cases with the no-evidence rule deleted.
 
 ## Consequences
 
