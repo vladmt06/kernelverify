@@ -1,0 +1,57 @@
+{
+  "machine": {
+    "power_source": "AC",
+    "low_power_mode": "0",
+    "hw_model": "Mac15,7",
+    "cpu": "Apple M3 Pro",
+    "cpu_cores": 12,
+    "cpu_performance_cores": 6,
+    "cpu_efficiency_cores": 6,
+    "memory_bytes": 38654705664,
+    "os": "Darwin 26.5.2"
+  },
+  "metal_device": "Apple M3 Pro",
+  "probe": {
+    "device": "Apple M3 Pro",
+    "max_threadgroup": 1024,
+    "buffer_bytes": 536870912,
+    "reps": 12,
+    "bandwidth_gbs": {
+      "copy_private": 130.11,
+      "read_private": 133.24,
+      "copy_shared": 128.79,
+      "read_shared": 135.4
+    },
+    "gflops": {
+      "fma_f32": 6244.9,
+      "fma_f16": 6300.5,
+      "fma_f16x4": 6324.6
+    },
+    "cpu": {
+      "triad_gbs_p_cores": 120.3,
+      "triad_gbs_all_cores": 121.3,
+      "accelerate_sgemm_gflops": 1531.5,
+      "p_cores": 6,
+      "all_cores": 12
+    }
+  },
+  "measured": {
+    "peak_bandwidth_gbs": 135.4,
+    "peak_fp32_gflops": 6244.9,
+    "peak_fp16_gflops": 6324.6,
+    "ridge_fp32_flop_per_byte": 46.1,
+    "ridge_fp16_flop_per_byte": 46.7,
+    "cpu_peak_bandwidth_gbs": 121.3,
+    "cpu_peak_gflops": 1531.5,
+    "cpu_ridge_flop_per_byte": 12.6
+  },
+  "spec": {
+    "label": "Apple M3 Pro, 18-core GPU",
+    "bandwidth_gbs": 153.6,
+    "bandwidth_how": "LPDDR5-6400 on a 192-bit bus: 6400 MT/s * 24 B = 153.6 GB/s",
+    "fp32_gflops": 6441.0,
+    "fp32_how": "18 cores * 128 ALUs * 2 flop/FMA * 1.398 GHz = 6441 GFLOP/s",
+    "measured_fraction_bandwidth": 0.882,
+    "measured_fraction_fp32": 0.97
+  }
+}
