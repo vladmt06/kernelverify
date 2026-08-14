@@ -71,11 +71,15 @@ def test_compare_reports_the_speedup_at_a_known_ratio():
 
 @requires_metal
 def test_a_round_the_reference_arm_cannot_back_is_rejected_and_fails_the_run():
-    """An honest pair of GPU samples never agrees to five decimal places, so a
-    limit of 1.00001x rejects every round; D6 requires that a rejected round
-    fails the comparison rather than being dropped in silence."""
+    """D6 requires that a rejected round fails the comparison rather than
+    being dropped in silence. Rejection must be constructed with certainty: a
+    spread is max/min >= 1.0 by definition, so a limit below 1.0 rejects every
+    round no matter what the timer returns. (The previous 1.00001x limit
+    assumed two GPU samples never agree to five decimal places - but a
+    quantized timer can return identical samples, which made this test flake
+    roughly one run in three.)"""
     report = compare(spin_spec(LIGHT_ITERS), spin_spec(LIGHT_ITERS), [spin_case()],
-                     rounds=2, warmup=1, repeats=3, spread_limit=1.00001)
+                     rounds=2, warmup=1, repeats=3, spread_limit=0.99)
     assert not report.ok
     assert report.rejected_rounds == 2
     assert "REJECTED" in report.summary()

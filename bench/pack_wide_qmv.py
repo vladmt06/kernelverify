@@ -3,7 +3,7 @@
 Order matters and is enforced: no timing is printed unless every case
 verifies through the crash-isolated runner against the shipped verdict,
 via kernelverify.pack.verify (the battery's own NATIVE_OPS reference and
-tolerance; today that is the r_contract anchor, ensemble floor, K = 3).
+tolerance; today that is the r_contract anchor, ensemble floor, K_QUANT).
 
 Timing discipline, from kv-runner-e9's measurement that GPU timings near
 200 us move by up to 4x with power state:
@@ -40,6 +40,7 @@ from kernelverify.pack.verify import (  # noqa: E402
     qmv_inputs,
     reference_and_tolerance,
 )
+from kernelverify.schemas.native_ops import K_QUANT  # noqa: E402
 from kernelverify.pack.wide_qmv import (  # noqa: E402
     SUPPORTED_BITS,
     build,
@@ -80,7 +81,7 @@ def artefact_for(d_out: int, d_in: int, seed: int, bits: int = 4):
 # verification
 # --------------------------------------------------------------------------
 def verify(runner: MetalRunner) -> bool:
-    print("correctness (runner-isolated, Phase 0 contract, K = 3):")
+    print(f"correctness (runner-isolated, Phase 0 contract, K = {K_QUANT:g}):")
     ok = True
     template = kernel_spec()
     for (d_out, d_in), bits in [(s, b) for s in SHAPES for b in SUPPORTED_BITS]:
