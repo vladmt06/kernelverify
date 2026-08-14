@@ -4,3 +4,5 @@ __pycache__/
 .pytest_cache/
 .hypothesis/
 bench/.cache/
+bench/.baselines/detached.log
+bench/.baselines/detached_status.json
