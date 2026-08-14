@@ -25,12 +25,25 @@ Two register facts decided the shape, both measured (`R` and `M` sweeps at
 - accumulators go as M*R, and R = 8 spills at every M (60 to 267 us against
   MLX's 35 to 86), so R tops out at 4 and drops to 2 at M = 11.
 
-Layout matches MLX's own affine artefact so both read identical bytes: `w_q`
-is uint32 with eight 4-bit codes packed low to high, and a 64-wide group spans
-exactly eight words, so a word never straddles a group boundary. Per word the
-fused form `s * dot(x, q) + b * sum(x)` accumulates in fp32, which keeps every
-intermediate at or above fp32 as the contract requires, then the 32 lanes
-sharing a row simd-reduce.
+Bit widths 2, 3 and 4 share one kernel. MLX's `ceil(M / 5)` tiling does not
+depend on the width, so the same extra pass is paid at every width and the
+same fix applies. The only new problem below 4 bits is that codes stop
+aligning to 32-bit words, which is why lanes stride fixed 8-CODE blocks rather
+than words: the activation access pattern is then identical at every width and
+only the weight-side bit arithmetic changes. An 8-code block spans at most 24
+bits, so it touches at most two words, read as a pair and shifted once.
+
+Striding whole words instead was measured and is much worse below 4 bits -
+0.52x at 2 bits and 0.26x at 3 bits against MLX at M=8 - because the
+per-lane activation stride then grows with the width and the loads stop
+coalescing.
+
+Layout matches MLX's own affine artefact so both read identical bytes: a
+contiguous little-endian code stream, lowest element in the lowest bits, and a
+64-wide group is always a whole number of blocks so scale and bias are
+constant within one. Per block the fused form `s * dot(x, q) + b * sum(x)`
+accumulates in fp32, which keeps every intermediate at or above fp32 as the
+contract requires, then the 32 lanes sharing a row simd-reduce.
 
 Requires d_in divisible by 64. d_out need not divide R; out-of-range rows read
 clamped and are not stored.
@@ -48,9 +61,11 @@ WIDE_QMV_MSL = """
     uint lane   = thread_position_in_grid.x;
     uint d_in   = x_shape[1];
     uint d_out  = scales_shape[0];
-    uint words  = d_in / 8;
-    uint n_groups = d_in / 64;
+    uint row_words = d_in * BITS / 32;
+    uint n_groups  = d_in / 64;
+    uint blocks    = d_in / 8;                 // 8 codes per block, any width
     const device half4* x4 = (const device half4*)x;
+    const uint mask = (1u << BITS) - 1u;
 
     float acc[M][R];
     #pragma clang loop unroll(full)
@@ -59,30 +74,40 @@ WIDE_QMV_MSL = """
         for (int r = 0; r < R; ++r) { acc[m][r] = 0.0f; }
     }
 
-    for (uint wi = lane; wi < words; wi += 32) {
-        uint g = wi / 8;
+    for (uint bi = lane; bi < blocks; bi += 32) {
+        uint bit0 = bi * 8 * BITS;
+        uint w0   = bit0 >> 5;
+        uint sh0  = bit0 & 31;
+        uint g    = bi / 8;
 
-        // The R rows' weights are loaded and unpacked once per word, then
-        // reused by every one of the M vectors. This is the single pass.
+        // The R rows' codes are unpacked once per block, then reused by every
+        // one of the M vectors. This is the single pass.
         float4 qlo[R], qhi[R];
         float s[R], b[R];
         #pragma clang loop unroll(full)
         for (int r = 0; r < R; ++r) {
             uint row = metal::min(sg_row * R + r, d_out - 1);
-            uint word = w_q[row * words + wi];
             s[r] = (float)scales[row * n_groups + g];
             b[r] = (float)biases[row * n_groups + g];
-            qlo[r] = float4(float(word & 0xF), float((word >> 4) & 0xF),
-                            float((word >> 8) & 0xF), float((word >> 12) & 0xF));
-            qhi[r] = float4(float((word >> 16) & 0xF), float((word >> 20) & 0xF),
-                            float((word >> 24) & 0xF), float((word >> 28) & 0xF));
+            uint base = row * row_words + w0;
+            uint lo_w = w_q[base];
+            uint hi_w = (sh0 + 8 * BITS > 32) ? w_q[base + 1] : 0u;
+            ulong v = (((ulong)lo_w) | (((ulong)hi_w) << 32)) >> sh0;
+            float e[8];
+            #pragma clang loop unroll(full)
+            for (int j = 0; j < 8; ++j) {
+                e[j] = (float)((uint)(v >> (j * BITS)) & mask);
+            }
+            qlo[r] = float4(e[0], e[1], e[2], e[3]);
+            qhi[r] = float4(e[4], e[5], e[6], e[7]);
         }
 
         // One input vector is live at a time: hoisting all M spills at M = 11.
         #pragma clang loop unroll(full)
         for (int m = 0; m < M; ++m) {
-            float4 lo = float4(x4[m * (d_in / 4) + wi * 2]);
-            float4 hi = float4(x4[m * (d_in / 4) + wi * 2 + 1]);
+            uint xi = m * (d_in / 4) + bi * 2;
+            float4 lo = float4(x4[xi]);
+            float4 hi = float4(x4[xi + 1]);
             float xs = metal::dot(lo, float4(1.0f)) + metal::dot(hi, float4(1.0f));
             #pragma clang loop unroll(full)
             for (int r = 0; r < R; ++r) {
@@ -108,17 +133,52 @@ OUTPUT_NAMES = ["out"]
 KERNEL_NAME = "kv_wide_qmv"
 
 
+def should_dispatch(m: int) -> bool:
+    """Whether the pack should use this kernel at all, or defer to MLX.
+
+    Below MIN_PROFITABLE_M, MLX already reads the weights once and this kernel
+    has nothing to win back. At 4 bits that is a wash (1.00-1.02x), but at
+    2 bits it is a measured loss (0.81-0.89x at M = 1 and 2), so the pack
+    routes to MLX there rather than shipping a regression.
+    """
+    return m >= MIN_PROFITABLE_M
+
+
 def rows_per_simdgroup(m: int) -> int:
     """R, from the measured register wall: 4 up to M = 10, then 2."""
     return 4 if m <= 10 else 2
 
 
-def pack_nibbles(q: np.ndarray) -> np.ndarray:
-    """Eight 4-bit codes per uint32, low to high: the MLX affine packing."""
+SUPPORTED_BITS = (2, 3, 4)
+
+# Below this tile width MLX already reads the weights once and is at or ahead
+# of this kernel, decisively so at 2 bits (0.83x at M = 1), so the pack should
+# route there instead of shipping a loss.
+MIN_PROFITABLE_M = 5
+
+
+def pack_codes(q: np.ndarray, bits: int) -> np.ndarray:
+    """Contiguous little-endian code stream: the MLX affine packing, any width.
+
+    Verified bit-identical to mx.quantize at 2, 3, 4, 5, 6 and 8 bits by
+    bench/mlx_probes/probe_affine_contract.py.
+    """
     rows, cols = q.shape
-    q8 = q.reshape(rows, cols // 8, 8).astype(np.uint32)
-    shifts = (np.arange(8, dtype=np.uint32) * 4)[None, None, :]
-    return np.bitwise_or.reduce(q8 << shifts, axis=2).astype(np.uint32)
+    total_bits = cols * bits
+    stream = np.zeros((rows, total_bits // 64 + 2), dtype=np.uint64)
+    for i in range(cols):
+        word, offset = divmod(i * bits, 64)
+        val = q[:, i].astype(np.uint64)
+        stream[:, word] |= val << np.uint64(offset)
+        if offset + bits > 64:
+            stream[:, word + 1] |= val >> np.uint64(64 - offset)
+    byts = stream.view(np.uint8)[:, : total_bits // 8]
+    return np.ascontiguousarray(byts).view(np.uint32)
+
+
+def pack_nibbles(q: np.ndarray) -> np.ndarray:
+    """The 4-bit case, kept as a name because callers use it."""
+    return pack_codes(q, 4)
 
 
 def launch_config(d_out: int, m: int) -> tuple:
