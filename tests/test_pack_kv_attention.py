@@ -5,9 +5,10 @@ gate; no test states its own tolerance. The clause-shaped tests pin the two
 seams a fused decode kernel most plausibly gets wrong: the step's own new
 entry (the off-by-one class) and the batch/head indexing over a shared cache.
 
-Skipped wholesale when MLX/Metal is unavailable, matching test_metal_runner.py,
-and when the kv_attention contract has not landed on this branch yet (it
-freezes on branch kv-attention-op, commit 8ec7eca; merge queued).
+Skipped wholesale when MLX/Metal is unavailable, matching test_metal_runner.py.
+The kv_attention contract itself is no longer guarded: it landed on main in
+e2bb208, so its absence is a broken install, not a branch that has not caught
+up, and these tests should fail loudly rather than disappear.
 """
 
 import numpy as np
@@ -18,10 +19,6 @@ if not mx.metal.is_available():
     pytest.skip("Metal unavailable", allow_module_level=True)
 
 from kernelverify.schemas.native_ops import NATIVE_OPS
-
-if "kv_attention" not in NATIVE_OPS:
-    pytest.skip("kv_attention contract not merged yet (branch kv-attention-op)",
-                allow_module_level=True)
 
 from kernelverify.pack.kv_attention import (
     SUPPORTED_BITS,
