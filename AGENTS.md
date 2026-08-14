@@ -64,7 +64,8 @@ cd /Users/vlad/kernelverify
 
 ## Mistakes already encountered
 
-- The shell cwd resets between tool calls, so `cd /Users/vlad/kernelverify` in every command.
+- The shell cwd resets between tool calls, so `cd` into YOUR OWN checkout in every command.
+  For the main session that is `/Users/vlad/kernelverify`; a worktree lane uses its own path (`/Users/vlad/kv-*`), never main's.
 - The verdict cache stores plain tuples, not dataclasses, because pickled dataclasses remember their defining module and break when loaded from an import context.
 - Structured input modes can make a correct fp32 kernel exceed the published tolerance against the fp64 reference.
   That is ill-conditioning, not a port bug; the shipped oracle handles it with the ensemble-floor tolerance (ADR 0004), and a control failing that tolerance on any mode now always means the oracle or the port is broken.
@@ -80,3 +81,6 @@ cd /Users/vlad/kernelverify
   ADR 0004's cache tag carried K but not the ensemble membership, so changing who computes the floor would have silently reused stale verdicts.
 - Any claim about how much of the admissible class an ensemble covers must be scored against an independently seeded draw of that class.
   Scoring a sample against itself makes every ensemble look complete.
+- An A/B timing comparison in separate passes measures the clock, not the kernels: GPU power-state drift moved one fixed shape's time from 131.7 to 93.1 us minutes apart, reversing a comparison's sign completely at every point.
+  Batching dispatches past 5 ms did NOT prevent this; interleaving the arms within each round is independently load-bearing.
+  Interleave every comparative measurement, always, even when each dispatch is ms-scale.

@@ -17,11 +17,13 @@ Re-run on an idle machine before any published claim, per the eng-review amendme
 | Stack | Decode | Prefill | Bandwidth utilisation |
 |---|---|---|---|
 | llama.cpp master (a94d563), Q4_K_M | 47.3 tok/s | 650 tok/s (pp512) | ~92% of achieved roofline |
-| mlx-lm 0.32, MLX-affine 4bit | 38.3 tok/s | (short-prompt, not comparable) | ~69% of achieved roofline |
+| mlx 0.32.0 + mlx-lm 0.31.3, MLX-affine 4bit | 38.3 tok/s | (short-prompt, not comparable) | ~69% of achieved roofline |
 
 Reading: on this Pro-tier chip, llama.cpp's dense Q4 decode is within ~8% of the physics.
 The 2023-pinned community table (70-74% for Pro tier) is badly stale - the stale-baseline risk from the eng review materialised.
-MLX trails llama.cpp by 23% end-to-end on the same model class, yet its quantized_matmul matches ours and is not the bottleneck (see spike), so MLX's gap lives outside this op class (attention path, graph dispatch).
+RETRACTED (2026-08-14): "MLX trails llama.cpp by 23%" was a harness artifact, not a stack property.
+The 38.3 came from the mlx_lm.generate path, which pays sampling and detokenisation per token, while llama-bench times the decode loop only; measured on matched harnesses (mlx_lm.benchmark), MLX decode came out AHEAD on tok/s on the same machine.
+The honest cross-stack comparison needs each stack's own byte model (MLX 4-bit group-64 streams ~9% fewer bytes per token than Q4_K_M), under which both stacks land close on bandwidth utilisation; binding numbers await the baseline harness run.
 
 ## T5 spike: fused dequant-GEMV vs mx.quantized_matmul (bench/spike_dequant_gemv.py)
 
