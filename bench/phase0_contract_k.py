@@ -82,13 +82,21 @@ def make_w(d_out: int, d_in: int, draw: str, rng) -> np.ndarray:
 
 
 def unpack_mlx_q(w_q: np.ndarray, d_in: int, bits: int) -> np.ndarray:
-    """Unpack mx.quantize's uint32 words: value i sits at bits (bits*i)."""
-    per_word = 32 // bits
-    mask = (1 << bits) - 1
+    """Unpack mx.quantize's words as one contiguous little-endian bit stream.
+
+    Value i occupies bits [bits*i, bits*(i+1)) of the row's stream, lowest
+    element in the lowest bits, and the stream is then reinterpreted as
+    uint32. That is not the same as packing 32//bits values per word: the two
+    agree only when bits divides 32, so the previous shift-and-mask reading
+    was correct at bits 2, 4 and 8 and wrong at 3, 5 and 6, where a value
+    straddles a word boundary. Verified against mx.quantize at 2, 3, 4 and 8.
+    """
     words = np.asarray(w_q, dtype=np.uint32)
-    shifts = np.arange(per_word, dtype=np.uint32) * bits
-    vals = (words[:, :, None] >> shifts[None, None, :]) & mask
-    return vals.reshape(words.shape[0], -1)[:, :d_in].astype(np.int32)
+    stream = np.unpackbits(words.view(np.uint8).reshape(words.shape[0], -1),
+                           axis=1, bitorder="little")
+    index = np.arange(d_in)[:, None] * bits + np.arange(bits)[None, :]
+    weights = (1 << np.arange(bits)).astype(np.int32)
+    return (stream[:, index] * weights).sum(axis=2).astype(np.int32)
 
 
 def verify_canonical_against_mlx(w: np.ndarray) -> tuple[QuantArtefact, bool]:
