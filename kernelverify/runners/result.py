@@ -1,9 +1,13 @@
-"""What a run returns: a status, an output tensor, and a timing sample.
+"""What a run returns: a status, the output tensors, and a timing sample.
+
+`outputs` holds one array per output binding, in binding order, matching the
+case's `output_shapes` entry for entry.
 
 The status exists because a generated kernel fails in ways a numerical oracle
 cannot interpret. A kernel that does not compile, that Metal refuses to
-dispatch, or that never returns has no output tensor at all, and reporting that
-as "the outputs differ" would confuse a broken harness with a caught fault. So
+dispatch, or that never returns has no output tensors at all, and reporting
+that as "the outputs differ" would confuse a broken harness with a caught
+fault. So
 execution failures are named here, and the verifier decides what each one
 means. The mapping that keeps the verdict honest:
 
@@ -54,10 +58,8 @@ a particular number should not be believed at all.
 from __future__ import annotations
 
 import statistics
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-
-import numpy as np
 
 from kernelverify.runners.spec import array_from_json, array_to_json
 
@@ -118,7 +120,7 @@ class Timing:
 @dataclass
 class RunResult:
     status: RunStatus = RunStatus.OK
-    output: np.ndarray | None = None
+    outputs: list = field(default_factory=list)
     timing: Timing | None = None
     detail: str = ""
     label: str = ""
@@ -130,7 +132,7 @@ class RunResult:
     def to_json(self) -> dict:
         return {
             "status": self.status.value,
-            "output": array_to_json(self.output) if self.output is not None else None,
+            "outputs": [array_to_json(o) for o in self.outputs],
             "timing": self.timing.to_json() if self.timing is not None else None,
             "detail": self.detail,
             "label": self.label,
@@ -140,7 +142,7 @@ class RunResult:
     def from_json(raw: dict) -> "RunResult":
         return RunResult(
             status=RunStatus(raw["status"]),
-            output=array_from_json(raw["output"]) if raw.get("output") else None,
+            outputs=[array_from_json(o) for o in raw.get("outputs", ())],
             timing=Timing.from_json(raw["timing"]) if raw.get("timing") else None,
             detail=raw.get("detail", ""),
             label=raw.get("label", ""),

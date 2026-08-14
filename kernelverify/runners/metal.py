@@ -2,27 +2,34 @@
 
 `MetalRunner` is the parent half of the runner. It never imports Metal and
 never executes generated code; it starts `kernelverify.runners.worker` in its
-own session, hands it one compiled-once batch of cases, and reads results off a
-pipe as they arrive.
+own session, hands it one candidate's work, and reads results off a pipe as
+they arrive.
+
+The unit of isolation is the candidate, and a candidate may arrive as several
+specs: the same template specialized to different shapes or dtypes. All specs
+of one candidate share one worker session through `run_candidate`, paying one
+process start and one compile per spec. A fresh process per *candidate* is
+deliberate and not amortised away, because reusing a worker across candidates
+would let one candidate's damage reach the next one's verdict.
 
 Three properties are what a verifier needs from this and a plain function call
 cannot give:
 
-- A hang is survivable. Nothing in Python can interrupt a dispatched Metal
-  command buffer, so the only reliable stop is killing the process group. The
-  parent holds a rolling deadline: every result received resets it, and when it
-  expires the group dies and the case in flight is reported as a timeout.
-- Partial progress survives. Results stream one line at a time, so a batch that
-  hangs on case 7 still returns 6 measured cases and names the seventh.
-- A crash is a status, not an exception. A kernel that writes outside its
-  buffers takes the worker down with it; the parent sees the pipe close early
-  and reports the unfinished cases as crashes, with the worker's stderr
-  attached.
-
-Cost: one process start and one Metal compile per batch, which is why the API
-takes a list of cases rather than one. A fresh process per *candidate* is
-deliberate and not amortised away, because reusing a worker across candidates
-would let one candidate's damage reach the next one's verdict.
+- A hang costs one case, not the batch. Nothing in Python can interrupt a
+  dispatched Metal command buffer, so the only reliable stop is killing the
+  process group. The parent holds a rolling deadline: every result received
+  resets it, and when it expires the group dies, the case in flight is
+  recorded as a timeout, and a fresh worker resumes from the case after it.
+  The same resume happens when a kernel takes the worker down mid-batch: the
+  case in flight is recorded as a crash and the rest still run. A death during
+  *compilation* is attributed to the spec being compiled - all its cases fail,
+  its sibling specs still run - because no case was in flight to blame.
+- Partial progress survives. Results stream one line at a time, so nothing a
+  later case does can lose an earlier case's measurement.
+- Nothing here raises about the candidate. Compile failures, launch failures,
+  hangs and crashes all come back as statuses; the only resume that does not
+  happen is when the worker dies before opening the Metal device, which means
+  the environment, not the candidate, is broken.
 """
 
 from __future__ import annotations
@@ -76,13 +83,27 @@ class BatchResult:
 
 
 @dataclass
+class _Session:
+    """What one worker process reported before it finished, died, or hung."""
+
+    saw_device: bool = False
+    device: DeviceInfo | None = None
+    fatal: RunResult | None = None
+    done: bool = False
+    timed_out: bool = False
+    spawn_error: str = ""
+    #: runnable positions whose pipeline was built in this session
+    compiled: set = field(default_factory=set)
+    stderr: str = ""
+
+
+@dataclass
 class MetalRunner:
     """Runs candidate kernels on the GPU through an isolated worker process.
 
     `case_timeout` is the wall budget for one case including its warmup and
     timed repeats. `startup_timeout` covers the slower events: the worker's
-    Python and Metal start-up, and the first case, which pays for compiling the
-    shader.
+    Python and Metal start-up, and each shader compilation.
     """
 
     case_timeout: float = DEFAULT_CASE_TIMEOUT
@@ -124,17 +145,121 @@ class MetalRunner:
     def run(self, spec: KernelSpec, cases, *, warmup: int | None = None,
             repeats: int | None = None) -> BatchResult:
         """Compile `spec` once, dispatch it over `cases`, return one result each."""
-        cases = list(cases)
-        invalid = _validate(spec, cases)
-        if invalid is not None:
-            return BatchResult(results=[
-                RunResult(status=RunStatus.INVALID_SPEC, detail=invalid, label=c.label)
-                for c in cases
-            ])
+        return self.run_candidate([(spec, cases)], warmup=warmup, repeats=repeats)[0]
 
+    def run_candidate(self, spec_batches, *, warmup: int | None = None,
+                      repeats: int | None = None) -> list[BatchResult]:
+        """Run one candidate's specs, in order, through one worker session.
+
+        `spec_batches` is a sequence of `(spec, cases)` pairs; the return is
+        one `BatchResult` per pair, in the same order. One worker process
+        serves the whole candidate unless a hang or crash forces a resume,
+        and a resume never costs more than the case or compile it blames.
+        """
+        batches = [(spec, list(cases)) for spec, cases in spec_batches]
+        slots: list[list[RunResult | None]] = [[None] * len(cases) for _, cases in batches]
+
+        # An unusable pair is caught before paying for a process, and it fails
+        # alone: the sibling specs of the candidate still run.
+        runnable: list[int] = []
+        for position, (spec, cases) in enumerate(batches):
+            problem = _validate(spec, cases)
+            if problem is not None:
+                slots[position] = [
+                    RunResult(status=RunStatus.INVALID_SPEC, detail=problem, label=c.label)
+                    for c in cases
+                ]
+            elif cases:
+                runnable.append(position)
+
+        device: DeviceInfo | None = None
+        stderr_parts: list[str] = []
+        spec_cursor, case_cursor = 0, 0
+        while spec_cursor < len(runnable):
+            session = self._session(batches, runnable, spec_cursor, case_cursor,
+                                    slots, warmup, repeats)
+            if session.device is not None and device is None:
+                device = session.device
+            if session.stderr:
+                stderr_parts.append(session.stderr)
+
+            if session.done:
+                break
+            if session.spawn_error:
+                _fill_remaining(batches, runnable, spec_cursor, case_cursor, slots,
+                                RunStatus.CRASH,
+                                f"the worker would not start: {session.spawn_error}")
+                break
+            if session.fatal is not None:
+                _fill_remaining(batches, runnable, spec_cursor, case_cursor, slots,
+                                session.fatal.status, session.fatal.detail)
+                break
+            if not session.saw_device:
+                # The environment, not the candidate, is broken; resuming
+                # would spawn one doomed worker per case.
+                status, detail = _no_device_verdict(session)
+                _fill_remaining(batches, runnable, spec_cursor, case_cursor, slots,
+                                status, detail)
+                break
+
+            hole = _first_hole(batches, runnable, slots, spec_cursor, case_cursor)
+            if hole is None:
+                break  # everything reported; only the done line was lost
+            hole_spec, hole_case = hole
+            position = runnable[hole_spec]
+            cases = batches[position][1]
+            if hole_spec in session.compiled:
+                # A case was in flight; it alone takes the blame.
+                status, detail = _case_verdict(session)
+                slots[position][hole_case] = RunResult(
+                    status=status, detail=detail, label=cases[hole_case].label)
+                spec_cursor, case_cursor = hole_spec, hole_case + 1
+            else:
+                # The death happened compiling this spec; no case can be blamed,
+                # so the spec fails whole and its siblings resume.
+                status, detail = _compile_verdict(session)
+                for index in range(hole_case, len(cases)):
+                    if slots[position][index] is None:
+                        slots[position][index] = RunResult(
+                            status=status, detail=detail, label=cases[index].label)
+                spec_cursor, case_cursor = hole_spec + 1, 0
+            if (spec_cursor < len(runnable)
+                    and case_cursor >= len(batches[runnable[spec_cursor]][1])):
+                spec_cursor, case_cursor = spec_cursor + 1, 0
+
+        stderr = "\n".join(part for part in stderr_parts if part).strip()
+        batch_results = []
+        for position, (spec, cases) in enumerate(batches):
+            results = slots[position]
+            for index, result in enumerate(results):
+                if result is None:
+                    results[index] = RunResult(
+                        status=RunStatus.CRASH,
+                        detail="the worker never reported this case",
+                        label=cases[index].label)
+            batch_results.append(BatchResult(results=results, device=device, stderr=stderr))
+        return batch_results
+
+    # -- one worker session ------------------------------------------------
+    def _session(self, batches, runnable, spec_cursor, case_cursor, slots,
+                 warmup, repeats) -> _Session:
+        """Spawn one worker for the remaining work and stream its events into
+        `slots`. Returns what the parent needs to decide whether and where to
+        resume."""
+        outcome = _Session()
+
+        request_specs = []
+        mapping: list[tuple[int, int]] = []  # request index -> (runnable pos, case offset)
+        for rpos in range(spec_cursor, len(runnable)):
+            spec, cases = batches[runnable[rpos]]
+            offset = case_cursor if rpos == spec_cursor else 0
+            request_specs.append({
+                "spec": spec.to_json(),
+                "cases": [c.to_json() for c in cases[offset:]],
+            })
+            mapping.append((rpos, offset))
         request = {
-            "spec": spec.to_json(),
-            "cases": [c.to_json() for c in cases],
+            "specs": request_specs,
             "warmup": self.warmup if warmup is None else warmup,
             "repeats": self.repeats if repeats is None else repeats,
         }
@@ -142,10 +267,9 @@ class MetalRunner:
         try:
             process = self._spawn()
         except OSError as error:  # no interpreter, no fork: nothing ran
-            return BatchResult(results=[
-                RunResult(status=RunStatus.CRASH, detail=f"the worker would not start: {error}",
-                          label=c.label) for c in cases
-            ])
+            outcome.spawn_error = str(error)
+            return outcome
+
         errors: list[str] = []
         reader = _stream(process.stderr, errors)
         writer = threading.Thread(
@@ -153,16 +277,13 @@ class MetalRunner:
         )
         writer.start()
 
-        results: list[RunResult | None] = [None] * len(cases)
-        device = None
-        fatal: RunResult | None = None
-        timed_out = False
         events = _EventStream(process.stdout)
-        # Starting Python, opening the device and compiling the shader all take
+        # Starting Python, opening the device and compiling a shader all take
         # an unpredictable but legitimate amount of time, so they run on the
-        # start-up budget. The worker announces the end of compilation, and
-        # from there every case is pure dispatch on the per-case budget, which
-        # is what makes the first case as quick to time out as the last.
+        # start-up budget. The worker announces the end of each compilation,
+        # and from there every case is pure dispatch on the per-case budget;
+        # the budget returns to start-up size whenever the next event is
+        # another spec's compilation.
         budget = self.startup_timeout
         try:
             while True:
@@ -171,41 +292,70 @@ class MetalRunner:
                     break
                 kind = event.get("event")
                 if kind == "device":
-                    device = DeviceInfo.from_json(event["device"])
+                    outcome.saw_device = True
+                    outcome.device = DeviceInfo.from_json(event["device"])
                 elif kind == "compiled":
-                    budget = self.case_timeout
+                    entry = _mapped(event, mapping)
+                    if entry is not None:
+                        request_index, (rpos, offset) = entry
+                        outcome.compiled.add(rpos)
+                        remaining = len(batches[runnable[rpos]][1]) - offset
+                        budget = self.case_timeout if remaining else self.startup_timeout
+                elif kind == "spec_failed":
+                    # The spec cannot run at all - a compile error or an
+                    # unreadable spec - which fails every case it owns and is
+                    # final: there is nothing to resume for this spec.
+                    entry = _mapped(event, mapping)
+                    try:
+                        result = RunResult.from_json(event["result"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    if entry is not None:
+                        request_index, (rpos, offset) = entry
+                        outcome.compiled.discard(rpos)
+                        position = runnable[rpos]
+                        cases = batches[position][1]
+                        for index in range(offset, len(cases)):
+                            slots[position][index] = RunResult(
+                                status=result.status, detail=result.detail,
+                                label=cases[index].label)
+                    budget = self.startup_timeout  # the next spec compiles now
                 elif kind == "case":
                     # A malformed or out-of-range event is treated as if the
                     # case never reported, which is what it means: the stream
-                    # is damaged, so the case below fills in as a crash rather
-                    # than this loop raising inside a battery run.
+                    # is damaged, so the case fills in as a crash at the end
+                    # rather than this loop raising inside a battery run.
+                    entry = _mapped(event, mapping)
                     try:
                         index = int(event["index"])
                         result = RunResult.from_json(event["result"])
                     except (KeyError, TypeError, ValueError):
                         continue
-                    if 0 <= index < len(cases):
-                        result.label = result.label or cases[index].label
-                        results[index] = result
                     budget = self.case_timeout
+                    if entry is not None:
+                        request_index, (rpos, offset) = entry
+                        position = runnable[rpos]
+                        cases = batches[position][1]
+                        absolute = offset + index
+                        if 0 <= absolute < len(cases):
+                            result.label = result.label or cases[absolute].label
+                            slots[position][absolute] = result
+                        if absolute == len(cases) - 1 and request_index < len(mapping) - 1:
+                            budget = self.startup_timeout  # the next spec compiles now
                 elif kind == "fatal":
-                    fatal = RunResult.from_json(event["result"])
+                    outcome.fatal = RunResult.from_json(event["result"])
                     break
                 elif kind == "done":
+                    outcome.done = True
                     break
         except TimeoutError:
-            timed_out = True
+            outcome.timed_out = True
         finally:
             self._terminate(process)
             reader.join(timeout=1.0)
 
-        stderr = "".join(errors).strip()
-        filler = _unfinished(fatal, timed_out, stderr)
-        for index, result in enumerate(results):
-            if result is None:
-                results[index] = RunResult(status=filler.status, detail=filler.detail,
-                                           label=cases[index].label)
-        return BatchResult(results=results, device=device, stderr=stderr)
+        outcome.stderr = "".join(errors).strip()
+        return outcome
 
     # -- process plumbing --------------------------------------------------
     def _spawn(self, probe: bool = False) -> subprocess.Popen:
@@ -254,17 +404,68 @@ def _validate(spec: KernelSpec, cases: list[RunCase]) -> str | None:
     return None
 
 
-def _unfinished(fatal: RunResult | None, timed_out: bool, stderr: str) -> RunResult:
-    """What a case that never reported should be called."""
-    if fatal is not None:
-        return fatal
-    if timed_out:
-        return RunResult(status=RunStatus.TIMEOUT,
-                         detail="the worker was killed after exceeding its time budget")
-    tail = stderr.strip().splitlines()[-4:]
-    return RunResult(status=RunStatus.CRASH,
-                     detail="the worker exited before reporting this case"
-                            + (f": {' / '.join(tail)}" if tail else ""))
+def _mapped(event: dict, mapping: list) -> tuple[int, tuple[int, int]] | None:
+    """The event's request spec index resolved through the resume mapping."""
+    try:
+        request_index = int(event["spec"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not 0 <= request_index < len(mapping):
+        return None
+    return request_index, mapping[request_index]
+
+
+def _first_hole(batches, runnable, slots, spec_cursor, case_cursor):
+    """The earliest case at or after the cursor that never reported."""
+    for rpos in range(spec_cursor, len(runnable)):
+        position = runnable[rpos]
+        start = case_cursor if rpos == spec_cursor else 0
+        for index in range(start, len(batches[position][1])):
+            if slots[position][index] is None:
+                return rpos, index
+    return None
+
+
+def _fill_remaining(batches, runnable, spec_cursor, case_cursor, slots,
+                    status: RunStatus, detail: str) -> None:
+    for rpos in range(spec_cursor, len(runnable)):
+        position = runnable[rpos]
+        cases = batches[position][1]
+        start = case_cursor if rpos == spec_cursor else 0
+        for index in range(start, len(cases)):
+            if slots[position][index] is None:
+                slots[position][index] = RunResult(status=status, detail=detail,
+                                                   label=cases[index].label)
+
+
+def _tail(stderr: str) -> str:
+    lines = stderr.strip().splitlines()[-4:]
+    return f": {' / '.join(lines)}" if lines else ""
+
+
+def _case_verdict(session: _Session) -> tuple[RunStatus, str]:
+    """What the case in flight should be called when its worker stopped."""
+    if session.timed_out:
+        return (RunStatus.TIMEOUT,
+                "the worker was killed after exceeding its time budget")
+    return (RunStatus.CRASH,
+            "the worker exited before reporting this case" + _tail(session.stderr))
+
+
+def _compile_verdict(session: _Session) -> tuple[RunStatus, str]:
+    if session.timed_out:
+        return (RunStatus.TIMEOUT,
+                "the worker was killed while compiling this kernel")
+    return (RunStatus.CRASH,
+            "the worker died while compiling this kernel" + _tail(session.stderr))
+
+
+def _no_device_verdict(session: _Session) -> tuple[RunStatus, str]:
+    if session.timed_out:
+        return (RunStatus.TIMEOUT,
+                "the worker produced nothing before its start-up budget expired")
+    return (RunStatus.CRASH,
+            "the worker exited before opening the Metal device" + _tail(session.stderr))
 
 
 def _write_request(process: subprocess.Popen, request: dict) -> None:

@@ -7,8 +7,12 @@ tensor bound there is `q`, not what shape it has, and not how many threads the
 author intended. So a candidate is a `KernelSpec`, which pairs the source with
 
 - `bindings`, an ordered list saying what goes at each buffer index: an input
-  tensor by name, the single output, or a scalar argument by name, and
+  tensor by name, an output, or a scalar argument by name, and
 - `launch`, the grid and threadgroup the kernel was written for.
+
+A kernel may bind any number of outputs. The k-th output binding, in binding
+order, is described by the k-th entry of the case's `output_shapes`, and comes
+back as the k-th entry of the result's `outputs`.
 
 Shapes and scalar values are deliberately *not* in the spec. One spec runs
 against a whole battery of cases, and every case has different dimensions, so
@@ -212,12 +216,8 @@ class KernelSpec:
             raise SpecError("kernel source is empty")
         if not self.entry_point:
             raise SpecError("kernel needs an entry point name")
-        outputs = [b for b in self.bindings if b.kind is BindingKind.OUTPUT]
-        if len(outputs) != 1:
-            raise SpecError(
-                f"exactly one output binding is required, got {len(outputs)}; "
-                "the battery compares a single output tensor per case"
-            )
+        if not any(b.kind is BindingKind.OUTPUT for b in self.bindings):
+            raise SpecError("a kernel with no output binding has nothing to verify")
         seen: dict[int, Binding] = {}
         for position, binding in enumerate(self.bindings):
             index = position if binding.index is None else binding.index
@@ -236,6 +236,9 @@ class KernelSpec:
 
     def scalar_names(self) -> tuple[str, ...]:
         return tuple(b.name for b in self.bindings if b.kind is BindingKind.SCALAR)
+
+    def output_count(self) -> int:
+        return sum(1 for b in self.bindings if b.kind is BindingKind.OUTPUT)
 
     def to_json(self) -> dict:
         return {
@@ -262,30 +265,42 @@ class KernelSpec:
 # ---------------------------------------------------------------------------
 @dataclass(eq=False)
 class RunCase:
-    """One battery case: input tensors, scalar parameters, expected output shape.
+    """One battery case: input tensors, scalar parameters, expected output shapes.
 
     `params` supplies both the scalar bindings the kernel declares and the
     extents the launch refers to, so a case usually passes its schema
-    dimensions straight in.
+    dimensions straight in. `output_shapes` is one `(shape, dtype)` pair per
+    output binding, in binding order.
     """
 
     inputs: dict
     params: dict = field(default_factory=dict)
-    output_shape: tuple = ()
-    output_dtype: str = "float32"
+    output_shapes: tuple = ()
     label: str = ""
 
     def __post_init__(self):
-        self.output_shape = tuple(int(d) for d in self.output_shape)
-        if self.output_dtype not in TENSOR_DTYPES:
-            raise SpecError(
-                f"output dtype {self.output_dtype!r} is not one of {sorted(TENSOR_DTYPES)}"
-            )
-        if any(d < 1 for d in self.output_shape):
-            raise SpecError(f"output shape {self.output_shape} has a non-positive dimension")
+        normalized = []
+        for entry in self.output_shapes:
+            shape, dtype = entry
+            shape = tuple(int(d) for d in shape)
+            if dtype not in TENSOR_DTYPES:
+                raise SpecError(
+                    f"output dtype {dtype!r} is not one of {sorted(TENSOR_DTYPES)}"
+                )
+            if any(d < 1 for d in shape):
+                raise SpecError(f"output shape {shape} has a non-positive dimension")
+            normalized.append((shape, dtype))
+        self.output_shapes = tuple(normalized)
+        if not self.output_shapes:
+            raise SpecError("a case needs at least one output shape")
 
     def validate_against(self, spec: KernelSpec) -> None:
         """Every name the spec binds must exist here, before any process starts."""
+        if spec.output_count() != len(self.output_shapes):
+            raise SpecError(
+                f"kernel binds {spec.output_count()} outputs, "
+                f"the case describes {len(self.output_shapes)}"
+            )
         for name in spec.input_names():
             if name not in self.inputs:
                 raise SpecError(f"kernel binds input {name!r}, which the case does not supply")
@@ -306,8 +321,8 @@ class RunCase:
         return {
             "inputs": {name: array_to_json(a) for name, a in self.inputs.items()},
             "params": self.params,
-            "output_shape": list(self.output_shape),
-            "output_dtype": self.output_dtype,
+            "output_shapes": [{"shape": list(shape), "dtype": dtype}
+                              for shape, dtype in self.output_shapes],
             "label": self.label,
         }
 
@@ -316,8 +331,8 @@ class RunCase:
         return RunCase(
             inputs={name: array_from_json(a) for name, a in raw["inputs"].items()},
             params=raw.get("params", {}),
-            output_shape=tuple(raw.get("output_shape", ())),
-            output_dtype=raw.get("output_dtype", "float32"),
+            output_shapes=tuple((tuple(o["shape"]), o["dtype"])
+                                for o in raw.get("output_shapes", ())),
             label=raw.get("label", ""),
         )
 

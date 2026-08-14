@@ -120,10 +120,15 @@ class CompiledKernel:
 
     # -- buffer plumbing ---------------------------------------------------
     def _make_buffers(self, case: RunCase):
-        """One Metal buffer per tensor binding, plus the packed scalar bytes."""
+        """One Metal buffer per tensor binding, plus the packed scalar bytes.
+
+        Returns the buffers by Metal index, the scalar payloads, and the
+        buffer indices of the output bindings in binding order, which is the
+        order `case.output_shapes` describes and `RunResult.outputs` returns.
+        """
         buffers: dict[int, object] = {}
         scalars: dict[int, bytes] = {}
-        output_index = -1
+        output_indices: list[int] = []
         for position, binding in enumerate(self.spec.bindings):
             index = self.spec.buffer_index(position)
             if binding.kind is BindingKind.SCALAR:
@@ -135,15 +140,14 @@ class CompiledKernel:
                     array.tobytes(), array.nbytes, _STORAGE_SHARED
                 )
             else:
-                nbytes = int(np.prod(case.output_shape)) * np.dtype(
-                    TENSOR_DTYPES[case.output_dtype]
-                ).itemsize
+                shape, dtype = case.output_shapes[len(output_indices)]
+                nbytes = int(np.prod(shape)) * np.dtype(TENSOR_DTYPES[dtype]).itemsize
                 buffer = self.device.device.newBufferWithLength_options_(nbytes, _STORAGE_SHARED)
-                output_index = index
+                output_indices.append(index)
             if buffer is None:
                 raise LaunchError(f"the device would not allocate the buffer at index {index}")
             buffers[index] = buffer
-        return buffers, scalars, output_index
+        return buffers, scalars, output_indices
 
     def _check_launch(self, grid, group, memory) -> None:
         threads = group[0] * group[1] * group[2]
@@ -198,10 +202,12 @@ class CompiledKernel:
 
         try:
             self._check_launch(grid, group, memory)
-            buffers, scalars, output_index = self._make_buffers(case)
-            _zero(buffers[output_index], case)
+            buffers, scalars, output_indices = self._make_buffers(case)
+            for slot, index in enumerate(output_indices):
+                _zero(buffers[index], *case.output_shapes[slot])
             self._dispatch(buffers, scalars, grid, group, memory)
-            output = _read_back(buffers[output_index], case)
+            outputs = [_read_back(buffers[index], *case.output_shapes[slot])
+                       for slot, index in enumerate(output_indices)]
             gpu_samples, wall_samples = [], []
             for repeat in range(warmup + repeats):
                 gpu, wall = self._dispatch(buffers, scalars, grid, group, memory)
@@ -213,7 +219,7 @@ class CompiledKernel:
 
         return RunResult(
             status=RunStatus.OK,
-            output=output,
+            outputs=outputs,
             timing=Timing(tuple(gpu_samples), tuple(wall_samples), warmup),
             label=case.label,
         )
@@ -230,22 +236,22 @@ def _pack_scalar(binding: Binding, value) -> bytes:
     return packed
 
 
-def _output_view(buffer, case: RunCase) -> np.ndarray:
+def _output_view(buffer, shape: tuple, dtype: str) -> np.ndarray:
     """A numpy view straight onto the shared buffer; unified memory, no copy."""
-    dtype = np.dtype(TENSOR_DTYPES[case.output_dtype])
-    nbytes = int(np.prod(case.output_shape)) * dtype.itemsize
+    numpy_dtype = np.dtype(TENSOR_DTYPES[dtype])
+    nbytes = int(np.prod(shape)) * numpy_dtype.itemsize
     memory = buffer.contents().as_buffer(nbytes)
-    return np.frombuffer(memory, dtype=dtype).reshape(case.output_shape)
+    return np.frombuffer(memory, dtype=numpy_dtype).reshape(shape)
 
 
-def _zero(buffer, case: RunCase) -> None:
-    """Clear the output before the correctness dispatch.
+def _zero(buffer, shape: tuple, dtype: str) -> None:
+    """Clear an output before the correctness dispatch.
 
     A kernel that only writes part of its output would otherwise be judged on
     whatever the allocator handed back, which is not a property of the kernel.
     """
-    _output_view(buffer, case)[...] = 0
+    _output_view(buffer, shape, dtype)[...] = 0
 
 
-def _read_back(buffer, case: RunCase) -> np.ndarray:
-    return _output_view(buffer, case).copy()
+def _read_back(buffer, shape: tuple, dtype: str) -> np.ndarray:
+    return _output_view(buffer, shape, dtype).copy()

@@ -24,6 +24,7 @@ from kernelverify.runners import (
     RunCase,
     RunStatus,
     SpecError,
+    specialize,
 )
 from kernelverify.runners.spec import resolve_extent
 
@@ -57,6 +58,34 @@ kernel void scale(device const half* x [[buffer(0)]], device half* out [[buffer(
                   constant uint& n [[buffer(2)]], constant float& k [[buffer(3)]],
                   uint gid [[thread_position_in_grid]]) {
     if (gid < n) out[gid] = (half)((float)x[gid] * k);
+}
+"""
+
+# The same scaling kernel as a template: $T is the element type, and it names
+# the entry point too, the way a generator emits one source per dtype family.
+SCALE_TEMPLATE_SRC = """
+#include <metal_stdlib>
+using namespace metal;
+kernel void scale_$T(device const $T* x [[buffer(0)]], device $T* out [[buffer(1)]],
+                     constant uint& n [[buffer(2)]], constant float& k [[buffer(3)]],
+                     uint gid [[thread_position_in_grid]]) {
+    if (gid < n) out[gid] = ($T)((float)x[gid] * k);
+}
+"""
+
+# Two outputs of different dtypes from one dispatch: the transport must hand
+# each output binding its own shape and dtype and return them in binding order.
+TWIN_SRC = """
+#include <metal_stdlib>
+using namespace metal;
+kernel void twin(device const float* x [[buffer(0)]],
+                 device float* doubled [[buffer(1)]],
+                 device half*  halved  [[buffer(2)]],
+                 constant uint& n      [[buffer(3)]],
+                 uint gid [[thread_position_in_grid]]) {
+    if (gid >= n) return;
+    doubled[gid] = x[gid] + x[gid];
+    halved[gid]  = (half)(0.5f * x[gid]);
 }
 """
 
@@ -151,16 +180,30 @@ def elementwise_spec(source: str, entry: str, extra=()) -> KernelSpec:
 def vector_case(n: int, label: str = "", dtype: str = "float32") -> RunCase:
     data = (RNG.random(n, dtype=np.float32) * 20.0 - 10.0).astype(dtype)
     return RunCase(inputs={"input": data}, params={"n": n},
-                   output_shape=(n,), output_dtype=dtype, label=label or f"n={n}")
+                   output_shapes=[((n,), dtype)], label=label or f"n={n}")
 
 
 # ---------------------------------------------------------------------------
 # The contract, checked without a GPU
 # ---------------------------------------------------------------------------
-def test_a_spec_needs_exactly_one_output():
-    with pytest.raises(SpecError, match="exactly one output"):
+def test_a_spec_needs_an_output_but_may_have_several():
+    with pytest.raises(SpecError, match="no output binding"):
         KernelSpec(source=GELU_SRC, entry_point="gelu",
                    bindings=(Binding(BindingKind.INPUT, "input"),), launch=LaunchSpec())
+    two = KernelSpec(source=TWIN_SRC, entry_point="twin",
+                     bindings=(Binding(BindingKind.INPUT, "input"),
+                               Binding(BindingKind.OUTPUT), Binding(BindingKind.OUTPUT),
+                               Binding(BindingKind.SCALAR, "n", "uint32")),
+                     launch=LaunchSpec(grid=("n", 1, 1), threadgroup=(128, 1, 1)))
+    assert two.output_count() == 2
+
+
+def test_a_case_must_describe_every_output_the_kernel_binds():
+    spec = elementwise_spec(GELU_SRC, "gelu")  # one output
+    case = RunCase(inputs={"input": np.zeros(4, np.float32)}, params={"n": 4},
+                   output_shapes=[((4,), "float32"), ((4,), "float32")])
+    with pytest.raises(SpecError, match="binds 1 outputs"):
+        case.validate_against(spec)
 
 
 def test_two_bindings_cannot_share_a_buffer_index():
@@ -182,7 +225,8 @@ def test_extents_are_literals_parameters_or_products():
 
 def test_a_case_missing_a_bound_name_says_which_one():
     spec = elementwise_spec(GELU_SRC, "gelu")
-    case = RunCase(inputs={"input": np.zeros(4, np.float32)}, params={}, output_shape=(4,))
+    case = RunCase(inputs={"input": np.zeros(4, np.float32)}, params={},
+                   output_shapes=[((4,), "float32")])
     with pytest.raises(SpecError, match="scalar 'n'"):
         case.validate_against(spec)
 
@@ -190,7 +234,8 @@ def test_a_case_missing_a_bound_name_says_which_one():
 def test_an_invalid_spec_is_caught_before_a_worker_is_started():
     """The interpreter path is nonsense, so a spawn would come back as a crash."""
     runner = MetalRunner(python="/definitely/not/an/interpreter")
-    case = RunCase(inputs={"input": np.zeros(4, np.float32)}, params={}, output_shape=(4,))
+    case = RunCase(inputs={"input": np.zeros(4, np.float32)}, params={},
+                   output_shapes=[((4,), "float32")])
     result = runner.run(elementwise_spec(GELU_SRC, "gelu"), [case]).results[0]
     assert result.status is RunStatus.INVALID_SPEC
 
@@ -206,6 +251,34 @@ def test_a_json_round_trip_preserves_the_spec():
     assert KernelSpec.from_json(spec.to_json()) == spec
 
 
+def test_a_json_round_trip_preserves_a_multi_output_case():
+    case = RunCase(inputs={"input": RNG.random(8, dtype=np.float32)}, params={"n": 8},
+                   output_shapes=[((8,), "float32"), ((2, 4), "float16")], label="twin")
+    back = RunCase.from_json(case.to_json())
+    assert back.output_shapes == case.output_shapes
+    assert back.params == case.params and back.label == case.label
+    np.testing.assert_array_equal(back.inputs["input"], case.inputs["input"])
+
+
+def test_specialize_fills_the_placeholders_and_flags_both_mistakes():
+    template = KernelSpec(
+        source=SCALE_TEMPLATE_SRC, entry_point="scale_$T", name="scale-$T",
+        bindings=(Binding(BindingKind.INPUT, "input"), Binding(BindingKind.OUTPUT),
+                  Binding(BindingKind.SCALAR, "n", "uint32"),
+                  Binding(BindingKind.SCALAR, "k", "float32")),
+        launch=LaunchSpec(grid=("n", 1, 1), threadgroup=(128, 1, 1)),
+    )
+    spec = specialize(template, {"T": "half"})
+    assert spec.entry_point == "scale_half"
+    assert spec.name == "scale-half"
+    assert "device const half* x" in spec.source
+    assert spec.bindings == template.bindings and spec.launch == template.launch
+    with pytest.raises(SpecError, match="do not supply"):
+        specialize(template, {})
+    with pytest.raises(SpecError, match="appear nowhere"):
+        specialize(template, {"T": "half", "TILE": 8})
+
+
 # ---------------------------------------------------------------------------
 # Numerics on the device
 # ---------------------------------------------------------------------------
@@ -218,7 +291,7 @@ def test_an_elementwise_kernel_matches_numpy():
     for case, result in zip(cases, batch):
         x = case.inputs["input"].astype(np.float64)
         want = 0.5 * x * (1.0 + np.tanh(0.7978845608028654 * (x + 0.044715 * x ** 3)))
-        np.testing.assert_allclose(result.output.astype(np.float64), want, atol=1e-6)
+        np.testing.assert_allclose(result.outputs[0].astype(np.float64), want, atol=1e-6)
 
 
 @requires_metal
@@ -229,10 +302,31 @@ def test_half_precision_tensors_round_trip():
     case.params["k"] = 2.5
     result = RUNNER.run_one(spec, case)
     assert result.ok, result.detail
-    assert result.output.dtype == np.float16
+    assert result.outputs[0].dtype == np.float16
     np.testing.assert_array_equal(
-        result.output, (case.inputs["input"].astype(np.float32) * 2.5).astype(np.float16)
+        result.outputs[0], (case.inputs["input"].astype(np.float32) * 2.5).astype(np.float16)
     )
+
+
+@requires_metal
+def test_two_outputs_come_back_in_binding_order_with_their_own_dtypes():
+    spec = KernelSpec(
+        source=TWIN_SRC, entry_point="twin",
+        bindings=(Binding(BindingKind.INPUT, "input"),
+                  Binding(BindingKind.OUTPUT), Binding(BindingKind.OUTPUT),
+                  Binding(BindingKind.SCALAR, "n", "uint32")),
+        launch=LaunchSpec(grid=("n", 1, 1), threadgroup=(128, 1, 1)),
+    )
+    n = 513
+    x = RNG.random(n, dtype=np.float32) * 20.0 - 10.0
+    case = RunCase(inputs={"input": x}, params={"n": n},
+                   output_shapes=[((n,), "float32"), ((n,), "float16")])
+    result = RUNNER.run_one(spec, case)
+    assert result.ok, result.detail
+    doubled, halved = result.outputs
+    assert doubled.dtype == np.float32 and halved.dtype == np.float16
+    np.testing.assert_array_equal(doubled, x + x)
+    np.testing.assert_array_equal(halved, (0.5 * x).astype(np.float16))
 
 
 @requires_metal
@@ -249,11 +343,11 @@ def test_a_row_reduction_uses_threadgroup_memory_and_threadgroup_dispatch():
         x = (RNG.random((batch_size, rows, cols), dtype=np.float32) * 20 - 10).astype(np.float32)
         case = RunCase(inputs={"input": x},
                        params={"B": batch_size, "S": rows, "n_cols": cols, "scratch": lanes * 4},
-                       output_shape=x.shape, label=f"{batch_size}x{rows}x{cols}")
+                       output_shapes=[(x.shape, "float32")], label=f"{batch_size}x{rows}x{cols}")
         result = RUNNER.run_one(spec, case)
         assert result.ok, result.detail
         exponent = np.exp(x.astype(np.float64) - x.astype(np.float64).max(-1, keepdims=True))
-        np.testing.assert_allclose(result.output.astype(np.float64),
+        np.testing.assert_allclose(result.outputs[0].astype(np.float64),
                                    exponent / exponent.sum(-1, keepdims=True), atol=1e-6)
 
 
@@ -271,19 +365,19 @@ def test_a_two_dimensional_grid_dispatches_over_both_axes():
         b = RNG.standard_normal((k, n), dtype=np.float32)
         result = RUNNER.run_one(spec, RunCase(inputs={"a": a, "b": b},
                                               params={"M": m, "K": k, "N": n},
-                                              output_shape=(m, n)))
+                                              output_shapes=[((m, n), "float32")]))
         assert result.ok, result.detail
-        np.testing.assert_allclose(result.output.astype(np.float64),
+        np.testing.assert_allclose(result.outputs[0].astype(np.float64),
                                    a.astype(np.float64) @ b.astype(np.float64), atol=1e-4)
 
 
 @requires_metal
-def test_the_output_buffer_starts_zeroed():
+def test_the_output_buffers_start_zeroed():
     """A kernel that writes half its output must be judged on that, not on
     whatever the allocator last left in the buffer."""
     result = RUNNER.run_one(elementwise_spec(HALF_WRITTEN_SRC, "evens"), vector_case(512))
     assert result.ok, result.detail
-    assert np.count_nonzero(result.output[1::2]) == 0
+    assert np.count_nonzero(result.outputs[0][1::2]) == 0
 
 
 @requires_metal
@@ -291,8 +385,52 @@ def test_a_batch_returns_one_result_per_case_in_order():
     cases = [vector_case(n, label=f"case-{n}") for n in (7, 64, 4096, 3)]
     batch = RUNNER.run(elementwise_spec(GELU_SRC, "gelu"), cases)
     assert [r.label for r in batch] == [c.label for c in cases]
-    assert [r.output.shape for r in batch] == [c.output_shape for c in cases]
+    assert [r.outputs[0].shape for r in batch] == [c.output_shapes[0][0] for c in cases]
     assert batch.device.name == DEVICE.name
+
+
+# ---------------------------------------------------------------------------
+# One candidate, several specializations, one worker session
+# ---------------------------------------------------------------------------
+@requires_metal
+def test_the_specializations_of_one_candidate_share_one_worker_session():
+    template = KernelSpec(
+        source=SCALE_TEMPLATE_SRC, entry_point="scale_$T", name="scale-$T",
+        bindings=(Binding(BindingKind.INPUT, "input"), Binding(BindingKind.OUTPUT),
+                  Binding(BindingKind.SCALAR, "n", "uint32"),
+                  Binding(BindingKind.SCALAR, "k", "float32")),
+        launch=LaunchSpec(grid=("n", 1, 1), threadgroup=(128, 1, 1)),
+    )
+    batches = []
+    for msl_type, dtype in (("float", "float32"), ("half", "float16")):
+        case = vector_case(512, dtype=dtype, label=msl_type)
+        case.params["k"] = 3.0
+        batches.append((specialize(template, {"T": msl_type}), [case]))
+
+    runner = MetalRunner()
+    spawned = []
+    original = runner._spawn
+    runner._spawn = lambda probe=False: (spawned.append(1), original(probe=probe))[1]
+    results = runner.run_candidate(batches)
+
+    assert len(spawned) == 1, "one candidate must cost one worker process"
+    for (spec, cases), batch in zip(batches, results):
+        assert batch.all_ok, [r.detail for r in batch if not r.ok]
+        shape, dtype = cases[0].output_shapes[0]
+        want = (cases[0].inputs["input"].astype(np.float32) * 3.0).astype(dtype)
+        np.testing.assert_array_equal(batch.results[0].outputs[0], want)
+
+
+@requires_metal
+def test_a_spec_that_fails_to_compile_does_not_sink_its_siblings():
+    broken = GELU_SRC.replace("float v = x[gid];", "float v = ;")
+    bad, good = RUNNER.run_candidate([
+        (elementwise_spec(broken, "gelu"), [vector_case(16)]),
+        (elementwise_spec(GELU_SRC, "gelu"), [vector_case(16)]),
+    ])
+    assert bad.results[0].status is RunStatus.COMPILE_ERROR
+    assert "error" in bad.results[0].detail
+    assert good.all_ok, [r.detail for r in good if not r.ok]
 
 
 # ---------------------------------------------------------------------------
@@ -368,19 +506,33 @@ def test_a_worker_that_dies_becomes_a_crash_status():
 
 
 @requires_metal
-def test_a_hung_kernel_is_killed_and_the_cases_before_it_survive():
+def test_a_hung_kernel_is_killed_and_the_batch_resumes():
+    """A hang costs the case that hung, never the rest of the candidate.
+
+    The hung case is killed at the case budget and recorded as a timeout, a
+    fresh worker resumes from the case after it, and the candidate's next
+    spec still runs. [Ported from the retired runner, which pioneered the
+    resume; its version asserted a follow-up batch, this one asserts the
+    resumed cases inside the same candidate.]
+    """
     spec = elementwise_spec(SPIN_SRC, "spin",
                             extra=(Binding(BindingKind.SCALAR, "iters", "uint32"),))
     cases = []
-    for iters, label in ((1, "fast"), (SLOW_ITERS, "hangs"), (1, "never reached")):
+    for iters, label in ((1, "fast"), (SLOW_ITERS, "hangs"), (1, "after the hang")):
         case = vector_case(64, label=label)
         case.params["iters"] = iters
         cases.append(case)
 
     runner = MetalRunner(case_timeout=0.25, startup_timeout=10.0, warmup=0, repeats=1)
-    batch = runner.run(spec, cases)
-    assert [r.status for r in batch] == [RunStatus.OK, RunStatus.TIMEOUT, RunStatus.TIMEOUT]
-    assert batch.results[0].output is not None, "a measured case was lost to a later hang"
+    spin_batch, gelu_batch = runner.run_candidate([
+        (spec, cases),
+        (elementwise_spec(GELU_SRC, "gelu"), [vector_case(64, label="next spec")]),
+    ])
+    assert [r.status for r in spin_batch] == [
+        RunStatus.OK, RunStatus.TIMEOUT, RunStatus.OK]
+    assert spin_batch.results[0].outputs, "a measured case was lost to a later hang"
+    assert spin_batch.results[2].outputs, "the batch did not resume after the hang"
+    assert gelu_batch.all_ok, "the candidate's next spec was lost to the hang"
 
     # The GPU is still usable afterwards, which is the point of killing the
     # process group rather than waiting for the kernel to finish.
@@ -444,21 +596,22 @@ def test_a_metal_kernel_is_judged_by_the_shipped_oracle():
         case = RunCase(inputs=inputs,
                        params={"B": dims["B"], "S": dims["S"], "n_cols": dims["H"],
                                "scratch": lanes * 4},
-                       output_shape=inputs["input"].shape, label=f"{dims} {mode}")
+                       output_shapes=[(inputs["input"].shape, "float32")],
+                       label=f"{dims} {mode}")
 
         correct = RUNNER.run_one(softmax_spec("exp"), case)
         assert correct.ok, correct.detail
-        assert corpus_oracle_passes(correct.output, ref, tolerance), (
+        assert corpus_oracle_passes(correct.outputs[0], ref, tolerance), (
             f"the shipped tolerance false-positives on a correct Metal kernel at "
-            f"{case.label}: error {max_abs_error(correct.output, ref):.3e} "
+            f"{case.label}: error {max_abs_error(correct.outputs[0], ref):.3e} "
             f"against tolerance {tolerance:.3e}"
         )
 
         faulty = RUNNER.run_one(softmax_spec("exp2"), case)
         assert faulty.ok, faulty.detail
-        caught = not corpus_oracle_passes(faulty.output, ref, tolerance)
+        caught = not corpus_oracle_passes(faulty.outputs[0], ref, tolerance)
         assert caught is fault_expressible, (
             f"exp2 fault at {case.label}: expected "
             f"{'a detection' if fault_expressible else 'an escape'}, "
-            f"error {max_abs_error(faulty.output, ref):.3e} vs {tolerance:.3e}"
+            f"error {max_abs_error(faulty.outputs[0], ref):.3e} vs {tolerance:.3e}"
         )

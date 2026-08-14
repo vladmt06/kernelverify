@@ -31,6 +31,7 @@ from kernelverify.runners.spec import (
     RunCase,
     SpecError,
 )
+from kernelverify.runners.specialize import specialize
 
 __all__ = [
     "BatchResult",
@@ -46,4 +47,5 @@ __all__ = [
     "RunStatus",
     "SpecError",
     "Timing",
+    "specialize",
 ]
