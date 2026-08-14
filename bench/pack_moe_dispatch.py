@@ -97,7 +97,13 @@ def make_case(n_tokens, d_model, n_experts, d_ffn, seed, mode="normal"):
 # --------------------------------------------------------------------------
 def verify(runner: MetalRunner) -> bool:
     print("correctness (runner-isolated, shipped moe_dispatch contract):")
-    ok = True
+    # The contract's own routing, from the shipped reference's helper.
+    from kernelverify.reference.native_kernels import _topk_by_prob
+
+    # Every case is built up front so the runner sees two batched phases (one
+    # worker session each: routing grouped by E, then dispatch under its one
+    # shared spec) instead of one worker spawn per case.
+    metas = []
     for n_tokens, d_model, n_experts, d_ffn in VERIFY_SHAPES:
         for mode in ("normal", "constant_rows"):
             x, router, experts = make_case(n_tokens, d_model, n_experts, d_ffn,
@@ -105,47 +111,69 @@ def verify(runner: MetalRunner) -> bool:
             packed, scales, biases, arts = quantize_experts(experts)
             ref, tol = reference_and_tolerance(
                 "moe_dispatch", moe_inputs(x, router, arts))
+            metas.append({"mode": mode, "n_tokens": n_tokens, "d_model": d_model,
+                          "n_experts": n_experts, "d_ffn": d_ffn, "x": x,
+                          "router": router, "packed": packed, "scales": scales,
+                          "biases": biases, "ref": ref, "tol": tol})
 
-            route = runner.run_one(
-                specialize(routing_spec(), {"E": n_experts}),
-                RunCase(inputs={"x": x, "router": router},
-                        params={"d_in_arg": d_model, "n_tokens": n_tokens},
-                        output_shapes=[((n_tokens, 2), "uint32"),
-                                       ((n_tokens, 2), "float32")]))
-            if not route.ok:
-                print(f"    {mode:<14} n={n_tokens:<3} ROUTING RUNNER FAIL: "
-                      f"{route.status.value}: {route.detail}")
-                ok = False
-                continue
-            idx, gate = route.outputs
+    by_e: dict[int, list[int]] = {}
+    for i, m in enumerate(metas):
+        by_e.setdefault(m["n_experts"], []).append(i)
+    routing_batches = [
+        (specialize(routing_spec(), {"E": e}),
+         [RunCase(inputs={"x": metas[i]["x"], "router": metas[i]["router"]},
+                  params={"d_in_arg": metas[i]["d_model"],
+                          "n_tokens": metas[i]["n_tokens"]},
+                  output_shapes=[((metas[i]["n_tokens"], 2), "uint32"),
+                                 ((metas[i]["n_tokens"], 2), "float32")])
+          for i in order])
+        for e, order in by_e.items()]
+    for order, batch in zip(by_e.values(), runner.run_candidate(routing_batches)):
+        for i, route in zip(order, batch):
+            metas[i]["route"] = route
 
-            # The contract's own routing, from the shipped reference's helper.
-            from kernelverify.reference.native_kernels import _topk_by_prob
-            logits = x.astype(np.float32) @ router.astype(np.float32).T
-            probs = np.exp(logits - logits.max(-1, keepdims=True))
-            probs /= probs.sum(-1, keepdims=True)
-            want = _topk_by_prob(probs, 2, tie_high=False)
-            routing_exact = np.array_equal(idx.astype(int), want)
+    ok = True
+    dispatch_cases, dispatch_idx, spec_r = [], [], None
+    for i, m in enumerate(metas):
+        route = m["route"]
+        if not route.ok:
+            print(f"    {m['mode']:<14} n={m['n_tokens']:<3} ROUTING RUNNER FAIL: "
+                  f"{route.status.value}: {route.detail}")
+            ok = False
+            continue
+        idx, gate = route.outputs
+        logits = m["x"].astype(np.float32) @ m["router"].astype(np.float32).T
+        probs = np.exp(logits - logits.max(-1, keepdims=True))
+        probs /= probs.sum(-1, keepdims=True)
+        want = _topk_by_prob(probs, 2, tie_high=False)
+        m["routing_exact"] = np.array_equal(idx.astype(int), want)
 
-            grid, threadgroup, r = dispatch_launch(d_ffn, n_tokens)
-            result = runner.run_one(
-                specialize(dispatch_spec(), {"T": "half", "R": r}),
-                RunCase(inputs={"x": x, "idx": idx, "gate": gate, "w_q": packed,
-                                "scales": scales, "biases": biases},
-                        params={"d_in_arg": d_model, "d_out_arg": d_ffn,
-                                "row_blocks": grid[1], "n_tokens": n_tokens},
-                        output_shapes=[((n_tokens, d_ffn), "float16")]))
-            if not result.ok:
-                print(f"    {mode:<14} n={n_tokens:<3} DISPATCH RUNNER FAIL: "
-                      f"{result.status.value}: {result.detail}")
-                ok = False
-                continue
-            v = judge(result.outputs[0], ref, tol)
-            passed = v.ok and routing_exact
-            ok = ok and passed
-            print(f"    {mode:<14} n={n_tokens:<3} E={n_experts:<3} "
-                  f"routing exact {str(routing_exact):<5} err {v.err:9.3e} "
-                  f"tol {v.tol:9.3e}  {'pass' if passed else 'FAIL'}")
+        grid, threadgroup, spec_r = dispatch_launch(m["d_ffn"], m["n_tokens"])
+        dispatch_cases.append(RunCase(
+            inputs={"x": m["x"], "idx": idx, "gate": gate, "w_q": m["packed"],
+                    "scales": m["scales"], "biases": m["biases"]},
+            params={"d_in_arg": m["d_model"], "d_out_arg": m["d_ffn"],
+                    "row_blocks": grid[1], "n_tokens": m["n_tokens"]},
+            output_shapes=[((m["n_tokens"], m["d_ffn"]), "float16")]))
+        dispatch_idx.append(i)
+
+    if not dispatch_cases:
+        return ok
+    # R is the fixed rows-per-simdgroup, so one spec serves every case.
+    spec = specialize(dispatch_spec(), {"T": "half", "R": spec_r})
+    for i, result in zip(dispatch_idx, runner.run(spec, dispatch_cases)):
+        m = metas[i]
+        if not result.ok:
+            print(f"    {m['mode']:<14} n={m['n_tokens']:<3} DISPATCH RUNNER FAIL: "
+                  f"{result.status.value}: {result.detail}")
+            ok = False
+            continue
+        v = judge(result.outputs[0], m["ref"], m["tol"])
+        passed = v.ok and m["routing_exact"]
+        ok = ok and passed
+        print(f"    {m['mode']:<14} n={m['n_tokens']:<3} E={m['n_experts']:<3} "
+              f"routing exact {str(m['routing_exact']):<5} err {v.err:9.3e} "
+              f"tol {v.tol:9.3e}  {'pass' if passed else 'FAIL'}")
     return ok
 
 

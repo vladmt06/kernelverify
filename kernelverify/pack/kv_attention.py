@@ -43,6 +43,11 @@ to whole aligned words, so one reader covers every supported width.
 Bounds: T <= TCAP (the softmax buffer is threadgroup memory, sized at
 compile time), DH in {64, 128} (one or two 64-wide quantization groups, and
 32 lanes must cover DH with a whole number of dims each).
+In the raw door `t_cached` is a runtime binding and the kernel does not
+reject t > TCAP, which would overrun the compile-time-sized softmax buffer;
+respecting `should_dispatch` is part of a caller's validity obligation when
+feeding `kernel_spec()` directly, the same class as SUPPORTED_BITS and
+SUPPORTED_DH.
 """
 
 from __future__ import annotations
@@ -78,7 +83,7 @@ KV_ATTENTION_MSL = """
     uint z    = thread_position_in_grid.z;    // b * H + h
     uint H    = NUM_HEADS;
     uint h    = z % H;
-    uint Tc   = T_CACHED;                     // cached positions
+    uint Tc   = T_CACHED;                // cached positions
 
     threadgroup float qsh[DH];
     threadgroup float sc_arr[TCAP + 1];

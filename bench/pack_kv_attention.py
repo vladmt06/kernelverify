@@ -34,7 +34,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import mlx.core as mx  # noqa: E402
 
 from kernelverify.pack.kv_attention import (  # noqa: E402
-    TCAP,
     build,
     kernel_spec,
     launch_config,
@@ -129,9 +128,10 @@ def verify(runner: MetalRunner) -> bool:
     print("correctness (runner-isolated, shipped kv_attention contract):")
     ok = True
     template = kernel_spec()
-    # One spec per case (BITS and DH are compile-time constants in the raw
-    # door), all sharing one worker session as one candidate.
-    spec_batches, expected = [], []
+    # One spec per distinct (BITS, DH) - the raw door's compile-time
+    # constants - with cases grouped under it, all sharing one worker
+    # session as one candidate.
+    grouped: dict[tuple, tuple] = {}
     for b, h, t, dh in VERIFY_SHAPES:
         for bits in VERIFY_BITS:
             q, kc, vc, nk, nv = make_case(b, h, t, dh, seed=t + bits)
@@ -143,21 +143,27 @@ def verify(runner: MetalRunner) -> bool:
                 ok = False
             ref, tol = reference_and_tolerance(
                 "kv_attention", kv_inputs(q, kc, vc, nk, nv, bits))
-            spec = specialize(template, {"T": "half", "BITS": bits, "DH": dh})
-            spec_batches.append((spec, [RunCase(
+            if (bits, dh) not in grouped:
+                grouped[(bits, dh)] = (
+                    specialize(template, {"T": "half", "BITS": bits, "DH": dh}),
+                    [], [])
+            _, cases, exp = grouped[(bits, dh)]
+            cases.append(RunCase(
                 inputs={"q": q, "k_wq": k_wq, "k_scales": k_sc, "k_biases": k_bi,
                         "v_wq": v_wq, "v_scales": v_sc, "v_biases": v_bi,
                         "new_k": nk, "new_v": nv},
                 params={"b_rows": b, "n_heads": h, "t_cached": t},
                 output_shapes=[((b, h, dh), "float16")],
-                label=f"B={b} H={h} T={t} DH={dh} {bits}-bit")]))
+                label=f"B={b} H={h} T={t} DH={dh} {bits}-bit"))
             # The incumbent is judged by the same oracle, so the timing
             # compares two contract-passing implementations.
             incumbent = mlx_arm(mx.array(q), mx.array(nk), mx.array(nv),
                                 *theirs_q, bits)
             mx.eval(incumbent)
-            expected.append((b, h, t, dh, bits, ref, tol, np.array(incumbent)))
+            exp.append((b, h, t, dh, bits, ref, tol, np.array(incumbent)))
 
+    spec_batches = [(spec, cases) for spec, cases, _ in grouped.values()]
+    expected = [e for _, _, exp in grouped.values() for e in exp]
     results = [r for batch in runner.run_candidate(spec_batches) for r in batch]
     for result, (b, h, t, dh, bits, ref, tol, incumbent) in zip(results, expected):
         tag = f"B={b} H={h} T={t:<4} DH={dh:<4} {bits}-bit"
@@ -275,11 +281,6 @@ def bench(kernel) -> bool:
 
 
 def main() -> int:
-    if "kv_attention" not in __import__(
-            "kernelverify.schemas.native_ops", fromlist=["NATIVE_OPS"]).NATIVE_OPS:
-        print("kv_attention contract not on this branch yet "
-              "(freezes on kv-attention-op, merge queued); no gate possible")
-        return 2
     if not verify(MetalRunner()):
         print("\nVERDICT: kernel does not verify; no timing claim permitted")
         return 1
