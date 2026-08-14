@@ -128,7 +128,7 @@ Striding words makes the per-lane *activation* stride grow with the bit width, a
 Striding a fixed 8-code block instead keeps the activation access pattern identical at every width and lets only the weight-side arithmetic vary; an 8-code block spans at most 24 bits, so it touches at most two words, read as a pair and shifted once.
 Same arithmetic, 2.4x to 4.8x difference.
 
-### Verification at fp16 has a hole, and it is in this pack's own kernel
+### Verification at fp16 had a hole; the enforcement boundary follows accumulation topology
 
 The contract requires every intermediate at fp32 or wider.
 Take the shipped wide-tile matvec and change one thing, its accumulator from float to half, and it is out of contract by construction, the quantized analogue of ADR 0004's fp16-score canary.
@@ -146,9 +146,14 @@ It passes.
 Raising K does not fix it: three of the four escape a floor-only rule too, because at fp16 output the half-accumulation error is genuinely comparable to legitimate output rounding.
 This is ADR 0004's own pre-registered hole appearing at the typical operating point of the dtype the pack ships, not on a near-zero edge case.
 
-Stated here rather than omitted because the pack's central claim is verification.
+The hole was stated here rather than omitted because the pack's central claim is verification.
 A launch artifact that advertises verified kernels while knowing of an unenforced contract clause on its shipping dtype would be making the same kind of claim this project exists to criticise.
-The verifier lane has the measurement and the ruling is theirs; the current expectation is either a battery case that separates the fault or source-level accumulator attestation in the certificate.
+
+It is now resolved by the verifier lane's measurement (bench/probe_accum_separation.py, commit b3fc3b8), and the resolution is sharper than a single ruling: the enforcement boundary follows accumulation topology.
+A tree-reduced fp16 accumulator, the shape probed above, is separable on 0 of 280 fp16-activation battery cases, so no input policy can ever catch that class; for it, the certificate attests the accumulator-dtype clause structurally, from the kernel source.
+That attestation is trivial for kernels this pack authors, and the shipped kernels satisfy it by inspection: every accumulator is fp32.
+A sequential fp16 accumulator, the naive shape an LLM most plausibly generates, is caught numerically on 192 of 280 fp16 cases at up to 23x over tolerance, so the verifier does catch the class that ships by accident.
+Nothing changes for this pack's kernels, accumulators stay fp32 per the contract; what changed is that the certificate now names how each clause is checked instead of leaving fp16 enforcement open.
 
 ## 7. How these numbers were measured, and two ways they were wrong first
 

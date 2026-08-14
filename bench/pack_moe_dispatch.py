@@ -5,12 +5,12 @@ until every case verifies through the crash-isolated runner, samples are
 batched to at least MIN_SAMPLE_MS, arms are interleaved, and expert weights
 rotate over a working set larger than any cache.
 
-The oracle is the shipped one. `NATIVE_OPS["moe_dispatch"]` pins the Qwen3-class
-routing contract over DENSE experts, so a quantized kernel is judged against it
-by substituting the exact dequantized contract weights: once the artefact is
-fixed, a quantized expert IS a dense expert whose entries happen to be s*q + b.
-No bespoke oracle, and the routing half is judged by the same reference that
-judges the battery.
+The oracle is the shipped one, reached through kernelverify.pack.verify:
+`NATIVE_OPS["moe_dispatch"]` pins the Qwen3-class routing contract over DENSE
+experts, so a quantized kernel is judged against it by substituting the exact
+dequantized contract weights: once the artefact is fixed, a quantized expert
+IS a dense expert whose entries happen to be s*q + b. No bespoke oracle, and
+the routing half is judged by the same reference that judges the battery.
 
 Both arms are verified, not just ours, so the timing compares two
 contract-passing implementations rather than one that happens to be faster.
@@ -21,7 +21,6 @@ from __future__ import annotations
 import statistics
 import sys
 import time
-from collections import namedtuple
 from pathlib import Path
 
 import numpy as np
@@ -38,16 +37,19 @@ from kernelverify.pack.moe_dispatch import (  # noqa: E402
     routing_launch,
     routing_spec,
 )
+from kernelverify.pack.verify import (  # noqa: E402
+    judge,
+    moe_inputs,
+    reference_and_tolerance,
+)
 from kernelverify.pack.wide_qmv import pack_nibbles  # noqa: E402
 from kernelverify.runners.runner import DeviceCase, MetalRunner  # noqa: E402
-from kernelverify.schemas.native_ops import NATIVE_OPS  # noqa: E402
 from kernelverify.schemas.quant_contract import (  # noqa: E402
     QuantContract,
     canonical_quantize,
 )
 
 CONTRACT = QuantContract(bits=4, group_size=64)
-Case = namedtuple("Case", "dtype")
 
 # (n_tokens, d_model, n_experts, d_ffn)
 VERIFY_SHAPES = [(1, 512, 16, 256), (8, 512, 16, 256), (4, 256, 8, 128)]
@@ -64,18 +66,13 @@ MAX_CANARY_SPREAD = 1.5
 
 
 def quantize_experts(experts: np.ndarray):
-    """Packed artefact plus the exact dequantized weights the contract means."""
+    """Packed artefact for the kernel, plus the per-expert artefacts the
+    shared gate dequantizes into the contract's dense experts."""
     arts = [canonical_quantize(e, CONTRACT) for e in experts]
     packed = np.stack([pack_nibbles(a.q) for a in arts])
     scales = np.stack([a.scales for a in arts])
     biases = np.stack([a.biases for a in arts])
-    dequantized = np.stack([
-        a.scales.astype(np.float64).repeat(CONTRACT.group_size, axis=1)
-        * a.q.astype(np.float64)
-        + a.biases.astype(np.float64).repeat(CONTRACT.group_size, axis=1)
-        for a in arts
-    ])
-    return packed, scales, biases, dequantized
+    return packed, scales, biases, arts
 
 
 def make_case(n_tokens, d_model, n_experts, d_ffn, seed, mode="normal"):
@@ -100,16 +97,14 @@ def make_case(n_tokens, d_model, n_experts, d_ffn, seed, mode="normal"):
 # --------------------------------------------------------------------------
 def verify(runner: MetalRunner) -> bool:
     print("correctness (runner-isolated, shipped moe_dispatch contract):")
-    op = NATIVE_OPS["moe_dispatch"]
     ok = True
     for n_tokens, d_model, n_experts, d_ffn in VERIFY_SHAPES:
         for mode in ("normal", "constant_rows"):
             x, router, experts = make_case(n_tokens, d_model, n_experts, d_ffn,
                                            seed=n_tokens * 31 + len(mode), mode=mode)
-            packed, scales, biases, dequantized = quantize_experts(experts)
-            inputs = {"x": x, "router": router, "experts": dequantized}
-            ref = op.reference(inputs)
-            tol = op.tolerance(Case(dtype="float16"), inputs, ref)
+            packed, scales, biases, arts = quantize_experts(experts)
+            ref, tol = reference_and_tolerance(
+                "moe_dispatch", moe_inputs(x, router, arts))
 
             grid, threadgroup = routing_launch(n_tokens)
             route = runner.run(routing_spec(), [DeviceCase(
@@ -142,12 +137,12 @@ def verify(runner: MetalRunner) -> bool:
                 print(f"    {mode:<14} n={n_tokens:<3} DISPATCH RUNNER FAIL: {result.error}")
                 ok = False
                 continue
-            err = float(np.max(np.abs(result.outputs[0].astype(np.float64) - ref)))
-            passed = err <= tol and routing_exact
+            v = judge(result.outputs[0], ref, tol)
+            passed = v.ok and routing_exact
             ok = ok and passed
             print(f"    {mode:<14} n={n_tokens:<3} E={n_experts:<3} "
-                  f"routing exact {str(routing_exact):<5} err {err:9.3e} "
-                  f"tol {tol:9.3e}  {'pass' if passed else 'FAIL'}")
+                  f"routing exact {str(routing_exact):<5} err {v.err:9.3e} "
+                  f"tol {v.tol:9.3e}  {'pass' if passed else 'FAIL'}")
     return ok
 
 
