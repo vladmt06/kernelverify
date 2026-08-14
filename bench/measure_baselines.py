@@ -6,9 +6,10 @@ here, and every row carries what is needed to decide whether to believe it.
 
 Five rules are built in rather than remembered:
 
-  interleaved     specs are measured round-robin, not one spec to completion,
-                  because GPU timings drift together with power state and a
-                  sequential sweep turns that drift into a fake ranking.
+  interleaved     the arms of each workload cell alternate back to back, one
+                  cell at a time, because GPU timings drift with power state
+                  and two arms sampled minutes apart compare the clock, not
+                  the stacks. A sampling group IS one A/B session.
   timing floor    a sample under a millisecond is reporting the power manager,
                   so it is recorded and marked non-binding (bench/machine_state.py).
   idle gate       load, power source, low power mode and thermal state are
@@ -55,12 +56,15 @@ LLAMA_CPP = Path("/Users/vlad/llama.cpp")
 LLAMA_BENCH = LLAMA_CPP / "build" / "bin" / "llama-bench"
 GGUF_DIR = Path("/Users/vlad/models/gguf")
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 PROVENANCE_TIER = "owner-run"
 
-# The model both stacks run, so the two are comparable at all.
+# The model both stacks run, so the two are comparable at all. logical_name
+# is the cross-stack identity of what ran: one canonical spelling, because a
+# variant would silently split a matrix cell in two.
 GGUF_MODEL = "Qwen3-4B-Q4_K_M.gguf"
 MLX_REPO = "mlx-community/Qwen3-4B-4bit"
+LOGICAL_MODEL = "qwen3-4b"
 
 # The matmul's n dimension, reached by prompt width on llama.cpp and by batch
 # size on MLX. n=8 and n=16 are first-class rows because that is where both
@@ -84,6 +88,8 @@ REQUIRED_RESULT = ("metric", "median", "reps", "samples", "min_sample_ms",
                    "below_timing_floor")
 REQUIRED_SAMPLING = ("interleaved", "group", "rounds")
 PROVENANCE_TIERS = ("owner-run", "rental-run", "community-unattested")
+BINDING_RESOURCES = ("compute", "memory", "unknown")
+LOGICAL_MODEL_NAMES = ("qwen3-4b",)
 
 
 def validate_row(row: dict) -> dict:
@@ -109,6 +115,18 @@ def validate_row(row: dict) -> dict:
         missing = [k for k in REQUIRED_SAMPLING if k not in row.get("sampling", {})]
         if missing:
             raise ValueError(f"row {row['row_id']} sampling missing {missing}")
+        if row["schema_version"] >= 3:
+            resource = (row.get("roofline") or {}).get("binding_resource")
+            if resource not in BINDING_RESOURCES:
+                raise ValueError(
+                    f"row {row['row_id']} binding_resource {resource!r} is not "
+                    f"one of {BINDING_RESOURCES}")
+            logical = (row.get("model") or {}).get("logical_name")
+            if logical not in LOGICAL_MODEL_NAMES:
+                raise ValueError(
+                    f"row {row['row_id']} model.logical_name {logical!r} is not "
+                    f"one of {LOGICAL_MODEL_NAMES}; the cross-stack cell "
+                    "identity needs one canonical spelling")
     return row
 
 
@@ -293,6 +311,59 @@ def sample_value(spec: dict, sample: dict) -> float:
 
 
 # --------------------------------------------------------------------------
+# the measurement loop: one workload cell at a time, arms alternating
+
+
+def workload_cell(spec: dict) -> tuple:
+    """WHAT this spec measures, mirroring the renderer's cell key.
+
+    The specs sharing this key are the arms of one A/B, and they are the only
+    rows that will ever share a sampling group, so a group is one real A/B
+    session by construction rather than a relabel of a run-wide rotation.
+    """
+    return (spec["kind"], spec["batch"],
+            spec["n_prompt"] if spec["kind"] == "prefill" else None)
+
+
+def cell_label(key: tuple) -> str:
+    kind, width, _ = key
+    return f"{kind}-w{width}"
+
+
+def group_cells(specs: list[dict]) -> list[tuple[str, list[dict]]]:
+    """The specs grouped into workload cells, in spec order."""
+    cells: dict[tuple, list[dict]] = {}
+    for spec in specs:
+        cells.setdefault(workload_cell(spec), []).append(spec)
+    return [(cell_label(key), members) for key, members in cells.items()]
+
+
+def measure_cells(specs: list[dict], rounds: int,
+                  measure=measure_once) -> tuple[dict, list[str]]:
+    """All samples, one workload cell run to completion at a time.
+
+    Within a cell the arms run back to back in a fixed order every round, the
+    same discipline as runners/compare.py: consecutive samples alternate arms,
+    so a clock excursion lands on both arms of a pair instead of on whichever
+    spec a rotation happened to reach. The old loop rotated ALL specs
+    round-robin, which put a full rotation - minutes - between the two arms
+    of every comparison.
+    """
+    samples: dict[str, list] = {s["id"]: [] for s in specs}
+    sequence: list[str] = []
+    for label, members in group_cells(specs):
+        for r in range(rounds):
+            for spec in members:
+                sample = measure(spec)
+                value = sample_value(spec, sample)
+                samples[spec["id"]].append({"value": value, "sample": sample})
+                sequence.append(spec["id"])
+                print(f"  [{label}] round {r + 1} {spec['id']:22} {value:10.2f}",
+                      flush=True)
+    return samples, sequence
+
+
+# --------------------------------------------------------------------------
 # utilisation
 
 
@@ -405,20 +476,18 @@ def main() -> int:
           f" fp16 {ceilings['fp16_gflops']} GFLOP/s", flush=True)
 
     specs = build_specs(args.only)
-    samples: dict[str, list] = {s["id"]: [] for s in specs}
+    run_id = f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"
 
-    # Round-robin, rotating the order each round so no spec keeps the warmest
-    # or coolest slot.
-    for r in range(rounds):
-        order = specs[r % len(specs):] + specs[: r % len(specs)]
-        for spec in order:
-            sample = measure_once(spec)
-            value = sample_value(spec, sample)
-            samples[spec["id"]].append({"value": value, "sample": sample})
-            print(f"  round {r + 1} {spec['id']:22} {value:10.2f}", flush=True)
+    # One sampling group per workload cell, so a group is one A/B session and
+    # can never be a relabel of an all-specs rotation.
+    groups = {
+        spec["id"]: {"group": f"{run_id}/{label}",
+                     "group_members": [m["id"] for m in members]}
+        for label, members in group_cells(specs) for spec in members
+    }
+    samples, _ = measure_cells(specs, rounds)
 
     after = machine_state.idle_check(fp["cores"])
-    run_id = f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"
     stacks = {"llama.cpp": llama_cpp_build(), "mlx-lm": mlx_build()}
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -469,6 +538,7 @@ def main() -> int:
             "stack": stacks[spec["stack"]],
             "model": {
                 "name": model_path.name,
+                "logical_name": LOGICAL_MODEL,
                 "path": str(model_path),
                 "sha256_32": model_hash(model_path),
                 "quant": "Q4_K_M" if spec["stack"] == "llama.cpp" else "mlx-affine-4bit",
@@ -489,10 +559,9 @@ def main() -> int:
             },
             "sampling": {
                 "interleaved": True,
-                "rotation": "per-round",
+                "rotation": "arm-alternation",
                 "rounds": rounds,
-                "group": run_id,
-                "group_members": [s["id"] for s in specs],
+                **groups[spec["id"]],
             },
             "roofline": util,
             **machine_state.binding_verdict(before, after, timing, dispersion),

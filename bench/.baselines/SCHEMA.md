@@ -1,7 +1,13 @@
-# Baseline JSONL schema, version 2
+# Baseline JSONL schema, version 3
 
-Version 2 adds `sampling` (how the row was interleaved) and the dispersion fields on `result`, both of which gate what a consumer may do with a row.
+Version 3 changes what a sampling group is.
+A v2 group was one harness invocation: every spec in the run shared one group and was sampled in one all-specs round-robin, so the two arms of any A/B sat a full rotation - minutes - apart.
+A v3 group is one workload cell: exactly the specs that realise one workload (same kind, matmul width, and prefill length), with the arms alternating back to back every round.
+A v3 group is therefore one real A/B session by construction, never a relabel of a run-wide rotation, and `sampling.group` is `<run_id>/<cell label>` rather than the bare run id.
+Version 3 also adds `model.logical_name` (required on measurement rows, one canonical spelling from a constrained set) and constrains `roofline.binding_resource` to exactly `compute`, `memory`, `unknown`.
+Version 2 added `sampling` (how the row was interleaved) and the dispersion fields on `result`, both of which gate what a consumer may do with a row.
 Version 1 rows were produced before those gates existed, were never consumed, and were discarded rather than left in the record claiming a bindingness they had not been checked for.
+An earlier revision of this document said version 2 in its header while the field table below still said 1; the table is part of the contract, so it now states the version it documents and must move with the header.
 
 Produced by `bench/measure_baselines.py`, consumed by the matrix renderer.
 One JSON object per line, append-only, one file per UTC date: `<YYYY-MM-DD>.jsonl`.
@@ -40,7 +46,7 @@ A published absolute number requires `provenance_tier` in (`owner-run`, `rental-
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | int | 1 |
+| `schema_version` | int | 3 |
 | `run_id` | str | one per harness invocation, `<utc timestamp>-<8 hex>` |
 | `row_id` | str | `<run_id>/<spec id>`, unique across all files |
 | `measured_at` | str | ISO 8601, UTC |
@@ -50,10 +56,10 @@ A published absolute number requires `provenance_tier` in (`owner-run`, `rental-
 | `machine` | object | chip, hw_model, cores, performance_cores, efficiency_cores, memory_bytes, os, os_build |
 | `idle_before`, `idle_after` | object | load1/5/15, load_threshold, power {source, low_power_mode, thermal_warning}, idle, blockers |
 | `stack` | object | name, version, plus build_flags and path where they exist; `mlx-lm` rows also carry `mlx_version` |
-| `model` | object or null | name, path, `sha256_32`, quant. Null on ceiling rows |
+| `model` | object or null | name, `logical_name`, path, `sha256_32`, quant. Null on ceiling rows. `logical_name` (v3) is the cross-stack identity of what ran, one canonical spelling from a constrained set (currently `qwen3-4b`); `name` is the per-stack artefact and differs across stacks for one logical model |
 | `measurement` | object | kind, matmul_width, n_prompt, n_gen, width_mechanism |
 | `result` | object | metric, median, spread_pct, reps, samples, min_sample_ms, floor_ms, below_timing_floor |
-| `sampling` | object | interleaved, rotation, rounds, group, group_members. Required on every non-ceiling row |
+| `sampling` | object | interleaved, rotation, rounds, group, group_members. Required on every non-ceiling row. v3: `group` is one workload cell (`<run_id>/<cell label>`), `group_members` are its arms only, `rotation` is `arm-alternation` |
 | `roofline` | object | present on every non-ceiling row, see below |
 
 ### `measurement.kind`
@@ -77,7 +83,7 @@ Render the mechanism next to the width or the two stacks will look more comparab
 | `byte_model` | `tensor-table` |
 | `denominator_name`, `denominator_gbs` | which bandwidth ceiling was divided by, and its value |
 | `achieved_gbs`, `bandwidth_utilisation_pct` | achieved bandwidth and its share of that ceiling |
-| `binding_resource` | `memory` or `compute`; which ceiling actually binds this row |
+| `binding_resource` | exactly one of `compute`, `memory`, `unknown` (validated at v3); which ceiling actually binds this row. `unknown` marks rows no parameter count exists to place |
 | `achieved_gflops`, `roofline_ceiling_gflops`, `roofline_utilisation_pct` | compute-side placement, null on MLX rows |
 | `arithmetic_intensity_flop_per_byte`, `ridge_flop_per_byte` | position relative to the ridge |
 
@@ -92,7 +98,11 @@ Use `bandwidth_read` for decode-dominated rows: decode streams weights and barel
 
 ## Notes for the renderer
 
-- Rows from one `sampling.group` were measured interleaved round-robin, one sample per spec per round with the order rotated each round, so they are comparable to each other even when the machine drifted underneath them. Rows from different groups are not paired.
+- v3: rows from one `sampling.group` are the arms of one workload cell, measured back to back with the arms alternating every round, so they are comparable to each other even when the machine drifted underneath them.
+  v2: a group was a whole run's all-specs round-robin; the renderer additionally keys comparison cells on the workload, which is what made v2 groups safe to consume.
+  In both versions, rows from different groups are not paired.
+- The renderer accepts both versions but refuses any comparison across schema versions: the meaning of a group changed at the v3 boundary, so a cross-version ratio would pair rows measured under two different contracts.
+- For v3 rows a comparison additionally requires the same `model.logical_name`; v2 rows predate the field and keep their original gates.
 - Refuse to render a comparative claim across rows whose `sampling.interleaved` is false or absent, the same way absolutes are refused when `binding` is false. A contributed row from someone else's harness is the case this exists for.
 - `result.spread_pct` is `(max - min) / median` across repeats. Treat a difference smaller than the spread as no difference.
 - A `run_id` may contain both binding and non-binding rows only if the machine changed state mid-run; `idle_before` and `idle_after` say which end moved.
