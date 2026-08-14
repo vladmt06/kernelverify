@@ -32,7 +32,12 @@ from kernelverify.schemas.quant_contract import (
     r_contract,
 )
 
-K_QUANT = 3.0    # Phase 0 calibration (bench/phase0_contract_k.py)
+# Re-derived at 4.0 by the device-arithmetic calibration (ADR 0012): a correct
+# device kernel (simdgroup-factored) legitimately exceeds the CPU-calibrated
+# K=3 tolerance by up to 1.30x on constant-rows float32, and the joined
+# membership demands 3.901. Measured adequate at 4.0: zero false positives on
+# both draws, worst fault margin 161x, so detection is unchanged.
+K_QUANT = 4.0
 K_NATIVE = 1.5   # unquantized ensembles, same value ADR 0004 measured
 
 _EPS = {"float16": 9.77e-4, "float32": 1.19e-7}
