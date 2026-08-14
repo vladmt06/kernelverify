@@ -35,3 +35,20 @@ Three iterations of a ~70-line MSL kernel via mx.fast.metal_kernel, each verifie
 
 Spike verdict for D7: writing a VERIFIED kernel that matches MLX's native op took under a day (feasibility: yes); beating it at batch-1 dense GEMV is not where the end-to-end gap is (both ops are launch-bound at decode shapes and near-identical in wall time).
 Speed wins on this machine class must come from the surfaces the research named: MoE dispatch, speculative decode, sub-4-bit formats, and Max/Ultra tiers.
+
+## Corrections and additions (same day, from the baseline worktree's raw-Metal measurements)
+
+Cross-session results from branch `baseline` (worktree kv-baseline, GPU-timestamp instrumentation, +/-1.6% repro), pending merge; recorded here so the numbers above are not quoted uncorrected.
+
+- Denominator correction: decode is READ-dominated and the read ceiling is 135.4 GB/s (copy 130.1 idle; the 128.4 above was shared-machine copy, within 1.3% of idle).
+  Utilisation computed against copy overstates by ~5%.
+- Byte-model correction: file_size x tok/s is the wrong byte model (the embedding table is a gather, not streamed per token; tied embeddings change it again; the output head runs once per decode call, which also breaks prefill flop counts).
+  The "~92% of achieved roofline" line above carries that error; per-model utilisation must use the GGUF tensor-table cost model (bench/gguf_info.py on the baseline branch).
+  Directional conclusions survive: batch-1 dense Q4 decode is near its ceiling (independently measured 93.6% of roofline at n=1 with the correct model).
+- ALU ceiling cross-validation: measured FMA peak 6.30 TFLOP/s (fp32 6.24; fp16 buys nothing on M3 - no tensor units pre-M5), so the 5.89 TFLOPS matmul above is 93% of the true ceiling.
+- NEW measured surface - the small-batch hole: llama.cpp's Metal path drops to 19-30% of roofline at batch 8-16 (vs 93.6% at batch 1, 77% at 512), reproduced at kernel level and end to end.
+  A decode-only, batch-1 view hides this entirely; local agent and server workloads live exactly there.
+- q3_K mat-vec runs ~1.55x off its peers at long reductions only (shape-dependent; invisible at 0.5B shapes) - real-hardware confirmation of the sub-4-bit inverted-performance class.
+- Fixed dispatch intercept: 0.99 ms/token on this machine (21.6% of a 0.5B's token time, 2.7% of a 7B's); small-model utilisation numbers are depressed by it and say nothing about kernels.
+- Timing-floor caveat (from the metal-runner worktree): GPU timings at ~200us shift together up to 4x with power state; only ms-scale dispatches repeat to ~0.1%.
+  The spike's per-op times above (150-590us) sit inside that regime: treat the ratios as UNMEASURED, not merely provisional, until re-measured with interleaved A/B sampling at ms-scale batching.
