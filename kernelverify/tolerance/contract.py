@@ -492,9 +492,37 @@ def _prioritise(members: list[tuple[str, Callable]], leads: list[str]):
     return head + random_members + rest
 
 
+def _named(label: str, fn: Callable) -> Callable:
+    """Give a member a `__name__` that says which member it is.
+
+    Most members are closures over a reduction order, so they all inherit the
+    name of the factory that built them - eight distinct attention members all
+    called `impl`. Anything that fingerprints an ensemble by reflection then
+    sees one name where there are eight, and swapping a tile width or a
+    permutation seed leaves the fingerprint byte-identical. That is precisely
+    the failure the verdict-cache tag exists to prevent, so the members carry
+    their own identity rather than relying on the caller to know it.
+
+    The wrapper is a new object every call, so nothing shared - including the
+    reference kernels themselves - has its name rewritten underneath it.
+    """
+    def member(inputs):
+        return fn(inputs)
+
+    member.__name__ = label
+    member.__qualname__ = label
+    return member
+
+
 def contract_implementations(op: str, *, n_random: int = 6,
                              seed: int = 20260814) -> list[tuple[str, Callable]]:
-    """Admissible implementations of `op`, in ensemble-priority order.
+    """Admissible implementations of `op`, in ensemble-priority order, named."""
+    return [(label, _named(label, fn))
+            for label, fn in _population(op, n_random=n_random, seed=seed)]
+
+
+def _population(op: str, *, n_random: int, seed: int) -> list[tuple[str, Callable]]:
+    """The population itself, before the members are given their names.
 
     Every member is a correct implementation of the specified operator; the
     only thing that varies is a freedom the contract explicitly grants. The
