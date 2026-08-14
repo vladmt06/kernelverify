@@ -57,6 +57,7 @@ def _case(b, h, t, dh, dtype, seed):
 
 def _run(kernel, q, k_cache, v_cache, new_k, new_v, bits, dtype):
     b, h, dh = q.shape
+    t = k_cache.shape[1]
     k_wq, k_sc, k_bi = quantize_cache(k_cache, bits)
     v_wq, v_sc, v_bi = quantize_cache(v_cache, bits)
     grid, tg = launch_config(b, h)
@@ -64,6 +65,7 @@ def _run(kernel, q, k_cache, v_cache, new_k, new_v, bits, dtype):
         inputs=[mx.array(q), mx.array(k_wq), mx.array(k_sc), mx.array(k_bi),
                 mx.array(v_wq), mx.array(v_sc), mx.array(v_bi),
                 mx.array(new_k), mx.array(new_v)],
+        t_cached=t,
         output_shapes=[(b, h, dh)], output_dtypes=[MXD[dtype]],
         grid=grid, threadgroup=tg,
         template=[("T", MXD[dtype]), ("BITS", bits), ("DH", dh)])[0]
@@ -138,6 +140,69 @@ def test_single_cached_position(kernel):
     assert v.ok, v
 
 
+def test_padded_cache_reads_only_the_logical_prefix(kernel):
+    """The mlx-lm integration passes the cache's padded buffer whole with the
+    logical length as a scalar (never sliced, ruling D12.1). Rows past the
+    logical length are filled with garbage here, so any read past t_cached,
+    or any stride confusion between heads, fails the oracle."""
+    b, h, t, t_pad, dh, bits = 1, 4, 300, 512, 128, 8
+    q, kc, vc, nk, nv = _case(b, h, t, dh, "float16", seed=23)
+    rng = np.random.default_rng(99)
+
+    def padded(cache):
+        wq, sc, bi = quantize_cache(cache, bits)
+        junk = rng.standard_normal((h, t_pad - t, dh)).astype(np.float16)
+        jwq, jsc, jbi = quantize_cache(junk, bits)
+        return (np.concatenate([wq, jwq], axis=1),
+                np.concatenate([sc, jsc], axis=1),
+                np.concatenate([bi, jbi], axis=1))
+
+    grid, tg = launch_config(b, h)
+    out = kernel(
+        inputs=[mx.array(q), *(mx.array(a) for a in padded(kc)),
+                *(mx.array(a) for a in padded(vc)),
+                mx.array(nk), mx.array(nv)],
+        t_cached=t,
+        output_shapes=[(b, h, dh)], output_dtypes=[mx.float16],
+        grid=grid, threadgroup=tg,
+        template=[("T", mx.float16), ("BITS", bits), ("DH", dh)])[0]
+    mx.eval(out)
+    v = verify_output("kv_attention", kv_inputs(q, kc, vc, nk, nv, bits),
+                      np.array(out))
+    assert v.ok, v
+
+
+def test_gqa_matches_the_tiled_cache_reference(kernel):
+    """Query heads over fewer cache heads (Qwen3's 4:1 shape, scaled down).
+    The shipped reference has no GQA form, so the oracle case tiles each
+    cache head and new_k/new_v row R times: quantization is per-row and
+    deterministic, so the tiled-cache answer IS the GQA answer, and the
+    kernel reading the untiled cache must reproduce it."""
+    b, h, hkv, t, dh, bits = 1, 8, 2, 128, 64, 8
+    r = h // hkv
+    q, kc_full, vc_full, nk_full, nv_full = _case(b, h, t, dh, "float16", seed=31)
+    kc, vc = kc_full[:hkv], vc_full[:hkv]          # the untiled hkv-head caches
+    nk, nv = nk_full[:, :hkv], nv_full[:, :hkv]
+    k_wq, k_sc, k_bi = quantize_cache(kc, bits)
+    v_wq, v_sc, v_bi = quantize_cache(vc, bits)
+    grid, tg = launch_config(b, h)
+    out = kernel(
+        inputs=[mx.array(q), mx.array(k_wq), mx.array(k_sc), mx.array(k_bi),
+                mx.array(v_wq), mx.array(v_sc), mx.array(v_bi),
+                mx.array(nk), mx.array(nv)],
+        t_cached=t,
+        output_shapes=[(b, h, dh)], output_dtypes=[mx.float16],
+        grid=grid, threadgroup=tg,
+        template=[("T", mx.float16), ("BITS", bits), ("DH", dh)])[0]
+    mx.eval(out)
+    tiled = lambda a, axis: np.repeat(a, r, axis=axis)
+    v = verify_output(
+        "kv_attention",
+        kv_inputs(q, tiled(kc, 0), tiled(vc, 0), tiled(nk, 1), tiled(nv, 1), bits),
+        np.array(out))
+    assert v.ok, v
+
+
 def test_mlx_door_rejects_over_capacity(kernel):
     """t > TCAP must raise before dispatch: the softmax buffer is sized at
     compile time, and the overrun it prevents is silent memory corruption."""
@@ -161,7 +226,8 @@ def test_raw_door_poisons_over_capacity_output():
         inputs={"q": q, "k_wq": k_wq, "k_scales": k_sc, "k_biases": k_bi,
                 "v_wq": v_wq, "v_scales": v_sc, "v_biases": v_bi,
                 "new_k": nk, "new_v": nv},
-        params={"b_rows": b, "n_heads": h, "t_cached": t},
+        params={"b_rows": b, "n_heads": h, "t_cached": t,
+                "n_kv_heads": h, "t_stride": t},
         output_shapes=[((b, h, dh), "float16")],
         label=f"T={t} over capacity")
     [[result]] = MetalRunner().run_candidate([(spec, [case])])

@@ -40,6 +40,16 @@ Codes are read as 8-code blocks through a two-word window, the sub-4-bit
 striding rule from the wide-tile work; at 4 and 8 bits the window degenerates
 to whole aligned words, so one reader covers every supported width.
 
+Cache geometry, shaped by the mlx-lm integration (spike ruling D12.1): the
+cache buffers may be padded past the logical length, so the kernel takes
+the LOGICAL cached count (T_CACHED) separately from the physical rows per
+head (T_STRIDE; the MLX door reads it from k_wq's own shape), and a padded
+cache is passed whole rather than sliced - slicing would charge growing
+contiguity copies to this kernel's arm in any comparison. Query heads may
+outnumber cache heads (GQA): query head h reads cache head h / (H / HKV),
+the contiguous-block mapping mlx-lm's own quantized SDPA uses, and
+HKV == H degenerates to the pre-integration behaviour exactly.
+
 Bounds: T <= TCAP (the softmax buffer is threadgroup memory, sized at
 compile time), DH in {64, 128} (one or two 64-wide quantization groups, and
 32 lanes must cover DH with a whole number of dims each).
@@ -84,9 +94,13 @@ KV_ATTENTION_MSL = """
     uint sg   = thread_position_in_threadgroup.y;
     uint lin  = sg * 32 + lane;
     uint z    = thread_position_in_grid.z;    // b * H + h
-    uint H    = NUM_HEADS;
+    uint H    = NUM_HEADS;               // query heads
+    uint HKV  = KV_HEADS;                // cache heads; H / HKV is the GQA ratio
     uint h    = z % H;
-    uint Tc   = T_CACHED;                // cached positions
+    uint hk   = h / (H / HKV);           // the cache head this query head reads
+    uint zk   = (z / H) * HKV + hk;      // this row's new_k / new_v entry
+    uint Tc   = T_CACHED;                // cached positions (logical)
+    uint Ts   = T_STRIDE;                // physical rows per cache head
 
     // Capacity bound, in the shared body so both doors inherit it: Tc > TCAP
     // would overrun sc_arr, whose size is fixed at compile time. A kernel
@@ -113,10 +127,10 @@ KV_ATTENTION_MSL = """
         float acc = 0.0f;
         if (t == Tc) {
             for (uint d = 0; d < DH; ++d) {
-                acc = metal::fma(qsh[d], (float)new_k[z * DH + d], acc);
+                acc = metal::fma(qsh[d], (float)new_k[zk * DH + d], acc);
             }
         } else {
-            uint row = h * Tc + t;
+            uint row = hk * Ts + t;
             for (uint g = 0; g < G; ++g) {
                 float s = (float)k_scales[row * G + g];
                 float b = (float)k_biases[row * G + g];
@@ -183,7 +197,7 @@ KV_ATTENTION_MSL = """
 
     for (uint t = sg; t < Tc; t += NSG) {
         float p = sc_arr[t] / denom;
-        uint row = h * Tc + t;
+        uint row = hk * Ts + t;
         uint bit0 = d0 * BITS;
         uint w0 = bit0 >> 5;
         uint sh0 = bit0 & 31;
@@ -203,7 +217,7 @@ KV_ATTENTION_MSL = """
         float p_new = sc_arr[Tc] / denom;
         #pragma clang loop unroll(full)
         for (uint j = 0; j < L; ++j) {
-            acc[j] = metal::fma(p_new, (float)new_v[z * DH + d0 + j], acc[j]);
+            acc[j] = metal::fma(p_new, (float)new_v[zk * DH + d0 + j], acc[j]);
         }
     }
 
@@ -218,7 +232,7 @@ KV_ATTENTION_MSL = """
 """
 
 INPUT_NAMES = ["q", "k_wq", "k_scales", "k_biases",
-               "v_wq", "v_scales", "v_biases", "new_k", "new_v"]
+               "v_wq", "v_scales", "v_biases", "new_k", "new_v", "t_cached"]
 OUTPUT_NAMES = ["out"]
 KERNEL_NAME = "kv_attn_decode"
 
@@ -260,8 +274,9 @@ def kernel_spec():
     """The runner-door template, for verification through `MetalRunner`.
 
     `specialize()` fills the compile-time constants (`T`, `BITS`, `DH`); the
-    head count and cached length arrive as scalar bindings, and the grid's z
-    extent is the `b_rows` x `n_heads` product each case supplies.
+    head counts, the logical cached length and the physical row stride
+    arrive as scalar bindings, and the grid's z extent is the `b_rows` x
+    `n_heads` product each case supplies.
     """
     from kernelverify.runners import Binding, BindingKind, KernelSpec, LaunchSpec
 
@@ -284,9 +299,14 @@ kernel void {KERNEL_NAME}(
     device T* out               [[buffer(9)]],
     constant uint& n_heads      [[buffer(10)]],
     constant uint& t_cached     [[buffer(11)]],
+    constant uint& n_kv_heads   [[buffer(12)]],
+    constant uint& t_stride     [[buffer(13)]],
     uint3 thread_position_in_threadgroup [[thread_position_in_threadgroup]],
     uint3 thread_position_in_grid        [[thread_position_in_grid]]) {{
-{KV_ATTENTION_MSL.replace("NUM_HEADS", "n_heads").replace("T_CACHED", "t_cached")}
+{KV_ATTENTION_MSL.replace("NUM_HEADS", "n_heads")
+                 .replace("KV_HEADS", "n_kv_heads")
+                 .replace("T_CACHED", "t_cached")
+                 .replace("T_STRIDE", "t_stride")}
 }}
 """
     return KernelSpec(
@@ -304,7 +324,9 @@ kernel void {KERNEL_NAME}(
                   Binding(BindingKind.INPUT, "new_v"),
                   Binding(BindingKind.OUTPUT),
                   Binding(BindingKind.SCALAR, "n_heads", "uint32"),
-                  Binding(BindingKind.SCALAR, "t_cached", "uint32")),
+                  Binding(BindingKind.SCALAR, "t_cached", "uint32"),
+                  Binding(BindingKind.SCALAR, "n_kv_heads", "uint32"),
+                  Binding(BindingKind.SCALAR, "t_stride", "uint32")),
         launch=LaunchSpec(grid=(SIMD_WIDTH, SIMDGROUPS_PER_THREADGROUP,
                                 ["b_rows", "n_heads"]),
                           threadgroup=(SIMD_WIDTH, SIMDGROUPS_PER_THREADGROUP, 1)),
@@ -314,24 +336,28 @@ kernel void {KERNEL_NAME}(
 def build(mx):
     """The MLX callable. Takes mx so this module imports without it.
 
-    The callable rejects t > TCAP before dispatch: the cache shape is visible
-    host-side here, so the capacity bound can raise instead of relying on the
-    in-body NaN guard alone.
+    The callable takes the nine tensor inputs plus `t_cached`, the LOGICAL
+    number of cached positions, as a Python scalar; the physical row stride
+    and the cache head count come from `k_wq`'s own shape, so a padded
+    (H, T_pad, WORDS) buffer is passed whole, never sliced. The callable
+    rejects t_cached > TCAP before dispatch: the bound is knowable host-side
+    here, so it can raise instead of relying on the in-body NaN guard alone.
     """
     source = (KV_ATTENTION_MSL.replace("NUM_HEADS", "q_shape[1]")
-              .replace("T_CACHED", "k_wq_shape[1]"))
+              .replace("KV_HEADS", "k_wq_shape[0]")
+              .replace("T_CACHED", "t_cached[0]")
+              .replace("T_STRIDE", "k_wq_shape[1]"))
     kernel = mx.fast.metal_kernel(name=KERNEL_NAME, input_names=INPUT_NAMES,
                                   output_names=OUTPUT_NAMES, source=source)
-    k_wq_pos = INPUT_NAMES.index("k_wq")
 
-    def guarded(*, inputs, **kwargs):
-        t = inputs[k_wq_pos].shape[1]
-        if t > TCAP:
+    def guarded(*, inputs, t_cached, **kwargs):
+        if t_cached > TCAP:
             raise ValueError(
-                f"kv_attention: t_cached={t} exceeds TCAP={TCAP}; the softmax "
-                f"buffer is threadgroup memory sized at compile time, so this "
-                f"launch would corrupt it - route long caches to MLX "
+                f"kv_attention: t_cached={t_cached} exceeds TCAP={TCAP}; the "
+                f"softmax buffer is threadgroup memory sized at compile time, "
+                f"so this launch would corrupt it - route long caches to MLX "
                 f"(should_dispatch)")
-        return kernel(inputs=inputs, **kwargs)
+        tarr = mx.array([t_cached], dtype=mx.uint32)
+        return kernel(inputs=[*inputs, tarr], **kwargs)
 
     return guarded
