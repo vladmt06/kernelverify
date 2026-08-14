@@ -305,7 +305,8 @@ def flash_attention(inputs, *, rescale_acc=True, rescale_norm=True, scale_power=
     return (acc / normaliser[:, None]).astype(q.dtype)
 
 
-# Operator name as used by the corpus schemas -> parameterised implementation.
+# Operator name -> parameterised implementation. Corpus operators here;
+# native operators (Tranche 1.5) register themselves at the bottom of the file.
 KERNELS = {
     "gelu": gelu,
     "silu": silu,
@@ -318,3 +319,8 @@ KERNELS = {
     "attention": attention,
     "flash_attention": flash_attention,
 }
+
+# Native operators (Tranche 1.5) register alongside the corpus ports.
+from kernelverify.reference.native_kernels import NATIVE_KERNELS  # noqa: E402
+
+KERNELS.update(NATIVE_KERNELS)
