@@ -4,9 +4,9 @@
   "kernel_family": "kv_attn_decode",
   "byte_bound": {
     "_meaning": "these hashes identify WHAT was verified; they assert nothing about output values",
-    "translation_unit_sha256": "f7b1350cbb69447a9dfbd2f92cab8d5ae4633ca689684c62f9fc2166116cedd1",
+    "translation_unit_sha256": "c1f6a90dbd2e2921f3c258b0631dea58846b3c3e6f395f22b78f07fa10de8758",
     "catalogue_fingerprint": "none: no mutation-scored fault catalogue exists for this operator yet",
-    "harness_commit": "7d7c453",
+    "harness_commit": "3806ca1",
     "contract_version": "kv_attention contract (frozen at 8ec7eca; NATIVE_OPS['kv_attention'])",
     "compile_options": {
       "math_mode": "safe"
