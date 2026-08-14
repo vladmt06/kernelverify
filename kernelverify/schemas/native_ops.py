@@ -199,9 +199,123 @@ def moe_tolerance(case, inputs, ref) -> float:
     return max(_base_tol(case.dtype, ref), K_NATIVE * floor)
 
 
+# ---------------------------------------------------------------------------
+# kv_attention: one decode step over a contract-anchored quantized KV cache.
+# ---------------------------------------------------------------------------
+KV_ATTENTION_META = {
+    "op_schema": {
+        "inputs": [
+            {"name": "q", "dims": ["B", "H", "DH"]},
+            {"name": "k_cache", "dims": ["H", "T", "DH"]},
+            {"name": "v_cache", "dims": ["H", "T", "DH"]},
+            {"name": "new_k", "dims": ["B", "H", "DH"]},
+            {"name": "new_v", "dims": ["B", "H", "DH"]},
+        ],
+        # The cache is shared across the batch (correctness simplification);
+        # DH stays a whole number of 64-wide quantization groups; T=512 gives
+        # the long-reduction regime the accumulator faults need.
+        "dims": [
+            {"name": "B", "candidates": [1, 4]},
+            {"name": "H", "candidates": [2, 8]},
+            {"name": "T", "candidates": [64, 512]},
+            {"name": "DH", "candidates": [64, 128]},
+            {"name": "BITS", "candidates": [4, 8]},
+        ],
+    },
+    "dtypes": ["float32", "float16"],
+    "tolerances": {"float32": 1e-3, "float16": 1e-2},
+}
+
+QUERY_SCALE = 0.6  # peak for q/new_k: puts score rms near 2, so softmax is
+                   # neither uniform nor saturated at corpus input magnitudes
+
+
+def _rescaled(arr: np.ndarray, target_peak: float) -> np.ndarray:
+    peak = float(np.max(np.abs(arr.astype(np.float32)))) if arr.size else 0.0
+    if peak == 0.0:
+        return arr
+    return (arr.astype(np.float32) * (target_peak / peak)).astype(arr.dtype)
+
+
+def kv_augment(case, inputs):
+    inputs["bits"] = np.array([case.dim_map["BITS"]], dtype=np.int32)
+    inputs["q"] = _rescaled(inputs["q"], QUERY_SCALE)
+    inputs["new_k"] = _rescaled(inputs["new_k"], QUERY_SCALE)
+    return inputs
+
+
+def _kv_dequant64(cache, bits):
+    from kernelverify.reference.native_kernels import _cache_dequant
+    return _cache_dequant(cache, bits).astype(np.float64)
+
+
+def kv_reference(inputs) -> np.ndarray:
+    """fp64 truth, contract-anchored: the cached K/V are the canonical
+    artefacts' dequantized values, the new entry arrives at full precision."""
+    q = inputs["q"].astype(np.float64)
+    bits = int(inputs["bits"][0])
+    kd = _kv_dequant64(inputs["k_cache"], bits)
+    vd = _kv_dequant64(inputs["v_cache"], bits)
+    scale = 1.0 / np.sqrt(float(q.shape[-1]))
+    scores = np.einsum("bhd,htd->bht", q, kd) * scale
+    score_new = np.sum(q * inputs["new_k"].astype(np.float64), axis=-1) * scale
+    scores = np.concatenate([scores, score_new[..., None]], axis=-1)
+    shifted = scores - scores.max(axis=-1, keepdims=True)
+    probs = np.exp(shifted)
+    probs /= probs.sum(axis=-1, keepdims=True)
+    out = np.einsum("bht,htd->bhd", probs[..., :-1], vd)
+    return out + probs[..., -1][..., None] * inputs["new_v"].astype(np.float64)
+
+
+def _kv_member(inputs, *, scores_order="pairwise", combine_order="pairwise"):
+    """Legitimate fp32 implementations spanning two classes: the scores
+    accumulation order and the combine accumulation order."""
+    q = inputs["q"].astype(np.float32)
+    bits = int(inputs["bits"][0])
+    kd = _kv_dequant64(inputs["k_cache"], bits).astype(np.float32)
+    vd = _kv_dequant64(inputs["v_cache"], bits).astype(np.float32)
+    scale = np.float32(1.0 / np.sqrt(float(q.shape[-1])))
+    if scores_order == "serial":
+        prods = q[:, :, None, :] * kd[None, :, :, :]
+        scores = np.add.accumulate(prods, axis=-1, dtype=np.float32)[..., -1] * scale
+    else:
+        scores = np.einsum("bhd,htd->bht", q, kd) * scale
+    score_new = np.sum(q * inputs["new_k"].astype(np.float32), axis=-1) * scale
+    scores = np.concatenate([scores, score_new[..., None]], axis=-1)
+    shifted = scores - scores.max(axis=-1, keepdims=True)
+    probs = np.exp(shifted)
+    probs /= probs.sum(axis=-1, keepdims=True)
+    pc = probs[..., :-1]
+    if combine_order in ("serial", "reversed"):
+        contrib = pc[..., None] * vd[None, ...]
+        if combine_order == "reversed":
+            contrib = contrib[:, :, ::-1, :]
+        out = np.add.accumulate(contrib, axis=2, dtype=np.float32)[:, :, -1]
+    else:
+        out = np.einsum("bht,htd->bhd", pc, vd)
+    out = out + probs[..., -1][..., None] * inputs["new_v"].astype(np.float32)
+    return out.astype(inputs["q"].dtype)
+
+
+KV_MEMBERS = {
+    "kv:pairwise-pairwise": dict(scores_order="pairwise", combine_order="pairwise"),
+    "kv:serial-scores": dict(scores_order="serial", combine_order="pairwise"),
+    "kv:serial-combine": dict(scores_order="pairwise", combine_order="serial"),
+    "kv:reversed-combine": dict(scores_order="pairwise", combine_order="reversed"),
+}
+
+
+def kv_tolerance(case, inputs, ref) -> float:
+    floor = max(_max_err(_kv_member(inputs, **kw), ref)
+                for kw in KV_MEMBERS.values())
+    return max(_base_tol(case.dtype, ref), K_QUANT * floor)
+
+
 NATIVE_OPS = {
     "quantized_matmul": NativeOp(QUANTIZED_MATMUL_META, qmm_reference,
                                  qmm_tolerance, qmm_augment),
     "moe_dispatch": NativeOp(MOE_DISPATCH_META, moe_reference, moe_tolerance,
                              moe_augment),
+    "kv_attention": NativeOp(KV_ATTENTION_META, kv_reference, kv_tolerance,
+                             kv_augment),
 }
