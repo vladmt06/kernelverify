@@ -1,4 +1,7 @@
-# Baseline JSONL schema, version 1
+# Baseline JSONL schema, version 2
+
+Version 2 adds `sampling` (how the row was interleaved) and the dispersion fields on `result`, both of which gate what a consumer may do with a row.
+Version 1 rows were produced before those gates existed, were never consumed, and were discarded rather than left in the record claiming a bindingness they had not been checked for.
 
 Produced by `bench/measure_baselines.py`, consumed by the matrix renderer.
 One JSON object per line, append-only, one file per UTC date: `<YYYY-MM-DD>.jsonl`.
@@ -25,7 +28,10 @@ Only the first two are measured by someone the project controls.
 Unattested rows are claims and must be rendered separately, never merged into a binding result.
 
 `binding` is a boolean, with `binding_blockers` listing every reason it is false.
-A row fails to bind when the machine was busy, on battery, in low power mode or thermally warned at either end of the run, or when the fastest sample fell below the 1 ms timing floor.
+A row fails to bind when the machine was busy, on battery, in low power mode or thermally warned at either end of the run, when the fastest sample fell below the 1 ms timing floor, or when the repeats disagreed by more than `result.max_spread_pct`.
+
+That last gate is not implied by the first: a run reported load average 1.93 from start to finish while one spec's third sample came in at 22.07 against 99.38 and 90.06.
+A one-minute load average cannot see a transient that lands inside a single sample, so an idle machine is not evidence that a measurement succeeded, and `result.samples` is kept on every row so a consumer can check rather than trust.
 `binding: false` rows are kept deliberately: they are still valid for ratios measured in the same run, and they are the evidence for why a number was rejected.
 
 A published absolute number requires `provenance_tier` in (`owner-run`, `rental-run`) **and** `binding: true`.

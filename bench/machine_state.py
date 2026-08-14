@@ -32,6 +32,14 @@ IDLE_LOAD_FRACTION = 0.25
 # Below this, a single sample is measuring the power manager (see module docstring).
 TIMING_FLOOR_MS = 1.0
 
+# A run whose own repeats disagree by more than this is not a measurement,
+# whatever the machine said about itself. Added after a run in which load
+# average read 1.93 throughout while one spec's third sample came in at 22.07
+# against 99.38 and 90.06: load is averaged over a minute and says nothing
+# about a transient that lands inside one sample. The samples are the direct
+# evidence and they were being ignored.
+MAX_SPREAD_PCT = 10.0
+
 
 def _sysctl(key: str) -> str:
     return subprocess.run(
@@ -114,8 +122,22 @@ def timing_verdict(min_sample_ms: float) -> dict:
     }
 
 
-def binding_verdict(before: dict, after: dict, timing: dict) -> dict:
-    """A row binds only if the machine was clean throughout and the scale is real."""
+def dispersion_verdict(spread_pct: float | None) -> dict:
+    """Whether the repeats agreed well enough for the median to mean anything."""
+    over = spread_pct is not None and spread_pct > MAX_SPREAD_PCT
+    return {
+        "spread_pct": spread_pct,
+        "max_spread_pct": MAX_SPREAD_PCT,
+        "over_spread_limit": over,
+    }
+
+
+def binding_verdict(before: dict, after: dict, timing: dict,
+                    dispersion: dict | None = None) -> dict:
+    """A row binds only if the machine was clean, the scale is real, and the
+    repeats agree. The third condition is not implied by the first two: a
+    transient can land inside one sample without moving a one-minute load
+    average at all."""
     blockers = []
     blockers += [f"before: {b}" for b in before["blockers"]]
     blockers += [f"after: {b}" for b in after["blockers"]]
@@ -123,5 +145,10 @@ def binding_verdict(before: dict, after: dict, timing: dict) -> dict:
         blockers.append(
             f"sample {timing['min_sample_ms']} ms under the "
             f"{timing['floor_ms']} ms timing floor"
+        )
+    if dispersion and dispersion["over_spread_limit"]:
+        blockers.append(
+            f"repeats disagree by {dispersion['spread_pct']}%, over the "
+            f"{dispersion['max_spread_pct']}% limit"
         )
     return {"binding": not blockers, "binding_blockers": blockers}

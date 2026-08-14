@@ -76,6 +76,34 @@ def test_clean_machine_and_real_timescale_binds():
     assert verdict == {"binding": True, "binding_blockers": []}
 
 
+# --- the dispersion gate --------------------------------------------------
+
+
+def test_disagreeing_repeats_block_binding_on_a_quiet_machine():
+    """The case that forced this gate.
+
+    A run reported load average 1.93 from start to finish while one spec's
+    third sample came in at 22.07 against 99.38 and 90.06. Load is averaged
+    over a minute and cannot see a transient that lands inside one sample, so
+    an idle machine is not evidence that a measurement succeeded.
+    """
+    dispersion = machine_state.dispersion_verdict(85.84)
+    verdict = binding_verdict(state(), state(), timing_verdict(50.0), dispersion)
+    assert verdict["binding"] is False
+    assert any("repeats disagree" in b for b in verdict["binding_blockers"])
+
+
+def test_tight_repeats_still_bind():
+    dispersion = machine_state.dispersion_verdict(1.76)
+    assert dispersion["over_spread_limit"] is False
+    assert binding_verdict(state(), state(), timing_verdict(50.0), dispersion)["binding"]
+
+
+def test_a_single_sample_has_no_spread_and_is_not_blocked_by_it():
+    # one rep cannot disagree with itself; the other gates still apply
+    assert machine_state.dispersion_verdict(None)["over_spread_limit"] is False
+
+
 # --- the timing floor -----------------------------------------------------
 
 

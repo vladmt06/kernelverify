@@ -4,7 +4,7 @@
 Replaces hand-run numbers. Everything the per-chip matrix consumes is produced
 here, and every row carries what is needed to decide whether to believe it.
 
-Four rules are built in rather than remembered:
+Five rules are built in rather than remembered:
 
   interleaved     specs are measured round-robin, not one spec to completion,
                   because GPU timings drift together with power state and a
@@ -14,6 +14,10 @@ Four rules are built in rather than remembered:
   idle gate       load, power source, low power mode and thermal state are
                   sampled before and after; a row measured on a busy or
                   unplugged machine is kept, labelled, and never binds.
+  dispersion      repeats that disagree by more than the limit do not bind,
+                  because a one-minute load average cannot see a transient
+                  that lands inside one sample and an idle machine is
+                  therefore not evidence that the measurement succeeded.
   modelled bytes  utilisation is computed from the model's own tensor table,
                   never from file size, on both stacks.
 
@@ -51,7 +55,7 @@ LLAMA_CPP = Path("/Users/vlad/llama.cpp")
 LLAMA_BENCH = LLAMA_CPP / "build" / "bin" / "llama-bench"
 GGUF_DIR = Path("/Users/vlad/models/gguf")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 PROVENANCE_TIER = "owner-run"
 
 # The model both stacks run, so the two are comparable at all.
@@ -168,10 +172,10 @@ def mlx_build() -> dict:
 # single measurements, each returning one sample
 
 
-def run_llama_sample(model: Path, n_prompt: int, n_gen: int) -> dict:
+def run_llama_sample(model: Path, n_prompt: int, n_gen: int, depth: int = 0) -> dict:
     cmd = [
         str(LLAMA_BENCH), "-m", str(model), "-r", "1", "-o", "json",
-        "-p", str(n_prompt), "-n", str(n_gen),
+        "-p", str(n_prompt), "-n", str(n_gen), "-d", str(depth),
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
@@ -224,9 +228,13 @@ def build_specs(only: str | None) -> list[dict]:
     mlx_path = mlx_info.resolve_hf_model(MLX_REPO)
 
     if only in (None, "llama.cpp"):
+        # Decode at the same cache depth MLX carries, or the cross-stack row
+        # compares a cold cache against a 1024-token one and the KV traffic
+        # difference is charged to the stacks.
         specs.append({
             "id": "llamacpp/decode", "stack": "llama.cpp", "model_path": gguf_path,
             "kind": "decode", "n_prompt": 0, "n_gen": DECODE_TOKENS, "batch": 1,
+            "depth": PREFILL_TOKENS,
         })
         specs.append({
             "id": "llamacpp/prefill", "stack": "llama.cpp", "model_path": gguf_path,
@@ -247,16 +255,24 @@ def build_specs(only: str | None) -> list[dict]:
             # A short prompt here on purpose: these rows are about the decode
             # matmul's width, and a 1024-token prefill per stream would bury
             # that in prefill time.
+            #
+            # 64 generated tokens rather than 16: at 16 the timed region was
+            # short enough that samples came back in three separate clusters
+            # (15, 93 and 188 tok/s for the same spec), which is startup and
+            # memory-pressure noise rather than kernel throughput. A longer
+            # timed region dilutes it.
             specs.append({
                 "id": f"mlx/width{b}", "stack": "mlx-lm", "model_path": mlx_path,
-                "kind": "matmul_width", "n_prompt": 32, "n_gen": 16, "batch": b,
+                "kind": "matmul_width", "n_prompt": 32, "n_gen": 64, "batch": b,
             })
     return specs
 
 
 def measure_once(spec: dict) -> dict:
     if spec["stack"] == "llama.cpp":
-        return run_llama_sample(spec["model_path"], spec["n_prompt"], spec["n_gen"])
+        return run_llama_sample(
+            spec["model_path"], spec["n_prompt"], spec["n_gen"], spec.get("depth", 0)
+        )
     return run_mlx_sample(MLX_REPO, spec["n_prompt"], spec["n_gen"], spec["batch"])
 
 
@@ -293,7 +309,9 @@ def utilisation(spec: dict, value: float, ceilings: dict) -> dict:
         gen_bytes, kv_bytes = mlx_info.gen_bytes, mlx_info.kv_bytes
 
     if spec["kind"] == "decode":
-        ctx = spec["n_prompt"] + spec["n_gen"] / 2
+        # Cache depth is part of the traffic, so it has to be part of the model:
+        # llama.cpp reaches it with -d, MLX by prefilling.
+        ctx = spec.get("depth", 0) + spec["n_prompt"] + spec["n_gen"] / 2
         bytes_per_pass = gen_bytes(cost) + kv_bytes(cost, ctx)
         passes_per_s = value
         denominator = "read"
@@ -436,7 +454,8 @@ def main() -> int:
         sample_ms = min(s["sample"]["sample_ms"] for s in samples[spec["id"]])
         timing = machine_state.timing_verdict(sample_ms)
         median = statistics.median(vals)
-        spread = (max(vals) - min(vals)) / median * 100 if median else None
+        spread = round((max(vals) - min(vals)) / median * 100, 2) if median else None
+        dispersion = machine_state.dispersion_verdict(spread)
         util = utilisation(spec, median, ceilings)
         model_path = spec["model_path"]
         rows.append({
@@ -459,13 +478,14 @@ def main() -> int:
                 "matmul_width": spec["batch"],
                 "n_prompt": spec["n_prompt"],
                 "n_gen": spec["n_gen"],
+                "cache_depth": spec.get("depth", 0) + spec["n_prompt"],
                 "width_mechanism": "prompt-width" if spec["stack"] == "llama.cpp"
                                    else "batch-size",
             },
             "result": {
                 "metric": "tokens_per_s", "median": round(median, 2),
-                "spread_pct": round(spread, 2) if spread is not None else None,
-                "reps": len(vals), "samples": [round(v, 2) for v in vals], **timing,
+                "spread_pct": spread, "reps": len(vals),
+                "samples": [round(v, 2) for v in vals], **timing, **dispersion,
             },
             "sampling": {
                 "interleaved": True,
@@ -475,7 +495,7 @@ def main() -> int:
                 "group_members": [s["id"] for s in specs],
             },
             "roofline": util,
-            **machine_state.binding_verdict(before, after, timing),
+            **machine_state.binding_verdict(before, after, timing, dispersion),
         })
 
     with out_path.open("a") as fh:
