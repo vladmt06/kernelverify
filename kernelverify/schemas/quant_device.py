@@ -46,15 +46,13 @@ not the floor's.
 
 The build target
 ----------------
-Specs are stated against the consolidated runner's types (``KernelSpec`` is
-frozen; the one decided delta renames ``RunCase.output_shape`` to
-``output_shapes``, a list of ``(shape, dtype)``, and ``RunResult.output`` to
-``outputs``, a list). ``make_run_case`` and ``result_outputs`` below speak the
-post-delta vocabulary and adapt to whichever form the installed types carry,
-so nothing in this module moves when the freeze lands. Specialization is
-outside the runner by decision: ``specialize`` is a pure function from
-(member, activation dtype) to final MSL, and the spec carries that final
-source raw.
+Specs are stated against the runner types at the formal shape freeze
+(metal-runner 37892fa): ``RunCase.output_shapes`` is one ``(shape, dtype)``
+per output binding, ``RunResult.outputs`` pairs it, ``KernelSpec`` is
+unchanged. Specialization is outside the runner by decision: each member is a
+template with a ``$XT`` hole for the activation element type, and
+``runners.specialize`` fills it, so the spec the runner sees carries final
+MSL and the substitution stays this module's record.
 
 Execution
 ---------
@@ -69,6 +67,7 @@ from __future__ import annotations
 import numpy as np
 
 from kernelverify.runners.spec import Binding, KernelSpec, LaunchSpec, RunCase
+from kernelverify.runners.specialize import specialize
 
 ENTRY_POINT = "qmv_member"
 SIMD_WIDTH = 32  # asserted against the compiled pipeline before any dispatch
@@ -81,11 +80,11 @@ using namespace metal;
 """
 
 _ARGS = """\
-    device const __XT__* x        [[buffer(0)]],
+    device const ${XT}* x        [[buffer(0)]],
     device const half*   q        [[buffer(1)]],
     device const float*  scales   [[buffer(2)]],
     device const float*  biases   [[buffer(3)]],
-    device __XT__*       out      [[buffer(4)]],
+    device ${XT}*       out      [[buffer(4)]],
     constant uint&       d_in     [[buffer(5)]],
     constant uint&       d_out    [[buffer(6)]],
     constant uint&       n_groups [[buffer(7)]],
@@ -98,7 +97,7 @@ _DEQUANT_LOOP = _HEADER + "kernel void " + ENTRY_POINT + "(\n" + _ARGS + """\
     const uint row = tid.x;
     const uint batch = tid.y;
     if (row >= d_out) { return; }
-    device const __XT__* xrow = x + batch * d_in;
+    device const ${XT}* xrow = x + batch * d_in;
     device const half*   qrow = q + row * d_in;
     float acc = 0.0f;
     for (uint g = 0; g < n_groups; ++g) {
@@ -110,7 +109,7 @@ _DEQUANT_LOOP = _HEADER + "kernel void " + ENTRY_POINT + "(\n" + _ARGS + """\
             acc = fma(float(xrow[start + k]), w, acc);
         }
     }
-    out[batch * d_out + row] = __XT__(acc);
+    out[batch * d_out + row] = ${XT}(acc);
 }
 """
 
@@ -120,7 +119,7 @@ _DEQUANT_SIMD = _HEADER + "kernel void " + ENTRY_POINT + "(\n" + _ARGS + """\
 {
     const uint row = tg.x;
     const uint batch = tg.y;
-    device const __XT__* xrow = x + batch * d_in;
+    device const ${XT}* xrow = x + batch * d_in;
     device const half*   qrow = q + row * d_in;
     float acc = 0.0f;
     for (uint k = lane; k < d_in; k += 32u) {
@@ -130,7 +129,7 @@ _DEQUANT_SIMD = _HEADER + "kernel void " + ENTRY_POINT + "(\n" + _ARGS + """\
         acc = fma(float(xrow[k]), w, acc);
     }
     const float total = simd_sum(acc);
-    if (lane == 0u) { out[batch * d_out + row] = __XT__(total); }
+    if (lane == 0u) { out[batch * d_out + row] = ${XT}(total); }
 }
 """
 
@@ -140,7 +139,7 @@ _FACTORED_SIMD = _HEADER + "kernel void " + ENTRY_POINT + "(\n" + _ARGS + """\
 {
     const uint row = tg.x;
     const uint batch = tg.y;
-    device const __XT__* xrow = x + batch * d_in;
+    device const ${XT}* xrow = x + batch * d_in;
     device const half*   qrow = q + row * d_in;
     float acc = 0.0f;
     for (uint g = lane; g < n_groups; g += 32u) {
@@ -156,7 +155,7 @@ _FACTORED_SIMD = _HEADER + "kernel void " + ENTRY_POINT + "(\n" + _ARGS + """\
         acc = fma(biases[row * n_groups + g], xs, acc);
     }
     const float total = simd_sum(acc);
-    if (lane == 0u) { out[batch * d_out + row] = __XT__(total); }
+    if (lane == 0u) { out[batch * d_out + row] = ${XT}(total); }
 }
 """
 
@@ -184,20 +183,20 @@ _LAUNCHES = {
 }
 
 
-def specialize(member: str, x_dtype: str) -> str:
-    """The final MSL for one member at one activation dtype. Pure."""
+def device_member_template(member: str, x_dtype: str) -> KernelSpec:
+    """The member as a template spec: a $XT hole in the source.
+
+    Bindings and launch are already concrete - `specialize` passes them
+    through untouched by design - so the only hole is the activation element
+    type in the MSL itself.
+    """
     if member not in _SOURCES:
         raise KeyError(f"no device member named {member!r}; "
                        f"the class holds {sorted(_SOURCES)}")
     if x_dtype not in _XT:
         raise KeyError(f"activation dtype {x_dtype!r} is not one of {sorted(_XT)}")
-    return _SOURCES[member].replace("__XT__", _XT[x_dtype])
-
-
-def device_member_spec(member: str, x_dtype: str) -> KernelSpec:
-    """The runnable candidate: raw final MSL plus bindings and launch."""
     return KernelSpec(
-        source=specialize(member, x_dtype),
+        source=_SOURCES[member],
         entry_point=ENTRY_POINT,
         bindings=(
             Binding(kind="input", name="x", dtype=x_dtype),
@@ -215,26 +214,24 @@ def device_member_spec(member: str, x_dtype: str) -> KernelSpec:
     )
 
 
+def device_member_spec(member: str, x_dtype: str) -> KernelSpec:
+    """The runnable candidate: raw final MSL plus bindings and launch."""
+    return specialize(device_member_template(member, x_dtype),
+                      {"XT": _XT[x_dtype]})
+
+
 # ---------------------------------------------------------------------------
-# The one decided delta, absorbed here: cases and results are spoken of in the
-# post-freeze vocabulary (output_shapes / outputs as lists), and these two
-# adapters translate to whichever form the installed runner types carry.
+# Frozen-form construction and reading, kept as named functions so the
+# calibration harness states its intent once rather than repeating field names.
 # ---------------------------------------------------------------------------
 def make_run_case(inputs: dict, params: dict, output_shapes: list,
                   label: str = "") -> RunCase:
-    if "output_shapes" in getattr(RunCase, "__dataclass_fields__", {}):
-        return RunCase(inputs=inputs, params=params,
-                       output_shapes=output_shapes, label=label)
-    (shape, dtype), = output_shapes
-    return RunCase(inputs=inputs, params=params, output_shape=shape,
-                   output_dtype=dtype, label=label)
+    return RunCase(inputs=inputs, params=params,
+                   output_shapes=output_shapes, label=label)
 
 
 def result_outputs(result) -> list:
-    outputs = getattr(result, "outputs", None)
-    if outputs is not None:
-        return list(outputs)
-    return [result.output]
+    return list(result.outputs)
 
 
 # ---------------------------------------------------------------------------

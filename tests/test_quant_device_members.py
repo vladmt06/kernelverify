@@ -33,9 +33,8 @@ from kernelverify.schemas.quant_device import (  # noqa: E402
     DeviceMemberSession,
     device_member_case,
     device_member_spec,
-    make_run_case,
+    device_member_template,
     result_outputs,
-    specialize,
 )
 
 try:
@@ -73,17 +72,19 @@ def _x(dtype, seed=11):
 @pytest.mark.parametrize("member", DEVICE_MEMBERS)
 @pytest.mark.parametrize("x_dtype", ["float32", "float16"])
 def test_spec_is_final_msl_and_validates(member, x_dtype, artefact):
+    template = device_member_template(member, x_dtype)
+    assert "${XT}" in template.source, "the template carries the activation hole"
     spec = device_member_spec(member, x_dtype)
-    assert "__XT__" not in spec.source, "specialization must produce final source"
+    assert "$" not in spec.source, "specialization must produce final source"
     case = device_member_case(_x(np.dtype(x_dtype)), artefact)
     case.validate_against(spec)  # raises SpecError on any mismatch
 
 
-def test_specialize_rejects_unknown_names():
+def test_unknown_member_or_dtype_is_rejected():
     with pytest.raises(KeyError):
-        specialize("device-nonexistent", "float32")
+        device_member_spec("device-nonexistent", "float32")
     with pytest.raises(KeyError):
-        specialize("device-dequant-loop", "float64")
+        device_member_spec("device-dequant-loop", "float64")
 
 
 # ---------------------------------------------------------------------------
@@ -142,32 +143,18 @@ def test_code_carrier_is_exact_at_every_width():
 
 
 # ---------------------------------------------------------------------------
-# The decided delta, absorbed by adapters
+# The frozen shapes
 # ---------------------------------------------------------------------------
-def test_case_adapter_speaks_the_post_freeze_vocabulary(artefact):
+def test_case_speaks_the_frozen_vocabulary(artefact):
     x = _x(np.float16)
-    case = device_member_case(x, artefact, label="delta")
-    shapes = (case.output_shapes if hasattr(case, "output_shapes")
-              else [(case.output_shape, case.output_dtype)])
-    assert list(shapes) == [((2, 512), "float16")]
-    assert case.label == "delta"
+    case = device_member_case(x, artefact, label="frozen")
+    assert tuple(case.output_shapes) == (((2, 512), "float16"),)
+    assert case.label == "frozen"
 
 
-def test_case_adapter_rejects_multiple_outputs_until_the_freeze_lands():
-    from kernelverify.runners.spec import RunCase
-    if "output_shapes" in RunCase.__dataclass_fields__:
-        pytest.skip("freeze landed; multiple outputs are the runner's business now")
-    with pytest.raises(ValueError):
-        make_run_case(inputs={}, params={}, output_shapes=[((2, 2), "float32"),
-                                                           ((2, 2), "float32")])
-
-
-def test_result_adapter_returns_a_list():
+def test_result_reading_returns_a_list():
     payload = np.ones((2, 2), np.float32)
-    result = RunResult(output=payload) if hasattr(RunResult, "output") else None
-    if result is None:
-        pytest.skip("freeze landed; construct through the runner instead")
-    outputs = result_outputs(result)
+    outputs = result_outputs(RunResult(outputs=[payload]))
     assert isinstance(outputs, list) and len(outputs) == 1
     assert np.array_equal(outputs[0], payload)
 
