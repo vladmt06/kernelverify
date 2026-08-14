@@ -29,6 +29,8 @@ Vlad's global instructions still apply; this file adds the project's layout, how
   Frozen: reruns must reproduce the ADR 0001 tables exactly.
 - `bench/score_oracles.py` - mutation scoring of test policies at equal budget B.
 - `bench/probe_bottleneck.py` - one-off probe of where a given fault is detectable; rerun it whenever the catalogue grows.
+- `bench/calibrate_quant_bits.py` - per-bits ensemble adequacy for the quantization contract, with its pre-registered rule in the module docstring.
+  Prints both the pre-amendment and post-amendment reading of every width, which ADR 0009 relies on; do not remove either.
 - `bench/calibrate_k.py` - measures what the admissible-implementation contract demands of K, and how many ensemble members it takes to represent that contract.
   Rerun it whenever the contract, the ensemble or the catalogue changes.
 - `docs/adr/` - decisions with the measurements that forced them.
@@ -44,12 +46,16 @@ cd /Users/vlad/kernelverify
 .venv/bin/python bench/measure_escape.py   # ~1 min, must reproduce ADR 0001
 .venv/bin/python bench/score_oracles.py    # ~1 min warm, ~10 min after a catalogue or ensemble change
 .venv/bin/python bench/calibrate_k.py --n-random 24   # instant warm, ~20 min cold, must reproduce ADR 0005
+.venv/bin/python bench/calibrate_quant_bits.py        # ~3 min, must reproduce ADR 0009
 ```
 
 - Verdicts are cached at `bench/.cache/verdicts.pkl`, fingerprinted by mutation names, input modes, K and every ensemble member's label; any catalogue, mode or oracle change rebuilds automatically.
 - Contract measurements are cached at `bench/.cache/contract_k.pkl` under the same discipline, fingerprinted by the contract version and sample size as well.
 - Deleting `bench/.cache/` is the safe full reset.
 - The environment needs `torch`, which only `gelu[variant=erf]` uses; a worktree venv created without it fails part-way through a verdict build.
+- It also needs `mlx==0.32.0` and `mlx-lm==0.31.3`, pinned across worktrees so binding comparisons stay on one toolchain.
+  Without mlx, three test modules are skipped whole by a module-level `importorskip`, so the suite reports 181 passed and 3 skipped where an mlx-equipped venv passes 187.
+  The skipped modules hide their contents rather than their count, so quote test counts from an mlx-equipped venv only.
 
 ## Working rules for this repo
 
@@ -80,3 +86,9 @@ cd /Users/vlad/kernelverify
   ADR 0004's cache tag carried K but not the ensemble membership, so changing who computes the floor would have silently reused stale verdicts.
 - Any claim about how much of the admissible class an ensemble covers must be scored against an independently seeded draw of that class.
   Scoring a sample against itself makes every ensemble look complete.
+- Leave-one-class-out is a necessity diagnostic, never a pass or fail gate.
+  No ensemble can cover a class it holds no member of, so as a gate it fails every ensemble whose classes are genuinely distinct, and hardest when they are most distinct; ADR 0009 has the amendment and both readings.
+- Count ensemble members by comparing their output, not by counting their names.
+  `lut-gather` and `dequant-pairwise` in the quant contract are bit-identical at every bit width, so the six-member ensemble is five.
+- `mx.quantize` packs one contiguous little-endian bit stream per row, not 32 // bits values per word; the two agree only when bits divides 32.
+  Reading it the wrong way is silent rather than loud, because `verify_canonical_against_mlx` falls back to treating MLX's output as canonical whenever the comparison fails.
