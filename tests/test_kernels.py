@@ -74,7 +74,11 @@ def test_elementwise_fixed_points():
 
 
 def test_outputs_keep_the_input_dtype():
+    from kernelverify.reference.native_kernels import NATIVE_KERNELS
+
     for name, fn in KERNELS.items():
+        if name in NATIVE_KERNELS:
+            continue  # native ops have their own input schemas and test suite
         if name == "matmul":
             out = fn({"a": arr(4, 8, dtype=np.float16), "b": arr(8, 3, dtype=np.float16)})
         elif name in ("attention", "flash_attention"):
