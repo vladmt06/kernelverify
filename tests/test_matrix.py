@@ -218,6 +218,89 @@ def test_ceiling_row_renders_without_a_model():
 # ---------------------------------------------------------------------------
 # Loading
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Audit regressions: each pins a confirmed way the first version misled
+# ---------------------------------------------------------------------------
+def test_decode_and_prefill_in_one_group_are_not_comparable():
+    """The P1 from the audit, reproduced on the real record: the producer sets
+    sampling.group to the run id, so one group held decode, prefill and four
+    matmul widths, and the render published a decode row at 0.07x of its own
+    stack's prefill row - a workload ratio dressed as a stack ratio."""
+    a = classify(row())
+    b = classify(row(row_id="p", measurement={"kind": "prefill",
+                                              "matmul_width": 1024,
+                                              "n_prompt": 1024},
+                     result={"median": 615.3}))
+    ok, why = comparable(a, b)
+    assert not ok and "different workloads" in why
+    text = render([a.row, b.row])
+    assert "14.2" not in text and "0.07x" not in text, \
+        "a cross-workload ratio reached the reader"
+
+
+def test_same_workload_different_stack_still_compares():
+    """The gate must not break the comparison the table exists for."""
+    a = classify(row())
+    b = classify(row(row_id="m", stack={"name": "mlx-lm"},
+                     measurement={"width_mechanism": "batch-size"},
+                     result={"median": 52.1, "spread_pct": 2.0}))
+    ok, _ = comparable(a, b)
+    assert ok, "width_mechanism and model differ across stacks by construction"
+
+
+def test_comparison_rows_carry_their_identity():
+    """Six rows all labelled with the same stack string were unattributable;
+    the table now carries model and width-with-mechanism per row."""
+    a = row()
+    b = row(row_id="m", stack={"name": "mlx-lm"},
+            measurement={"width_mechanism": "batch-size"},
+            result={"median": 52.1, "spread_pct": 2.0})
+    text = render([a, b])
+    comparisons = text.split("## Comparisons", 1)[1]
+    assert "Qwen3-4B" in comparisons
+    assert "prompt-width" in comparisons and "batch-size" in comparisons
+    assert "baseline" in comparisons, "the baseline row must identify itself"
+
+
+def test_unknown_binding_resource_is_never_read_as_bandwidth():
+    """The producer stamps MLX prefill rows binding_resource='unknown' because
+    no parameter count exists to place them; defaulting those to bandwidth
+    publishes the 1%-catastrophe the column exists to prevent."""
+    resource, pct = utilisation(row(roofline={"binding_resource": "unknown",
+                                              "bandwidth_utilisation_pct": 1.2}))
+    assert pct is None and "unknown" in resource
+    resource, pct = utilisation(row(roofline={"binding_resource": "Compute",
+                                              "roofline_utilisation_pct": 60.0,
+                                              "bandwidth_utilisation_pct": 1.1}))
+    assert pct is None, "a casing variant must not silently become bandwidth"
+
+
+def test_unknown_provenance_tier_never_enters_a_comparison():
+    """The exclusion asks the trust question, not a literal match: a row
+    tagged 'Owner-Run' (unrecognised) must be barred exactly like the known
+    contributed tier."""
+    a = row()
+    impostor = row(row_id="i", provenance_tier="Owner-Run",
+                   stack={"name": "secret-fork"},
+                   result={"median": 91.3, "spread_pct": 1.0})
+    text = render([a, impostor])
+    comparisons = (text.split("## Comparisons", 1)[1].split("\n## ", 1)[0]
+                   if "## Comparisons" in text else "")
+    assert "secret-fork" not in comparisons
+    assert "secret-fork" in text, "the row is still shown, in the contributed section"
+
+
+def test_contributed_rows_carry_their_own_gate_results():
+    """A contributed row that failed its own dispersion gate rendered as a
+    bare number; its bindingness must travel with it."""
+    contributed = row(provenance_tier="community-unattested", binding=False,
+                      binding_blockers=["repeats disagree by 93.9%"])
+    text = render([contributed])
+    section = text.split("## Contributed", 1)[1]
+    assert "93.9%" in section
+    assert "0 refused, 1 contributed" in text
+
+
 def test_load_reads_every_dated_file_in_order(tmp_path):
     (tmp_path / "2026-08-13.jsonl").write_text(json.dumps(row(row_id="older")) + "\n")
     (tmp_path / "2026-08-14.jsonl").write_text(
