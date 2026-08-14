@@ -15,8 +15,8 @@ from kernelverify.reference.kernels import KERNELS
 
 def test_catalogue_size_and_unique_names():
     names = [m.name for m in CATALOGUE]
-    assert len(names) == 56
-    assert len(set(names)) == 56
+    assert len(names) == 58
+    assert len(set(names)) == 58
 
 
 def test_every_published_fault_is_in_the_catalogue():

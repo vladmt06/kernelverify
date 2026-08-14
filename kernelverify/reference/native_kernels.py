@@ -40,13 +40,17 @@ from kernelverify.schemas.quant_contract import (
 # ---------------------------------------------------------------------------
 def quantized_matmul(inputs, *, scales_rotated=False, nibble_swapped=False,
                      bias_dropped=False, group_size_halved=False,
-                     dequant_dtype="float32"):
+                     dequant_dtype="float32", accum_dtype="float32"):
     """x @ dequant(quantize(w)).T with the canonical MLX-affine contract.
 
     Correct by default: canonical quantization of `w`, dequantized at fp32,
     numpy-pairwise MAC. Artefact seams corrupt the quantization artefact the
     way a compiler or packer would; `dequant_dtype` "float16" is the
     intermediate-precision fault the contract explicitly forbids.
+    `accum_dtype` "float16" is the OTHER C1 violation - the MAC accumulator
+    held in half precision - modelled as sequential fp16 accumulation of fp16
+    products, the exact fault the pack's kernel-side probe showed escaping the
+    shipped tolerance at typical fp16 operating points.
     """
     x, w = inputs["x"], inputs["w"]
     bits = int(inputs["bits"][0])
@@ -62,6 +66,20 @@ def quantized_matmul(inputs, *, scales_rotated=False, nibble_swapped=False,
     wd = dequantize(artefact, np.float32)
     if dequant_dtype != "float32":
         wd = wd.astype(dequant_dtype).astype(np.float32)
+    if accum_dtype in ("float16", "float16-seq"):
+        products = (x.astype(np.float16)[:, None, :]
+                    * wd.astype(np.float16)[None, :, :])
+        if accum_dtype == "float16-seq":
+            # Sequential left-to-right fp16 adds: the naive
+            # one-thread-per-output kernel shape. Error grows with D and the
+            # battery separates it broadly, even at fp16 activations.
+            out = np.add.accumulate(products, axis=-1, dtype=np.float16)[..., -1]
+        else:
+            # Pairwise (tree) fp16 adds: the simdgroup-reduction shape. Error
+            # grows with the tree depth only and measured 0/280 separable at
+            # fp16 activations - the structural-attestation class.
+            out = np.add.reduce(products, axis=-1, dtype=np.float16)
+        return out.astype(x.dtype)
     return (x.astype(np.float32) @ wd.T).astype(x.dtype)
 
 

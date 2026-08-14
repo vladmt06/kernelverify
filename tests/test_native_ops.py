@@ -82,7 +82,7 @@ def test_every_native_seam_expresses_somewhere():
     natives = [m for m in CATALOGUE if KERNEL_TO_OP[m.kernel] in NATIVE_OPS
                and m.params != {"softmax_topk_order": True}
                and m.params != {"tie_high": True}]
-    assert len(natives) == 9
+    assert len(natives) == 11
     for m in natives:
         op = NATIVE_OPS[KERNEL_TO_OP[m.kernel]]
         faulty = m.build()

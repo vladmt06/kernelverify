@@ -140,6 +140,12 @@ CATALOGUE: list[Mutation] = [
        "wrong group_size: each scale applied across half its span"),
     _m("quantized_matmul", {"dequant_dtype": "float16"},
        "intermediate dequant held at fp16 (Phase 0: outside contract tolerance)"),
+    _m("quantized_matmul", {"accum_dtype": "float16"},
+       "MAC accumulator held at fp16, tree-reduced (separable at fp32 "
+       "activations only; the fp16-activation structural-attestation class)"),
+    _m("quantized_matmul", {"accum_dtype": "float16-seq"},
+       "MAC accumulator held at fp16, sequential (naive kernel shape; "
+       "separable broadly, up to 23x over tolerance at long reductions)"),
     # MoE routing. These are the divergences that actually ship in mixture
     # models, including two that only express on structured inputs.
     _m("moe_dispatch", {"renormalize": False},
