@@ -117,7 +117,16 @@ def oracle_error(candidate: np.ndarray, ref: np.ndarray) -> float:
 
 
 def faults_for(op: str) -> list:
-    return [m for m in CATALOGUE if KERNEL_TO_CORPUS_OP[m.kernel] == op]
+    """The catalogue faults belonging to a corpus operator.
+
+    The catalogue also carries native-operator faults (quantized matmul, MoE
+    dispatch). Those are governed by a different contract with its own
+    ensemble and its own K in `kernelverify/schemas/`, so they are deliberately
+    outside this calibration: mixing them in would anchor one K against two
+    unrelated admissible classes. `.get` rather than indexing, so a new native
+    kernel is skipped here instead of crashing a corpus measurement.
+    """
+    return [m for m in CATALOGUE if KERNEL_TO_CORPUS_OP.get(m.kernel) == op]
 
 
 # The ADR 0004 ensemble membership, named through contract members. Verified
