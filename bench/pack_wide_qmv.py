@@ -58,6 +58,15 @@ MIN_SAMPLE_MS = 5.0
 ROUNDS = 7
 WORKING_SET_MB = 512
 
+# A round is only trustworthy if the reference arm reads the same each time.
+# Twice now a run has reported a kernel "win" that was the machine's clock
+# moving under it: MLX's own time for one fixed shape moved 2.9x inside a
+# single interleaved round while nothing about MLX changed. Interleaving alone
+# does not catch that, it only makes both arms suffer it together, so the
+# reference arm's own spread is checked and the ratios are withheld when it is
+# too wide to support them.
+MAX_CANARY_SPREAD = 1.5
+
 
 def base_tol(ref: np.ndarray) -> float:
     return 4.0 * FP16_EPS * float(np.max(np.abs(ref)))
@@ -145,8 +154,9 @@ def dispatch(build_one, copies: int) -> float:
     return time.perf_counter() - t0
 
 
-def bench() -> None:
+def bench() -> bool:
     kernel = build(mx)
+    any_unstable = False
     print(f"\ntiming: interleaved A/B, {ROUNDS} rounds, batched dispatches of "
           f">= {MIN_SAMPLE_MS} ms, weights rotated over {WORKING_SET_MB} MB")
 
@@ -162,6 +172,7 @@ def bench() -> None:
         print(f"\n  {d_out} x {d_in}, {bits}-bit group 64, {n_sets} weight sets")
         print(f"  {'M':>3} {'R':>3} {'ours us':>9} {'mlx us':>9} {'ratio':>7} "
               f"{'ours GB/s':>10} {'mlx passes':>11}")
+        unstable = False
         for m in TIMED_M:
             x = mx.random.normal(shape=(m, d_in)).astype(mx.float16)
             mx.eval(x)
@@ -190,18 +201,31 @@ def bench() -> None:
                 b_samples.append(dispatch(theirs, copies) / copies)
             t_ours = statistics.median(a_samples)
             t_mlx = statistics.median(b_samples)
+            spread = max(b_samples) / min(b_samples)
+            if spread > MAX_CANARY_SPREAD:
+                print(f"  {m:>3} {r:>3} {'':>9} {'':>9} {'REJECTED':>7} "
+                      f"canary spread {spread:.2f}x > {MAX_CANARY_SPREAD}x")
+                unstable = True
+                continue
             passes = -(-m // 5) if m < 12 else 0
             print(f"  {m:>3} {r:>3} {t_ours*1e6:>9.1f} {t_mlx*1e6:>9.1f} "
                   f"{t_mlx/t_ours:>6.2f}x {weight_bytes/t_ours/1e9:>10.1f} "
                   f"{passes:>11}")
+        any_unstable = any_unstable or unstable
+    return not any_unstable
 
 
 def main() -> int:
     if not verify(MetalRunner()):
         print("\nVERDICT: kernel does not verify; no timing claim permitted")
         return 1
-    bench()
+    stable = bench()
     print("\nratio > 1.00x means the verified kernel beats mx.quantized_matmul")
+    if not stable:
+        print("some rows were rejected: the reference arm's own time moved too "
+              "much inside the round, so those ratios would describe the "
+              "machine rather than the kernels. Re-run on an idle machine.")
+        return 1
     return 0
 
 
