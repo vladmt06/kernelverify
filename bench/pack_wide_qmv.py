@@ -1,8 +1,9 @@
 """Verify, then time, the wide-tile quantized matvec against MLX's own.
 
 Order matters and is enforced: no timing is printed unless every case
-verifies through the crash-isolated runner against the Phase 0 contract
-oracle (r_contract anchor, ensemble floor, K = 3).
+verifies through the crash-isolated runner against the shipped verdict,
+via kernelverify.pack.verify (the battery's own NATIVE_OPS reference and
+tolerance; today that is the r_contract anchor, ensemble floor, K = 3).
 
 Timing discipline, from kv-runner-e9's measurement that GPU timings near
 200 us move by up to 4x with power state:
@@ -34,6 +35,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import mlx.core as mx  # noqa: E402
 
+from kernelverify.pack.verify import (  # noqa: E402
+    judge,
+    qmv_inputs,
+    reference_and_tolerance,
+)
 from kernelverify.pack.wide_qmv import (  # noqa: E402
     SUPPORTED_BITS,
     build,
@@ -42,15 +48,11 @@ from kernelverify.pack.wide_qmv import (  # noqa: E402
     pack_codes,
 )
 from kernelverify.runners.runner import DeviceCase, MetalRunner  # noqa: E402
-from kernelverify.schemas.native_ops import K_QUANT  # noqa: E402
 from kernelverify.schemas.quant_contract import (  # noqa: E402
-    ENSEMBLE,
     QuantContract,
     canonical_quantize,
-    r_contract,
 )
 
-FP16_EPS = 9.77e-4          # native_ops._base_tol convention: 4 ulp of the scale
 SHAPES = [(2560, 2560), (4096, 4096)]
 VERIFY_M = [1, 4, 5, 6, 8, 11]
 TIMED_M = [1, 2, 4, 5, 6, 7, 8, 10, 11]
@@ -66,10 +68,6 @@ WORKING_SET_MB = 512
 # reference arm's own spread is checked and the ratios are withheld when it is
 # too wide to support them.
 MAX_CANARY_SPREAD = 1.5
-
-
-def base_tol(ref: np.ndarray) -> float:
-    return 4.0 * FP16_EPS * float(np.max(np.abs(ref)))
 
 
 def artefact_for(d_out: int, d_in: int, seed: int, bits: int = 4):
@@ -106,11 +104,8 @@ def verify(runner: MetalRunner) -> bool:
             for tag, scale in (("unit", 1.0), ("corpus", 10.0)):
                 x = (rng.standard_normal((m, d_in)).astype(np.float32)
                      * scale).astype(np.float16)
-                ref = r_contract(x, art)
-                floor = max(
-                    float(np.max(np.abs(fn(x, art).astype(np.float64) - ref)))
-                    for fn in ENSEMBLE.values()
-                )
+                ref, tol = reference_and_tolerance(
+                    "quantized_matmul", qmv_inputs(x, w, bits))
                 grid, threadgroup, r = launch_config(d_out, m)
                 cases.append(DeviceCase(
                     inputs={"x": x, "w_q": packed,
@@ -118,18 +113,16 @@ def verify(runner: MetalRunner) -> bool:
                     output_shapes=[((m, d_out), "float16")],
                     grid=grid, threadgroup=threadgroup,
                     template={"T": "float16", "M": m, "R": r, "BITS": bits}))
-                expected.append((m, tag, ref, max(base_tol(ref), K_QUANT * floor)))
+                expected.append((m, tag, ref, tol))
 
         for result, (m, tag, ref, tol) in zip(runner.run(spec, cases), expected):
             if not result.ok:
                 print(f"    M={m:<3}{tag:<7} RUNNER FAIL: {result.error}")
                 ok = False
                 continue
-            err = float(np.max(np.abs(result.outputs[0].astype(np.float64) - ref)))
-            passed = err <= tol
-            ok = ok and passed
-            print(f"    {bits}-bit M={m:<3}{tag:<7} err {err:9.3e}  "
-                  f"tol {tol:9.3e}  {'pass' if passed else 'FAIL'}")
+            v = judge(result.outputs[0], ref, tol)
+            ok = ok and v.ok
+            print(f"    {bits}-bit M={m:<3}{tag:<7} {v}")
     return ok
 
 
