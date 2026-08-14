@@ -9,14 +9,14 @@ import functools
 import inspect
 
 from cpu_ports import BUGGY_TO_CONTROL, PORTS
-from kernelverify.mutation.catalogue import CATALOGUE, KERNEL_TO_CORPUS_OP
+from kernelverify.mutation.catalogue import CATALOGUE, KERNEL_TO_OP
 from kernelverify.reference.kernels import KERNELS
 
 
 def test_catalogue_size_and_unique_names():
     names = [m.name for m in CATALOGUE]
-    assert len(names) == 45
-    assert len(set(names)) == 45
+    assert len(names) == 56
+    assert len(set(names)) == 56
 
 
 def test_every_published_fault_is_in_the_catalogue():
@@ -39,7 +39,7 @@ def test_corpus_mutations_pin_exactly_the_port_keywords():
 def test_every_mutation_builds_against_a_real_seam():
     for m in CATALOGUE:
         assert m.kernel in KERNELS
-        assert m.kernel in KERNEL_TO_CORPUS_OP
+        assert m.kernel in KERNEL_TO_OP
         seams = {
             name
             for name, p in inspect.signature(KERNELS[m.kernel]).parameters.items()

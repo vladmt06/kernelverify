@@ -126,6 +126,36 @@ CATALOGUE: list[Mutation] = [
     # tolerance must keep catching this, or it has legitimised the very
     # precision faults the verifier exists to reject.
     _m("attention", {"scores_dtype": "float16"}, "score matrix held at fp16"),
+    # -- Native operators (Tranche 1.5) --------------------------------------
+    # Quantized matmul. The artefact faults are the class no input-space axis
+    # can synthesise: they corrupt the compiled artefact, not the math, so the
+    # verdict depends on anchoring against the contract (ADR 0003 Exp 2).
+    _m("quantized_matmul", {"scales_rotated": True},
+       "group boundary misaligned: every group reads its neighbour's scale"),
+    _m("quantized_matmul", {"nibble_swapped": True},
+       "packing order fault: adjacent quantized codes transposed"),
+    _m("quantized_matmul", {"bias_dropped": True},
+       "symmetric-scheme confusion: the affine bias is discarded"),
+    _m("quantized_matmul", {"group_size_halved": True},
+       "wrong group_size: each scale applied across half its span"),
+    _m("quantized_matmul", {"dequant_dtype": "float16"},
+       "intermediate dequant held at fp16 (Phase 0: outside contract tolerance)"),
+    # MoE routing. These are the divergences that actually ship in mixture
+    # models, including two that only express on structured inputs.
+    _m("moe_dispatch", {"renormalize": False},
+       "top-k weights left unnormalised"),
+    _m("moe_dispatch", {"expert_offset": 1},
+       "expert index off by one"),
+    _m("moe_dispatch", {"gate_dtype": "float16"},
+       "router logits computed at fp16"),
+    _m("moe_dispatch", {"k_offset": -1},
+       "top-1 routing where the contract says top-2"),
+    _m("moe_dispatch", {"tie_high": True},
+       "tie-break to the higher index (expresses only where logits tie)"),
+    # Expected equivalent: softmax over the selected logits equals
+    # renormalising the full softmax, exactly.
+    _m("moe_dispatch", {"softmax_topk_order": True},
+       "softmax after top-k instead of renormalising"),
 ]
 
 
@@ -144,6 +174,18 @@ KERNEL_TO_CORPUS_OP = {
     "attention": "attention_triton",
     "flash_attention": "flash_attention_triton",
 }
+
+# Native operators (Tranche 1.5) carry their own schema, fp64 reference and
+# tolerance in kernelverify/schemas/native_ops.py instead of borrowing a
+# corpus operator's.
+KERNEL_TO_NATIVE_OP = {
+    "quantized_matmul": "quantized_matmul",
+    "moe_dispatch": "moe_dispatch",
+}
+
+# The single mapping every consumer should use: kernel name -> operator key,
+# valid for both families.
+KERNEL_TO_OP = {**KERNEL_TO_CORPUS_OP, **KERNEL_TO_NATIVE_OP}
 
 
 def by_kernel() -> dict[str, list[Mutation]]:

@@ -67,8 +67,15 @@ from kernelverify.battery.policies import (  # noqa: E402,F401 - test helpers
     _is_pow2,
     _tie_break,
 )
-from kernelverify.mutation.catalogue import CATALOGUE, KERNEL_TO_CORPUS_OP  # noqa: E402
+from kernelverify.mutation.catalogue import CATALOGUE, KERNEL_TO_OP  # noqa: E402
+from kernelverify.schemas.native_ops import NATIVE_OPS  # noqa: E402
 from measure_escape import load_meta  # noqa: E402
+
+
+def _meta_for(op: str) -> dict:
+    """Schema for an operator, from its native registry or the corpus."""
+    native = NATIVE_OPS.get(op)
+    return native.meta if native else load_meta(op)
 
 
 def main() -> int:
@@ -87,7 +94,7 @@ def main() -> int:
     corpus_subset = [m for m in viable if m.from_corpus]
     print(f"of the viable faults, {len(corpus_subset)} are the ones the corpus seeds by hand")
 
-    metas = {op: load_meta(op) for op in set(KERNEL_TO_CORPUS_OP.values())}
+    metas = {op: _meta_for(op) for op in set(KERNEL_TO_OP.values())}
 
     def detection_rate(policy_fn, stochastic, budget, population):
         repeats = REPEATS if stochastic else 1
@@ -96,7 +103,7 @@ def main() -> int:
             rng = random.Random(1000 + repeat)
             found = 0
             for mutation in population:
-                corpus_op = KERNEL_TO_CORPUS_OP[mutation.kernel]
+                corpus_op = KERNEL_TO_OP[mutation.kernel]
                 meta = metas[corpus_op]
                 selected = policy_fn(spaces[corpus_op], meta, budget, rng)
                 verdicts = table[mutation.name]
@@ -141,7 +148,7 @@ def main() -> int:
         for repeat in range(REPEATS):
             rng = random.Random(1000 + repeat)
             for mutation in viable:
-                corpus_op = KERNEL_TO_CORPUS_OP[mutation.kernel]
+                corpus_op = KERNEL_TO_OP[mutation.kernel]
                 selected = fn(spaces[corpus_op], metas[corpus_op], budget, rng)
                 if not any(table[mutation.name][c] for c in selected):
                     miss_counts[mutation.name] = miss_counts.get(mutation.name, 0) + 1

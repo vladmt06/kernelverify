@@ -66,10 +66,14 @@ QUANTIZED_MATMUL_META = {
             {"name": "x", "dims": ["B", "D_IN"]},
             {"name": "w", "dims": ["D_OUT", "D_IN"]},
         ],
+        # Shapes are chosen for fault expression, not perf realism: dilution
+        # (ADR 0001) means a short reduction carries the strongest absolute
+        # signal, and 448 supplies the non-power-of-two the boundary policy
+        # needs while staying a whole number of 64-wide quantization groups.
         "dims": [
             {"name": "B", "candidates": [1, 4]},
-            {"name": "D_IN", "candidates": [256, 448, 2048]},
-            {"name": "D_OUT", "candidates": [16, 2048]},
+            {"name": "D_IN", "candidates": [128, 448, 1024]},
+            {"name": "D_OUT", "candidates": [16, 512]},
             {"name": "BITS", "candidates": [2, 3, 4, 8]},
         ],
     },
@@ -94,8 +98,34 @@ def qmm_tolerance(case, inputs, ref) -> float:
     return max(_base_tol(case.dtype, ref), K_QUANT * floor)
 
 
+WEIGHT_SCALE = 0.05
+
+
+def _as_weights(arr: np.ndarray) -> np.ndarray:
+    """Rescale a generated tensor to a realistic weight magnitude.
+
+    The input modes shape the ACTIVATIONS; a weight tensor drawn at the corpus
+    range (uniform[-10,10]) is not an operating point any real model has, and
+    at D_IN=1024 it overflows fp16 outright, which turns every fp16 case into
+    a range failure rather than a fault measurement. The mode's structure
+    (constant rows, opposed signs, near zero) is preserved by scaling; only the
+    magnitude is made realistic. An all-zero tensor is left alone.
+    """
+    peak = float(np.max(np.abs(arr.astype(np.float32)))) if arr.size else 0.0
+    if peak == 0.0:
+        return arr
+    return (arr.astype(np.float32) * (WEIGHT_SCALE / peak)).astype(arr.dtype)
+
+
 def qmm_augment(case, inputs):
     inputs["bits"] = np.array([case.dim_map["BITS"]], dtype=np.int32)
+    inputs["w"] = _as_weights(inputs["w"])
+    return inputs
+
+
+def moe_augment(case, inputs):
+    inputs["router"] = _as_weights(inputs["router"])
+    inputs["experts"] = _as_weights(inputs["experts"])
     return inputs
 
 
@@ -113,8 +143,8 @@ MOE_DISPATCH_META = {
         "dims": [
             {"name": "B", "candidates": [1, 8]},
             {"name": "D", "candidates": [64, 100, 512]},
-            {"name": "E", "candidates": [4, 64]},
-            {"name": "D_OUT", "candidates": [32, 512]},
+            {"name": "E", "candidates": [4, 16]},
+            {"name": "D_OUT", "candidates": [32, 256]},
         ],
     },
     "dtypes": ["float32", "float16"],
@@ -172,5 +202,6 @@ def moe_tolerance(case, inputs, ref) -> float:
 NATIVE_OPS = {
     "quantized_matmul": NativeOp(QUANTIZED_MATMUL_META, qmm_reference,
                                  qmm_tolerance, qmm_augment),
-    "moe_dispatch": NativeOp(MOE_DISPATCH_META, moe_reference, moe_tolerance),
+    "moe_dispatch": NativeOp(MOE_DISPATCH_META, moe_reference, moe_tolerance,
+                             moe_augment),
 }
