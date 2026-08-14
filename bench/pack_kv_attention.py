@@ -46,7 +46,7 @@ from kernelverify.pack.verify import (  # noqa: E402
     kv_inputs,
     reference_and_tolerance,
 )
-from kernelverify.runners.runner import DeviceCase, MetalRunner  # noqa: E402
+from kernelverify.runners import MetalRunner, RunCase, specialize  # noqa: E402
 
 # (B, H, T, DH) x BITS: 3 shapes x 2 widths = the 6 runner-isolated cases.
 VERIFY_SHAPES = [(1, 8, 512, 128), (4, 2, 64, 64), (1, 4, 300, 128)]
@@ -128,8 +128,10 @@ def artefacts_identical(cache, bits, packed, scales, biases) -> bool:
 def verify(runner: MetalRunner) -> bool:
     print("correctness (runner-isolated, shipped kv_attention contract):")
     ok = True
-    spec = kernel_spec()
-    cases, expected = [], []
+    template = kernel_spec()
+    # One spec per case (BITS and DH are compile-time constants in the raw
+    # door), all sharing one worker session as one candidate.
+    spec_batches, expected = [], []
     for b, h, t, dh in VERIFY_SHAPES:
         for bits in VERIFY_BITS:
             q, kc, vc, nk, nv = make_case(b, h, t, dh, seed=t + bits)
@@ -141,14 +143,14 @@ def verify(runner: MetalRunner) -> bool:
                 ok = False
             ref, tol = reference_and_tolerance(
                 "kv_attention", kv_inputs(q, kc, vc, nk, nv, bits))
-            grid, threadgroup = launch_config(b, h)
-            cases.append(DeviceCase(
+            spec = specialize(template, {"T": "half", "BITS": bits, "DH": dh})
+            spec_batches.append((spec, [RunCase(
                 inputs={"q": q, "k_wq": k_wq, "k_scales": k_sc, "k_biases": k_bi,
                         "v_wq": v_wq, "v_scales": v_sc, "v_biases": v_bi,
                         "new_k": nk, "new_v": nv},
+                params={"b_rows": b, "n_heads": h, "t_cached": t},
                 output_shapes=[((b, h, dh), "float16")],
-                grid=grid, threadgroup=threadgroup,
-                template={"T": "float16", "BITS": bits, "DH": dh}))
+                label=f"B={b} H={h} T={t} DH={dh} {bits}-bit")]))
             # The incumbent is judged by the same oracle, so the timing
             # compares two contract-passing implementations.
             incumbent = mlx_arm(mx.array(q), mx.array(nk), mx.array(nv),
@@ -156,11 +158,11 @@ def verify(runner: MetalRunner) -> bool:
             mx.eval(incumbent)
             expected.append((b, h, t, dh, bits, ref, tol, np.array(incumbent)))
 
-    for result, (b, h, t, dh, bits, ref, tol, incumbent) in zip(
-            runner.run(spec, cases), expected):
+    results = [r for batch in runner.run_candidate(spec_batches) for r in batch]
+    for result, (b, h, t, dh, bits, ref, tol, incumbent) in zip(results, expected):
         tag = f"B={b} H={h} T={t:<4} DH={dh:<4} {bits}-bit"
         if not result.ok:
-            print(f"    {tag} RUNNER FAIL: {result.error}")
+            print(f"    {tag} RUNNER FAIL: {result.status.value}: {result.detail}")
             ok = False
             continue
         v_ours = judge(result.outputs[0], ref, tol)

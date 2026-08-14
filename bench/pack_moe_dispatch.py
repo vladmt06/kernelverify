@@ -43,7 +43,7 @@ from kernelverify.pack.verify import (  # noqa: E402
     reference_and_tolerance,
 )
 from kernelverify.pack.wide_qmv import pack_nibbles  # noqa: E402
-from kernelverify.runners.runner import DeviceCase, MetalRunner  # noqa: E402
+from kernelverify.runners import MetalRunner, RunCase, specialize  # noqa: E402
 from kernelverify.schemas.quant_contract import (  # noqa: E402
     QuantContract,
     canonical_quantize,
@@ -106,14 +106,15 @@ def verify(runner: MetalRunner) -> bool:
             ref, tol = reference_and_tolerance(
                 "moe_dispatch", moe_inputs(x, router, arts))
 
-            grid, threadgroup = routing_launch(n_tokens)
-            route = runner.run(routing_spec(), [DeviceCase(
-                inputs={"x": x, "router": router},
-                output_shapes=[((n_tokens, 2), "uint32"), ((n_tokens, 2), "float32")],
-                grid=grid, threadgroup=threadgroup,
-                template={"E": n_experts})])[0]
+            route = runner.run_one(
+                specialize(routing_spec(), {"E": n_experts}),
+                RunCase(inputs={"x": x, "router": router},
+                        params={"d_in_arg": d_model, "n_tokens": n_tokens},
+                        output_shapes=[((n_tokens, 2), "uint32"),
+                                       ((n_tokens, 2), "float32")]))
             if not route.ok:
-                print(f"    {mode:<14} n={n_tokens:<3} ROUTING RUNNER FAIL: {route.error}")
+                print(f"    {mode:<14} n={n_tokens:<3} ROUTING RUNNER FAIL: "
+                      f"{route.status.value}: {route.detail}")
                 ok = False
                 continue
             idx, gate = route.outputs
@@ -127,14 +128,16 @@ def verify(runner: MetalRunner) -> bool:
             routing_exact = np.array_equal(idx.astype(int), want)
 
             grid, threadgroup, r = dispatch_launch(d_ffn, n_tokens)
-            result = runner.run(dispatch_spec(), [DeviceCase(
-                inputs={"x": x, "idx": idx, "gate": gate, "w_q": packed,
-                        "scales": scales, "biases": biases},
-                output_shapes=[((n_tokens, d_ffn), "float16")],
-                grid=grid, threadgroup=threadgroup,
-                template={"T": "float16", "R": r})])[0]
+            result = runner.run_one(
+                specialize(dispatch_spec(), {"T": "half", "R": r}),
+                RunCase(inputs={"x": x, "idx": idx, "gate": gate, "w_q": packed,
+                                "scales": scales, "biases": biases},
+                        params={"d_in_arg": d_model, "d_out_arg": d_ffn,
+                                "row_blocks": grid[1], "n_tokens": n_tokens},
+                        output_shapes=[((n_tokens, d_ffn), "float16")]))
             if not result.ok:
-                print(f"    {mode:<14} n={n_tokens:<3} DISPATCH RUNNER FAIL: {result.error}")
+                print(f"    {mode:<14} n={n_tokens:<3} DISPATCH RUNNER FAIL: "
+                      f"{result.status.value}: {result.detail}")
                 ok = False
                 continue
             v = judge(result.outputs[0], ref, tol)

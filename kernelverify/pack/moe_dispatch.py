@@ -29,6 +29,10 @@ SIMD_WIDTH = 32
 SIMDGROUPS_PER_THREADGROUP = 8
 ROWS_PER_SIMDGROUP = 4
 
+# The bodies are door-neutral: `D_IN` / `D_OUT` are spelled differently per
+# door (MLX's generated shape buffers, or the runner door's scalar bindings),
+# and everything else is shared so the doors cannot drift (the spike's W4
+# pattern, bench/spike_dequant_gemv.py).
 # --------------------------------------------------------------------------
 # routing: one simdgroup per token
 # --------------------------------------------------------------------------
@@ -36,7 +40,7 @@ ROUTING_MSL = """
     threadgroup float lg[E];
     uint token = threadgroup_position_in_grid.x;
     uint lane  = thread_index_in_simdgroup;
-    uint d_in  = x_shape[1];
+    uint d_in  = D_IN;
     const device half4* x4 = (const device half4*)(x + token * d_in);
 
     // Every lane takes a slice of the experts and writes that logit.
@@ -81,8 +85,8 @@ DISPATCH_MSL = """
     uint sg_row = thread_position_in_grid.y;
     uint lane   = thread_position_in_grid.x;
     uint token  = thread_position_in_grid.z;
-    uint d_in   = x_shape[1];
-    uint d_out  = scales_shape[1];
+    uint d_in   = D_IN;
+    uint d_out  = D_OUT;
     uint words  = d_in / 8;
     uint n_groups = d_in / 64;
     const device half4* x4 = (const device half4*)(x + token * d_in);
@@ -155,24 +159,88 @@ def dispatch_launch(d_out: int, n_tokens: int) -> tuple:
 
 
 def routing_spec():
-    from kernelverify.runners.runner import KernelSpec
+    """The runner-door template: `specialize()` fills `E`, the token count
+    arrives as the `n_tokens` grid extent, d_model as a scalar binding."""
+    from kernelverify.runners import Binding, BindingKind, KernelSpec, LaunchSpec
 
-    return KernelSpec(name=ROUTING_NAME, source=ROUTING_MSL,
-                      input_names=ROUTING_INPUTS, output_names=ROUTING_OUTPUTS)
+    source = f"""
+#include <metal_stdlib>
+using namespace metal;
+constant constexpr uint E = $E;
+kernel void {ROUTING_NAME}(
+    device const half* x      [[buffer(0)]],
+    device const half* router [[buffer(1)]],
+    device uint*  idx         [[buffer(2)]],
+    device float* gate        [[buffer(3)]],
+    constant uint& d_in_arg   [[buffer(4)]],
+    uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]],
+    uint  thread_index_in_simdgroup    [[thread_index_in_simdgroup]]) {{
+{ROUTING_MSL.replace("D_IN", "d_in_arg")}
+}}
+"""
+    return KernelSpec(
+        source=source,
+        entry_point=ROUTING_NAME,
+        name=f"{ROUTING_NAME}-E$E",
+        bindings=(Binding(BindingKind.INPUT, "x"),
+                  Binding(BindingKind.INPUT, "router"),
+                  Binding(BindingKind.OUTPUT),
+                  Binding(BindingKind.OUTPUT),
+                  Binding(BindingKind.SCALAR, "d_in_arg", "uint32")),
+        launch=LaunchSpec(grid=(["n_tokens", SIMD_WIDTH], 1, 1),
+                          threadgroup=(SIMD_WIDTH, 1, 1)),
+    )
 
 
 def dispatch_spec():
-    from kernelverify.runners.runner import KernelSpec
+    """The runner-door template: `specialize()` fills `T` and `R`; the grid's
+    row-block count and token count arrive as case extents."""
+    from kernelverify.runners import Binding, BindingKind, KernelSpec, LaunchSpec
 
-    return KernelSpec(name=DISPATCH_NAME, source=DISPATCH_MSL,
-                      input_names=DISPATCH_INPUTS, output_names=DISPATCH_OUTPUTS)
+    source = f"""
+#include <metal_stdlib>
+using namespace metal;
+using T = $T;
+constant constexpr int R = $R;
+kernel void {DISPATCH_NAME}(
+    device const half*  x      [[buffer(0)]],
+    device const uint*  idx    [[buffer(1)]],
+    device const float* gate   [[buffer(2)]],
+    device const uint*  w_q    [[buffer(3)]],
+    device const half*  scales [[buffer(4)]],
+    device const half*  biases [[buffer(5)]],
+    device T* out              [[buffer(6)]],
+    constant uint& d_in_arg    [[buffer(7)]],
+    constant uint& d_out_arg   [[buffer(8)]],
+    uint3 thread_position_in_grid [[thread_position_in_grid]]) {{
+{DISPATCH_MSL.replace("D_IN", "d_in_arg").replace("D_OUT", "d_out_arg")}
+}}
+"""
+    return KernelSpec(
+        source=source,
+        entry_point=DISPATCH_NAME,
+        name=f"{DISPATCH_NAME}-R$R-$T",
+        bindings=(Binding(BindingKind.INPUT, "x"),
+                  Binding(BindingKind.INPUT, "idx"),
+                  Binding(BindingKind.INPUT, "gate"),
+                  Binding(BindingKind.INPUT, "w_q"),
+                  Binding(BindingKind.INPUT, "scales"),
+                  Binding(BindingKind.INPUT, "biases"),
+                  Binding(BindingKind.OUTPUT),
+                  Binding(BindingKind.SCALAR, "d_in_arg", "uint32"),
+                  Binding(BindingKind.SCALAR, "d_out_arg", "uint32")),
+        launch=LaunchSpec(grid=(SIMD_WIDTH, "row_blocks", "n_tokens"),
+                          threadgroup=(SIMD_WIDTH, SIMDGROUPS_PER_THREADGROUP, 1)),
+    )
 
 
 def build_routing(mx):
+    source = ROUTING_MSL.replace("D_IN", "x_shape[1]")
     return mx.fast.metal_kernel(name=ROUTING_NAME, input_names=ROUTING_INPUTS,
-                                output_names=ROUTING_OUTPUTS, source=ROUTING_MSL)
+                                output_names=ROUTING_OUTPUTS, source=source)
 
 
 def build_dispatch(mx):
+    source = DISPATCH_MSL.replace("D_IN", "x_shape[1]").replace("D_OUT", "scales_shape[1]")
     return mx.fast.metal_kernel(name=DISPATCH_NAME, input_names=DISPATCH_INPUTS,
-                                output_names=DISPATCH_OUTPUTS, source=DISPATCH_MSL)
+                                output_names=DISPATCH_OUTPUTS, source=source)

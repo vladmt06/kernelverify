@@ -47,7 +47,7 @@ from kernelverify.pack.wide_qmv import (  # noqa: E402
     launch_config,
     pack_codes,
 )
-from kernelverify.runners.runner import DeviceCase, MetalRunner  # noqa: E402
+from kernelverify.runners import MetalRunner, RunCase, specialize  # noqa: E402
 from kernelverify.schemas.quant_contract import (  # noqa: E402
     QuantContract,
     canonical_quantize,
@@ -82,7 +82,7 @@ def artefact_for(d_out: int, d_in: int, seed: int, bits: int = 4):
 def verify(runner: MetalRunner) -> bool:
     print("correctness (runner-isolated, Phase 0 contract, K = 3):")
     ok = True
-    spec = kernel_spec()
+    template = kernel_spec()
     for (d_out, d_in), bits in [(s, b) for s in SHAPES for b in SUPPORTED_BITS]:
         w, art = artefact_for(d_out, d_in, seed=7, bits=bits)
         packed = pack_codes(art.q, bits)
@@ -98,26 +98,34 @@ def verify(runner: MetalRunner) -> bool:
         if not identical:
             ok = False
 
+        # One spec per tile width M (M and R are compile-time constants in the
+        # raw door), all sharing one worker session as one candidate.
         rng = np.random.default_rng(11)
-        cases, expected = [], []
+        spec_batches, expected = [], []
         for m in VERIFY_M:
+            grid, threadgroup, r = launch_config(d_out, m)
+            spec = specialize(template, {"T": "half", "BITS": bits, "M": m, "R": r})
+            cases = []
             for tag, scale in (("unit", 1.0), ("corpus", 10.0)):
                 x = (rng.standard_normal((m, d_in)).astype(np.float32)
                      * scale).astype(np.float16)
                 ref, tol = reference_and_tolerance(
                     "quantized_matmul", qmv_inputs(x, w, bits))
-                grid, threadgroup, r = launch_config(d_out, m)
-                cases.append(DeviceCase(
+                cases.append(RunCase(
                     inputs={"x": x, "w_q": packed,
                             "scales": art.scales, "biases": art.biases},
+                    params={"d_in_arg": d_in, "d_out_arg": d_out,
+                            "row_blocks": grid[1]},
                     output_shapes=[((m, d_out), "float16")],
-                    grid=grid, threadgroup=threadgroup,
-                    template={"T": "float16", "M": m, "R": r, "BITS": bits}))
+                    label=f"{bits}-bit M={m} {tag}"))
                 expected.append((m, tag, ref, tol))
+            spec_batches.append((spec, cases))
 
-        for result, (m, tag, ref, tol) in zip(runner.run(spec, cases), expected):
+        results = [r for batch in runner.run_candidate(spec_batches) for r in batch]
+        for result, (m, tag, ref, tol) in zip(results, expected):
             if not result.ok:
-                print(f"    M={m:<3}{tag:<7} RUNNER FAIL: {result.error}")
+                print(f"    M={m:<3}{tag:<7} RUNNER FAIL: "
+                      f"{result.status.value}: {result.detail}")
                 ok = False
                 continue
             v = judge(result.outputs[0], ref, tol)

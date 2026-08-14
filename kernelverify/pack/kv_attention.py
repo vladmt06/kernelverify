@@ -58,6 +58,10 @@ TCAP = 1024                      # max cached positions one threadgroup holds
 SUPPORTED_BITS = (2, 3, 4, 8)
 SUPPORTED_DH = (64, 128)
 
+# The body is door-neutral: `NUM_HEADS` and `T_CACHED` are spelled differently
+# per door (MLX's generated shape buffers, or the runner door's scalar
+# bindings), and everything else is shared so the doors cannot drift (the
+# spike's W4 pattern, bench/spike_dequant_gemv.py).
 KV_ATTENTION_MSL = """
     constexpr uint NSG   = 8;                 // simdgroups per threadgroup
     constexpr uint NT    = 32 * NSG;          // threads per threadgroup
@@ -72,9 +76,9 @@ KV_ATTENTION_MSL = """
     uint sg   = thread_position_in_threadgroup.y;
     uint lin  = sg * 32 + lane;
     uint z    = thread_position_in_grid.z;    // b * H + h
-    uint H    = q_shape[1];
+    uint H    = NUM_HEADS;
     uint h    = z % H;
-    uint Tc   = k_wq_shape[1];                // cached positions
+    uint Tc   = T_CACHED;                     // cached positions
 
     threadgroup float qsh[DH];
     threadgroup float sc_arr[TCAP + 1];
@@ -235,14 +239,63 @@ def launch_config(b: int, h: int) -> tuple:
 
 
 def kernel_spec():
-    """The runner's view of this kernel, for verification."""
-    from kernelverify.runners.runner import KernelSpec
+    """The runner-door template, for verification through `MetalRunner`.
 
-    return KernelSpec(name=KERNEL_NAME, source=KV_ATTENTION_MSL,
-                      input_names=INPUT_NAMES, output_names=OUTPUT_NAMES)
+    `specialize()` fills the compile-time constants (`T`, `BITS`, `DH`); the
+    head count and cached length arrive as scalar bindings, and the grid's z
+    extent is the `b_rows` x `n_heads` product each case supplies.
+    """
+    from kernelverify.runners import Binding, BindingKind, KernelSpec, LaunchSpec
+
+    source = f"""
+#include <metal_stdlib>
+using namespace metal;
+using T = $T;
+constant constexpr uint BITS = $BITS;
+constant constexpr uint DH   = $DH;
+kernel void {KERNEL_NAME}(
+    device const half* q        [[buffer(0)]],
+    device const uint* k_wq     [[buffer(1)]],
+    device const half* k_scales [[buffer(2)]],
+    device const half* k_biases [[buffer(3)]],
+    device const uint* v_wq     [[buffer(4)]],
+    device const half* v_scales [[buffer(5)]],
+    device const half* v_biases [[buffer(6)]],
+    device const half* new_k    [[buffer(7)]],
+    device const half* new_v    [[buffer(8)]],
+    device T* out               [[buffer(9)]],
+    constant uint& n_heads      [[buffer(10)]],
+    constant uint& t_cached     [[buffer(11)]],
+    uint3 thread_position_in_threadgroup [[thread_position_in_threadgroup]],
+    uint3 thread_position_in_grid        [[thread_position_in_grid]]) {{
+{KV_ATTENTION_MSL.replace("NUM_HEADS", "n_heads").replace("T_CACHED", "t_cached")}
+}}
+"""
+    return KernelSpec(
+        source=source,
+        entry_point=KERNEL_NAME,
+        name=f"{KERNEL_NAME}-$BITS bit-DH$DH-$T",
+        bindings=(Binding(BindingKind.INPUT, "q"),
+                  Binding(BindingKind.INPUT, "k_wq"),
+                  Binding(BindingKind.INPUT, "k_scales"),
+                  Binding(BindingKind.INPUT, "k_biases"),
+                  Binding(BindingKind.INPUT, "v_wq"),
+                  Binding(BindingKind.INPUT, "v_scales"),
+                  Binding(BindingKind.INPUT, "v_biases"),
+                  Binding(BindingKind.INPUT, "new_k"),
+                  Binding(BindingKind.INPUT, "new_v"),
+                  Binding(BindingKind.OUTPUT),
+                  Binding(BindingKind.SCALAR, "n_heads", "uint32"),
+                  Binding(BindingKind.SCALAR, "t_cached", "uint32")),
+        launch=LaunchSpec(grid=(SIMD_WIDTH, SIMDGROUPS_PER_THREADGROUP,
+                                ["b_rows", "n_heads"]),
+                          threadgroup=(SIMD_WIDTH, SIMDGROUPS_PER_THREADGROUP, 1)),
+    )
 
 
 def build(mx):
     """The MLX callable. Takes mx so this module imports without it."""
+    source = (KV_ATTENTION_MSL.replace("NUM_HEADS", "q_shape[1]")
+              .replace("T_CACHED", "k_wq_shape[1]"))
     return mx.fast.metal_kernel(name=KERNEL_NAME, input_names=INPUT_NAMES,
-                                output_names=OUTPUT_NAMES, source=KV_ATTENTION_MSL)
+                                output_names=OUTPUT_NAMES, source=source)
