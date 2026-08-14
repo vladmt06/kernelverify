@@ -281,3 +281,54 @@ Three of those commits bear on it and none of them contradict it:
 
 What section 4b says about the vector-tile cap in `qmv_wide` is not covered by that spike, which measured batch-1 dense GEMV.
 The batch 5-11 step and the register wall behind it remain unmeasured, and remain the pack's chosen target.
+
+## 9. The register wall, measured, and one lever that failed
+
+Section 4b left the decisive experiment unrun: sweep the vector-tile width until occupancy collapses and find where the register wall sits.
+It has now been run, and it produced both the shipped kernel and a falsified follow-up.
+
+### The wall is two walls
+
+Sweeping R (output rows per simdgroup) against M (input vectors held in one pass) at 2560x2560, 4-bit group 64:
+
+| | R = 1 | R = 2 | R = 4 | R = 8 |
+|---|---|---|---|---|
+| M = 5 | 54.2 | 34.2 | 32.4 | 60.3 |
+| M = 6 | 57.6 | 37.8 | 34.0 | 86.3 |
+| M = 8 | 81.7 | 52.5 | 47.5 | 195.3 |
+| M = 11 | 108.3 | 127.4 | 129.9 | 267.1 |
+
+Two separate limits, not one:
+
+- **Accumulators go as M\*R.** R = 8 spills at every M, by up to 5x.
+- **Hoisting all M input vectors costs 8\*M float registers** and spills at M = 11 regardless of R. Restructuring so exactly one input vector is live at a time, with the R rows' unpacked codes hoisted instead, fixed M = 11 and improved every other point.
+
+So MLX's cap of five vectors per tile is a real wall rather than an oversight.
+The fix is not to raise the cap; it is to spend the register budget on rows instead of vectors, which buys the single weight pass back at R = 4 up to M = 10 and R = 2 above.
+That is the shipped kernel, and it runs 1.22-1.40x MLX at M = 6 to 10 with parity below.
+
+### The lever that failed: staging x in threadgroup memory
+
+At M = 8 the shipped kernel sits at 81 GB/s against a 74 us single-pass bound, so 1.56x remains.
+Each threadgroup's 8 simdgroups issue the same x loads and recompute the same per-word x sums, so removing that eightfold redundancy by staging an x tile in threadgroup memory looked like where the 1.56x was.
+
+It is not there.
+The staged variant is slower than the shipped kernel at every tile width and every M measured:
+
+| M | 4 | 5 | 6 | 7 | 8 | 10 | 11 |
+|---|---|---|---|---|---|---|---|
+| staged / shipped, TW = 64 | 0.94x | 0.84x | 0.81x | 0.82x | 0.80x | 0.86x | 0.80x |
+| staged / shipped, TW = 32 | 0.87x | 0.79x | 0.78x | 0.77x | 0.79x | 0.81x | 0.80x |
+
+TW = 128 and 256 measured the same way, 0.75-1.00x, and the largest tiles additionally hit the 32 KB threadgroup limit at M >= 8.
+The redundant device reads were evidently already being served from cache, so staging pays two barriers and a cooperative load per tile to save traffic that was not costing anything.
+The 1.56x is real but it is not in x traffic.
+
+### The measurement mistake this caught, which matters more than the lever
+
+The first comparison of these two kernels was not interleaved: each was timed in its own pass over the shapes.
+That measurement said the staged version WON, by up to 1.45x.
+Interleaving the arms within a round reversed the sign completely, and every number above comes from interleaved rounds.
+
+The difference between those two readings is entirely power-state drift between passes, on a machine where MLX's own time for one fixed shape moved from 131.7 us to 93.1 us between runs minutes apart.
+Any A/B on this machine that does not interleave its arms is measuring the machine's clock, not the kernels.
