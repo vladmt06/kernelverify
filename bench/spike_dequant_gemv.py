@@ -1,15 +1,29 @@
 """T5 feasibility spike: one competitive fused dequant-GEMV on Metal.
 
-The D7 decision experiment (eng review). The full loop in miniature:
-a candidate MSL kernel is VERIFIED through the crash-isolated runner against
-the Phase 0 quantization contract (r_contract anchor, ensemble floor, K=3),
-and only then TIMED against MLX's own quantized_matmul on the decode shapes
-of the model actually benchmarked (Qwen3-4B: 2560 hidden, 9728 ffn).
+The D7 decision experiment (eng review), migrated to the consolidated runner
+(W4): the candidate is raw MSL specialized through `specialize()`, executed
+by the crash-isolated `MetalRunner`, and judged through the pack's shared
+verification path (`kernelverify.pack.verify`), which routes to the battery's
+own NATIVE_OPS reference and tolerance - the r_contract anchor, ensemble
+floor, K = 3, exactly the formula the pre-migration spike hand-rolled.
+
+Import layout is deliberate: the module imports only numpy and the runner, so
+the kernel assembly is testable on the consolidation branch, while the pack
+and MLX imports live inside `verify()`/`bench()` and resolve once the pack
+branch is on main (it merges ahead of this one). The GEMV parity gate in the
+consolidation merge review runs this file end to end and compares against the
+pre-migration output; fail means no merge.
+
+One kernel body serves both doors. The runner door wraps it in an explicit
+raw-MSL signature (`d_in` arrives as a scalar); the MLX timing door hands the
+same body to `mx.fast.metal_kernel`, whose generated signature supplies
+`x_shape` instead. The timing methodology is unchanged from the original
+spike so the parity comparison is like for like.
 
 Context that frames the result: on this M3 Pro, llama.cpp decodes at 92% of
 the achieved-bandwidth roofline (little to win) while MLX decodes at ~69%
 (a real gap, and MLX is the launch channel). The spike asks whether a simple
-verified kernel through mx.fast.metal_kernel can close any of MLX's gap.
+verified kernel can close any of MLX's gap.
 """
 
 from __future__ import annotations
@@ -23,29 +37,30 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import mlx.core as mx  # noqa: E402
-
-from kernelverify.runners.runner import DeviceCase, KernelSpec, MetalRunner  # noqa: E402
-from kernelverify.schemas.quant_contract import (  # noqa: E402
-    ENSEMBLE,
-    QuantContract,
-    canonical_quantize,
-    r_contract,
+from kernelverify.runners import (  # noqa: E402
+    Binding,
+    BindingKind,
+    KernelSpec,
+    LaunchSpec,
+    MetalRunner,
+    RunCase,
+    specialize,
 )
 
-CONTRACT = QuantContract(bits=4, group_size=64)
-K = 3.0  # Phase 0's calibrated safety factor
-SHAPES = [(9728, 2560), (2560, 9728), (2560, 2560)]  # (d_out, d_in), Qwen3-4B decode
+BITS = 4
+GROUP_SIZE = 64
+K_SHAPES = [(9728, 2560), (2560, 9728), (2560, 2560)]  # (d_out, d_in), Qwen3-4B decode
 REPEATS = 30
 
 # One simdgroup per output row. Each lane strides over packed words (8 nibbles
 # per uint32; a 64-wide group spans exactly 8 words, so a word never crosses a
 # group boundary). Per word: s * sum(x*q) + b * sum(x), accumulated in fp32,
-# simd-reduced, lane 0 writes the row.
-GEMV_MSL = """
+# simd-reduced, lane 0 writes the row. `D_IN` is spelled differently per door:
+# the MLX door substitutes MLX's generated x_shape, the runner door a scalar.
+GEMV_BODY = """
     uint row = thread_position_in_grid.y;
     uint lane = thread_position_in_grid.x;
-    uint d_in = x_shape[1];
+    uint d_in = D_IN;
     uint words = d_in / 8;
     const device half4* x4 = (const device half4*)x;
     float acc = 0.0f;
@@ -68,59 +83,90 @@ GEMV_MSL = """
     if (lane == 0) out[row] = (T)acc;
 """
 
+_RUNNER_SOURCE = f"""
+#include <metal_stdlib>
+using namespace metal;
+using T = $T;
+kernel void dequant_gemv(
+    device const half* x      [[buffer(0)]],
+    device const uint* w_q    [[buffer(1)]],
+    device const half* scales [[buffer(2)]],
+    device const half* biases [[buffer(3)]],
+    device T* out             [[buffer(4)]],
+    constant uint& d_in_arg   [[buffer(5)]],
+    uint3 thread_position_in_grid [[thread_position_in_grid]]) {{
+{GEMV_BODY.replace("D_IN", "d_in_arg")}
+}}
+"""
 
-def pack_nibbles(q: np.ndarray) -> np.ndarray:
-    rows, cols = q.shape
-    q8 = q.reshape(rows, cols // 8, 8).astype(np.uint32)
-    shifts = (np.arange(8, dtype=np.uint32) * 4)[None, None, :]
-    return np.bitwise_or.reduce(q8 << shifts, axis=2).astype(np.uint32)
+
+def gemv_template() -> KernelSpec:
+    """The runner-door template; `specialize` picks the output type."""
+    return KernelSpec(
+        source=_RUNNER_SOURCE,
+        entry_point="dequant_gemv",
+        name="kv_dequant_gemv-$T",
+        bindings=(Binding(BindingKind.INPUT, "x"),
+                  Binding(BindingKind.INPUT, "w_q"),
+                  Binding(BindingKind.INPUT, "scales"),
+                  Binding(BindingKind.INPUT, "biases"),
+                  Binding(BindingKind.OUTPUT),
+                  Binding(BindingKind.SCALAR, "d_in_arg", "uint32")),
+        launch=LaunchSpec(grid=(32, "d_out", 1), threadgroup=(32, 8, 1)),
+    )
 
 
-def gemv_kernel() -> KernelSpec:
-    return KernelSpec(name="kv_dequant_gemv", source=GEMV_MSL,
-                      input_names=["x", "w_q", "scales", "biases"],
-                      output_names=["out"])
+def gemv_case(x: np.ndarray, packed: np.ndarray, scales: np.ndarray,
+              biases: np.ndarray, d_out: int, label: str = "") -> RunCase:
+    d_in = x.shape[-1]
+    return RunCase(
+        inputs={"x": x, "w_q": packed, "scales": scales, "biases": biases},
+        params={"d_out": d_out, "d_in_arg": d_in},
+        output_shapes=[((d_out,), "float16")],
+        label=label,
+    )
 
 
+# --------------------------------------------------------------------------
+# verification: the pack's shared path, batched through one candidate session
+# --------------------------------------------------------------------------
 def verify(runner: MetalRunner) -> bool:
+    from kernelverify.pack.verify import judge, qmv_inputs, reference_and_tolerance
+    from kernelverify.pack.wide_qmv import pack_nibbles
+    from kernelverify.schemas.quant_contract import QuantContract, canonical_quantize
+
+    spec = specialize(gemv_template(), {"T": "half"})
     ok = True
-    for d_out, d_in in SHAPES:
+    for d_out, d_in in K_SHAPES:
         rng = np.random.default_rng(7)
         w = (rng.standard_normal((d_out, d_in)).astype(np.float32) * 0.02).astype(np.float16)
-        artefact = canonical_quantize(w, CONTRACT)
+        artefact = canonical_quantize(w, QuantContract(bits=BITS, group_size=GROUP_SIZE))
         packed = pack_nibbles(artefact.q)
+
+        cases, expected = [], []
         for scale_tag, xs in (("unit", 1.0), ("corpus-scale", 10.0)):
             x = (rng.standard_normal((1, d_in)).astype(np.float32) * xs).astype(np.float16)
-            ref = r_contract(x, artefact)
-            floor = max(
-                np.max(np.abs(fn(x, artefact).astype(np.float64) - ref))
-                for fn in ENSEMBLE.values()
-            )
-            base = 4 * 9.77e-4 * float(np.max(np.abs(ref)))
-            tol = max(base, K * floor)
+            ref, tol = reference_and_tolerance("quantized_matmul", qmv_inputs(x, w, BITS))
+            cases.append(gemv_case(x, packed, artefact.scales, artefact.biases,
+                                   d_out, label=scale_tag))
+            expected.append((scale_tag, ref, tol))
 
-            case = DeviceCase(
-                inputs={"x": x, "w_q": packed,
-                        "scales": artefact.scales, "biases": artefact.biases},
-                output_shapes=[((d_out,), "float16")],
-                grid=(32, d_out, 1), threadgroup=(32, 8, 1),
-                template={"T": "float16"},
-            )
-            result = runner.run(gemv_kernel(), [case])[0]
+        for result, (scale_tag, ref, tol) in zip(runner.run(spec, cases), expected):
             if not result.ok:
-                print(f"  VERIFY FAIL {d_out}x{d_in} {scale_tag}: {result.error}")
+                print(f"  VERIFY FAIL {d_out}x{d_in} {scale_tag}: "
+                      f"{result.status.value}: {result.detail}")
                 ok = False
                 continue
-            err = float(np.max(np.abs(result.outputs[0].astype(np.float64) - ref[0])))
-            verdict = "pass" if err <= tol else "FAIL"
-            if err > tol:
-                ok = False
-            print(f"  verify {d_out:>5}x{d_in:<5} {scale_tag:<13} "
-                  f"err {err:9.3e}  tol {tol:9.3e}  {verdict}")
+            verdict = judge(result.outputs[0], ref, tol)
+            ok = ok and verdict.ok
+            print(f"  verify {d_out:>5}x{d_in:<5} {scale_tag:<13} {verdict}")
     return ok
 
 
-def timed_mx(fn) -> float:
+# --------------------------------------------------------------------------
+# timing: unchanged methodology from the pre-migration spike, for parity
+# --------------------------------------------------------------------------
+def timed_mx(fn, mx) -> float:
     fn()  # warmup + JIT
     times = []
     for _ in range(REPEATS):
@@ -132,19 +178,25 @@ def timed_mx(fn) -> float:
 
 
 def bench() -> None:
+    import mlx.core as mx
+
+    from kernelverify.pack.wide_qmv import pack_nibbles
+    from kernelverify.schemas.quant_contract import QuantContract, canonical_quantize
+
     kernel = mx.fast.metal_kernel(name="kv_dequant_gemv",
                                   input_names=["x", "w_q", "scales", "biases"],
-                                  output_names=["out"], source=GEMV_MSL)
+                                  output_names=["out"],
+                                  source=GEMV_BODY.replace("D_IN", "x_shape[1]"))
     print(f"\n{'shape':<14}{'ours us':>10}{'mlx us':>10}{'ratio':>8}{'ours GB/s':>11}")
-    for d_out, d_in in SHAPES:
+    for d_out, d_in in K_SHAPES:
         rng = np.random.default_rng(7)
         w = (rng.standard_normal((d_out, d_in)).astype(np.float32) * 0.02).astype(np.float16)
-        x16 = (rng.standard_normal((1, d_in)).astype(np.float16))
-        artefact = canonical_quantize(w, CONTRACT)
+        x16 = rng.standard_normal((1, d_in)).astype(np.float16)
+        artefact = canonical_quantize(w, QuantContract(bits=BITS, group_size=GROUP_SIZE))
         packed = pack_nibbles(artefact.q)
 
         mx_x = mx.array(x16)
-        mx_wq, mx_s, mx_b = mx.quantize(mx.array(w), group_size=64, bits=4)
+        mx_wq, mx_s, mx_b = mx.quantize(mx.array(w), group_size=GROUP_SIZE, bits=BITS)
         mx_packed = mx.array(packed)
         mx_scales = mx.array(artefact.scales)
         mx_biases = mx.array(artefact.biases)
@@ -158,9 +210,9 @@ def bench() -> None:
 
         def theirs():
             return mx.quantized_matmul(mx_x, mx_wq, mx_s, mx_b, transpose=True,
-                                       group_size=64, bits=4)
+                                       group_size=GROUP_SIZE, bits=BITS)
 
-        t_ours, t_mlx = timed_mx(ours), timed_mx(theirs)
+        t_ours, t_mlx = timed_mx(ours, mx), timed_mx(theirs, mx)
         weight_bytes = packed.nbytes + artefact.scales.nbytes + artefact.biases.nbytes
         gbps = weight_bytes / t_ours / 1e9
         print(f"{d_out}x{d_in:<7}{t_ours * 1e6:>10.1f}{t_mlx * 1e6:>10.1f}"
@@ -168,9 +220,8 @@ def bench() -> None:
 
 
 def main() -> int:
-    print("correctness (runner-isolated, Phase 0 contract, K=3):")
-    ok = verify(MetalRunner())
-    if not ok:
+    print("correctness (runner-isolated, shared pack verdict, K = 3):")
+    if not verify(MetalRunner()):
         print("\nSPIKE VERDICT: kernel does not verify; no timing claims allowed")
         return 1
     bench()

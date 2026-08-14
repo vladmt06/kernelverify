@@ -56,11 +56,15 @@ import numpy as np
 SIMD_WIDTH = 32
 SIMDGROUPS_PER_THREADGROUP = 8
 
+# The body is door-neutral: `D_IN` and `D_OUT` are spelled differently per
+# door. The MLX door substitutes MLX's generated shape buffers, the runner
+# door substitutes scalar bindings, and everything else is shared, so the two
+# doors cannot drift (the spike's W4 pattern, bench/spike_dequant_gemv.py).
 WIDE_QMV_MSL = """
     uint sg_row = thread_position_in_grid.y;   // this simdgroup's row block
     uint lane   = thread_position_in_grid.x;
-    uint d_in   = x_shape[1];
-    uint d_out  = scales_shape[0];
+    uint d_in   = D_IN;
+    uint d_out  = D_OUT;
     uint row_words = d_in * BITS / 32;
     uint n_groups  = d_in / 64;
     uint blocks    = d_in / 8;                 // 8 codes per block, any width
@@ -191,14 +195,52 @@ def launch_config(d_out: int, m: int) -> tuple:
 
 
 def kernel_spec():
-    """The runner's view of this kernel, for verification."""
-    from kernelverify.runners.runner import KernelSpec
+    """The runner-door template, for verification through `MetalRunner`.
 
-    return KernelSpec(name=KERNEL_NAME, source=WIDE_QMV_MSL,
-                      input_names=INPUT_NAMES, output_names=OUTPUT_NAMES)
+    A raw-MSL wrapper around the shared body: `specialize()` fills the
+    per-combination compile-time constants (`T`, `BITS`, `M`, `R`), the
+    run-time dimensions arrive as scalar bindings, and the grid's row-block
+    count is the `row_blocks` extent each case supplies from `launch_config`.
+    """
+    from kernelverify.runners import Binding, BindingKind, KernelSpec, LaunchSpec
+
+    source = f"""
+#include <metal_stdlib>
+using namespace metal;
+using T = $T;
+constant constexpr uint BITS = $BITS;
+constant constexpr int  M    = $M;
+constant constexpr int  R    = $R;
+kernel void {KERNEL_NAME}(
+    device const half* x      [[buffer(0)]],
+    device const uint* w_q    [[buffer(1)]],
+    device const half* scales [[buffer(2)]],
+    device const half* biases [[buffer(3)]],
+    device T* out             [[buffer(4)]],
+    constant uint& d_in_arg   [[buffer(5)]],
+    constant uint& d_out_arg  [[buffer(6)]],
+    uint3 thread_position_in_grid [[thread_position_in_grid]]) {{
+{WIDE_QMV_MSL.replace("D_IN", "d_in_arg").replace("D_OUT", "d_out_arg")}
+}}
+"""
+    return KernelSpec(
+        source=source,
+        entry_point=KERNEL_NAME,
+        name=f"{KERNEL_NAME}-$BITS bit-M$M-R$R-$T",
+        bindings=(Binding(BindingKind.INPUT, "x"),
+                  Binding(BindingKind.INPUT, "w_q"),
+                  Binding(BindingKind.INPUT, "scales"),
+                  Binding(BindingKind.INPUT, "biases"),
+                  Binding(BindingKind.OUTPUT),
+                  Binding(BindingKind.SCALAR, "d_in_arg", "uint32"),
+                  Binding(BindingKind.SCALAR, "d_out_arg", "uint32")),
+        launch=LaunchSpec(grid=(SIMD_WIDTH, "row_blocks", 1),
+                          threadgroup=(SIMD_WIDTH, SIMDGROUPS_PER_THREADGROUP, 1)),
+    )
 
 
 def build(mx):
     """The MLX callable. Takes mx so this module imports without it."""
+    source = WIDE_QMV_MSL.replace("D_IN", "x_shape[1]").replace("D_OUT", "scales_shape[0]")
     return mx.fast.metal_kernel(name=KERNEL_NAME, input_names=INPUT_NAMES,
-                                output_names=OUTPUT_NAMES, source=WIDE_QMV_MSL)
+                                output_names=OUTPUT_NAMES, source=source)
