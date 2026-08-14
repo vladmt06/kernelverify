@@ -179,7 +179,8 @@ def verify(runner: MetalRunner) -> GateEvidence:
                 inputs={"q": q, "k_wq": k_wq, "k_scales": k_sc, "k_biases": k_bi,
                         "v_wq": v_wq, "v_scales": v_sc, "v_biases": v_bi,
                         "new_k": nk, "new_v": nv},
-                params={"b_rows": b, "n_heads": h, "t_cached": t},
+                params={"b_rows": b, "n_heads": h, "t_cached": t,
+                        "n_kv_heads": h, "t_stride": t},
                 output_shapes=[((b, h, dh), "float16")],
                 label=label))
             spec_ev.calls.append(LiveCall(
@@ -262,7 +263,7 @@ def time_row(kernel, b, h, t, dh, bits) -> tuple:
 
     def ours(i):
         arrs, _ = sets[i % n_sets]
-        return kernel(inputs=[qx, *arrs, nkx, nvx],
+        return kernel(inputs=[qx, *arrs, nkx, nvx], t_cached=t,
                       output_shapes=[(b, h, dh)], output_dtypes=[mx.float16],
                       grid=grid, threadgroup=threadgroup,
                       template=[("T", mx.float16), ("BITS", bits), ("DH", dh)])[0]

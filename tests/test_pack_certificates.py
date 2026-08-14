@@ -219,7 +219,9 @@ def test_the_mlx_door_rejects_a_cache_beyond_capacity_before_dispatch():
               mx.zeros((1, 1, 64), dtype=mx.float16),          # new_k
               mx.zeros((1, 1, 64), dtype=mx.float16)]          # new_v
     grid, threadgroup = kv_attention.launch_config(1, 1)
-    with pytest.raises(ValueError, match="capacity bound TCAP=1024"):
-        kernel(inputs=inputs, output_shapes=[(1, 1, 64)],
+    # The merged door takes the logical length explicitly; the rejection
+    # keys on it rather than on the padded buffer's physical extent.
+    with pytest.raises(ValueError, match="exceeds TCAP"):
+        kernel(inputs=inputs, t_cached=t_over, output_shapes=[(1, 1, 64)],
                output_dtypes=[mx.float16], grid=grid, threadgroup=threadgroup,
                template=[("T", mx.float16), ("BITS", 4), ("DH", 64)])
