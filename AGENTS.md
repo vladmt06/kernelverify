@@ -42,7 +42,7 @@ Vlad's global instructions still apply; this file adds the project's layout, how
 - `bench/gguf_info.py` - GGUF tensor table reader; supplies the flop and byte models those two scripts need.
 - `bench/probe_baseline_gaps.py` - one-off probes that closed the three claims ADR 0007 first shipped as inferred; rerun it whenever the baseline moves.
 - `bench/measure_baselines.py` - the one command that measures the machine's baselines across both stacks and appends them to `bench/.baselines/<date>.jsonl`.
-  It interleaves specs round-robin, refuses to call a number binding on a busy or unplugged machine, and refuses sub-millisecond samples as absolute claims.
+  It alternates the arms within each workload cell (one sampling group per cell, schema v3), refuses to call a number binding on a busy or unplugged machine, and refuses sub-millisecond samples as absolute claims.
 - `bench/machine_state.py` - the idle gate and the timing floor, with the reason each exists.
 - `bench/detached_run.py` and `bench/start_binding_run.sh` - the detached run path: a one-shot launchd job that waits for a strong-idle window, then runs `measure_baselines.py` with no terminal attached, retrying up to three passes on dispersion (ADR 0010).
 - `bench/OPERATOR-CARD.md` - the one-card instruction for starting a binding run and reading its outcome.

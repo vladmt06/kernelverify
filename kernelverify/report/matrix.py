@@ -28,6 +28,7 @@ criticise.
 from __future__ import annotations
 
 import json
+import subprocess
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -148,6 +149,12 @@ def comparable(a: Claim, b: Claim) -> tuple[bool, str]:
     different sampling groups may both be binding and still be a comparison of
     the clock rather than of the kernels.
     """
+    a_version = a.row.get("schema_version")
+    b_version = b.row.get("schema_version")
+    if a_version != b_version:
+        return False, (f"different schema versions ({a_version!r} vs {b_version!r}); "
+                       "what a sampling group means changed at v3, so this ratio "
+                       "would pair rows measured under two different contracts")
     if not (a.interleaved and b.interleaved):
         return False, "a row was not sampled interleaved; separate passes measure the clock"
     if a.group is None or a.group != b.group:
@@ -156,6 +163,15 @@ def comparable(a: Claim, b: Claim) -> tuple[bool, str]:
         return False, (f"different workloads ({_workload_label(a.row)} vs "
                        f"{_workload_label(b.row)}); a ratio across kinds divides "
                        "two different jobs, not two stacks")
+    if isinstance(a_version, int) and a_version >= 3:
+        # A v3 gate only (D12.3): the shipped v2 record predates logical_name
+        # and keeps its original gates.
+        a_logical = (a.row.get("model") or {}).get("logical_name")
+        b_logical = (b.row.get("model") or {}).get("logical_name")
+        if a_logical is None or a_logical != b_logical:
+            return False, (f"different logical models ({a_logical!r} vs {b_logical!r}); "
+                           "a ratio across models divides two different jobs, "
+                           "not two stacks")
     a_metric = (a.row.get("result") or {}).get("metric")
     b_metric = (b.row.get("result") or {}).get("metric")
     if a_metric != b_metric:
@@ -411,7 +427,59 @@ def render_unattested(claims: list[Claim]) -> list[str]:
     return lines
 
 
-def render(rows: list[dict]) -> str:
+def _renderer_commit() -> str:
+    """The commit of the renderer itself, so a published page can be traced
+    to the exact refusal logic that produced it."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(Path(__file__).resolve().parent), "rev-parse",
+             "--short", "HEAD"],
+            capture_output=True, text=True,
+        )
+    except OSError:
+        return "unknown"
+    return proc.stdout.strip() or "unknown"
+
+
+def render_footer(sources: list[Path] | None) -> list[str]:
+    """Where this page came from, and what its labels mean, numerically.
+
+    A matrix without this section is a table of numbers whose vocabulary the
+    reader has to guess at, and a page that cannot be traced back to the code
+    and record that produced it cannot be checked, only trusted.
+    """
+    lines = ["## Provenance and legend", "",
+             f"Rendered by `kernelverify/report/matrix.py` at commit "
+             f"`{_renderer_commit()}`."]
+    if sources:
+        lines.append("Record files consumed:")
+        lines.extend(f"- `{Path(source).name}`" for source in sources)
+    else:
+        lines.append("Record files consumed: none; rows were passed directly "
+                     "rather than read from the record.")
+    lines += [
+        "",
+        "| Label | Meaning, numerically |",
+        "|---|---|",
+        "| no difference | abs(ratio - 1.00) <= the pair's summed spreads, "
+        "each row's `spread_pct`/100. A 1.12x ratio over spreads of 9% and 5% "
+        "sits inside its own 0.14 noise band and is not a difference. |",
+        "| ratio only | the row failed a bindingness gate, so its absolute "
+        "number is refused; the ratio still stands because both arms "
+        "alternated inside one sampling group of one run, so its uncertainty "
+        "is the summed spreads above, not the blocker's magnitude. Granted to "
+        "same-run rows only. |",
+        "| directional | sampled non-interleaved, or before the binding gates "
+        "existed. Clock drift alone moved a fixed shape from 131.7 to 93.1 us "
+        "(1.41x) between separate passes, so treat any such ratio within "
+        "1.41x of parity as noise; outside that band, only its direction is "
+        "evidence, never its magnitude. |",
+        "",
+    ]
+    return lines
+
+
+def render(rows: list[dict], sources: list[Path] | None = None) -> str:
     """The whole matrix as markdown."""
     claims = [classify(row) for row in rows]
     machine = next((r.get("machine") for r in rows if r.get("machine")), {}) or {}
@@ -435,7 +503,8 @@ def render(rows: list[dict]) -> str:
                 + render_measurements(claims)
                 + render_comparisons(claims)
                 + render_refusals(claims)
-                + render_unattested(claims))
+                + render_unattested(claims)
+                + render_footer(sources))
     return "\n".join(sections).rstrip() + "\n"
 
 
@@ -457,7 +526,7 @@ def main(argv: list[str] | None = None) -> int:
     if not rows:
         print(f"no rows in {args.rows}; nothing measured yet")
         return 1
-    text = render(rows)
+    text = render(rows, sources=sorted(args.rows.glob("*.jsonl")))
     if args.out:
         args.out.write_text(text)
         print(f"wrote {args.out} ({len(rows)} rows)")

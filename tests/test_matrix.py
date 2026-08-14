@@ -8,6 +8,8 @@ once wrong in exactly that way.
 """
 
 import json
+import re
+from pathlib import Path
 
 import pytest
 
@@ -159,7 +161,8 @@ def test_render_calls_a_difference_smaller_than_the_spread_no_difference():
     b = row(row_id="b", stack={"name": "mlx-lm"},
             result={"median": 46.1, "spread_pct": 5.0})
     text = render([a, b])
-    assert "no difference" in text, \
+    comparisons = text.split("## Comparisons", 1)[1].split("\n## ", 1)[0]
+    assert "no difference" in comparisons, \
         "a 1.01x ratio inside a 5% spread is noise and must be labelled"
 
 
@@ -351,7 +354,8 @@ def test_a_noisy_baseline_swallows_a_small_difference():
     other = row(row_id="b", stack={"name": "mlx-lm", "version": "0.31"},
                 result={"median": 52.0, "spread_pct": 1.0})
     text = render([base, other])
-    assert "no difference" in text
+    comparisons = text.split("## Comparisons", 1)[1].split("\n## ", 1)[0]
+    assert "no difference" in comparisons
 
 
 def test_a_measurement_row_names_its_run():
@@ -359,3 +363,107 @@ def test_a_measurement_row_names_its_run():
     indistinguishable duplicate absolutes."""
     text = render([row()])
     assert "20260814T120000Z-abcdef12" in text
+
+
+# ---------------------------------------------------------------------------
+# The v3 boundary: logical model identity, and no cross-version ratios
+# ---------------------------------------------------------------------------
+def row_v3(**over):
+    base = row(schema_version=3, model={"logical_name": "qwen3-4b"})
+    for key, value in over.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            base[key] = {**base[key], **value}
+        else:
+            base[key] = value
+    return base
+
+
+def test_v3_rows_gate_on_the_logical_model():
+    """D12.3: two v3 rows measuring different logical models never form a
+    ratio, however identically they were sampled."""
+    a = classify(row_v3())
+    b = classify(row_v3(row_id="other", stack={"name": "mlx-lm"},
+                        model={"logical_name": "llama3-8b"}))
+    ok, why = comparable(a, b)
+    assert not ok and "logical" in why
+
+
+def test_v3_rows_with_one_logical_model_still_compare():
+    a = classify(row_v3())
+    b = classify(row_v3(row_id="other", stack={"name": "mlx-lm"},
+                        model={"name": "a-different-artefact-per-stack"}))
+    ok, _ = comparable(a, b)
+    assert ok, "the artefact name differs per stack by construction; the logical name is the identity"
+
+
+def test_a_v3_row_missing_its_logical_name_never_compares():
+    a = classify(row_v3(model={"logical_name": None}))
+    b = classify(row_v3(row_id="other", model={"logical_name": None}))
+    ok, why = comparable(a, b)
+    assert not ok and "logical" in why
+
+
+def test_v2_rows_keep_their_original_gates():
+    """D12.3: the logical-name gate is a v3 rule. The shipped v2 record has no
+    logical_name and must keep comparing exactly as before."""
+    a = classify(row())
+    b = classify(row(row_id="other", stack={"name": "mlx-lm"}))
+    assert "logical_name" not in a.row["model"]
+    ok, _ = comparable(a, b)
+    assert ok
+
+
+def test_cross_version_rows_never_compare():
+    """D12.4: what a sampling group means changed at the v3 boundary, so a
+    cross-version ratio would pair rows measured under different contracts."""
+    a = classify(row())
+    b = classify(row_v3(row_id="other"))
+    ok, why = comparable(a, b)
+    assert not ok and "schema version" in why
+
+
+# ---------------------------------------------------------------------------
+# The footer: provenance and the legend (D13)
+# ---------------------------------------------------------------------------
+def test_footer_states_the_renderer_commit_and_record_files():
+    text = render([row()], sources=[Path("bench/.baselines/2026-08-14.jsonl")])
+    footer = text.split("## Provenance and legend", 1)[1]
+    assert "2026-08-14.jsonl" in footer
+    assert re.search(r"at commit `[0-9a-f]{7,}`", footer), \
+        "the renderer must name its own commit, or the page cannot be traced"
+
+
+def test_legend_defines_every_label_numerically():
+    footer = render([row()]).split("## Provenance and legend", 1)[1]
+    for label in ("no difference", "ratio only", "directional"):
+        assert label in footer
+    assert "summed spreads" in footer
+    assert "131.7 to 93.1" in footer, \
+        "directional must be defined by the measured drift, not as a vibe"
+
+
+# ---------------------------------------------------------------------------
+# The real record (D12.3, D12.4): content, not just a page that renders
+# ---------------------------------------------------------------------------
+RECORD_2026_08_14 = (Path(__file__).resolve().parents[1]
+                     / "bench" / ".baselines" / "2026-08-14.jsonl")
+
+
+def test_the_real_v2_record_keeps_its_comparison_content():
+    """The mandated regression: the shipped 2026-08-14 record is v2, and every
+    renderer change must leave its comparison CONTENT standing, not merely the
+    page rendering. Four workload cells each pair llama.cpp against mlx-lm,
+    and these ratios are the numbers that record actually supports."""
+    rows = [json.loads(line)
+            for line in RECORD_2026_08_14.read_text().splitlines() if line.strip()]
+    text = render(rows)
+    comparisons = text.split("## Comparisons", 1)[1].split("\n## ", 1)[0]
+    for cell in ("### decode at width 1",
+                 "### matmul_width at width 1",
+                 "### matmul_width at width 8",
+                 "### matmul_width at width 16"):
+        assert cell in comparisons, f"the {cell!r} cell vanished from the render"
+    for ratio in ("1.12x", "1.19x", "2.25x", "0.70x"):
+        assert ratio in comparisons, f"the record's {ratio} ratio vanished"
+    assert comparisons.count("| mlx-lm 0.31.3 |") == 4, \
+        "every cell must still pair both stacks"
