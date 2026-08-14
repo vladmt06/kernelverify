@@ -12,13 +12,35 @@ correct implementation could do on this exact case:
                   implementations of |impl(inputs) - ref_fp64(inputs)|
     tolerance   = max(base_tol, K_ENSEMBLE * floor)
 
-Ensemble members are the reference kernel itself plus worst-legitimate-order
-variants: sequential (non-pairwise) accumulation, and a different flash tile
-width for the attention family. They bound the rounding a correct kernel with
-a different reduction structure can commit. K_ENSEMBLE = 1.5 was calibrated in
-ADR 0004: the smallest grid value with zero false positives over held-out
-diverse correct implementations (other tile widths, reversed summation, the
-plain-vs-flash cross pair), with no fault detection lost.
+Who is in the ensemble
+----------------------
+ADR 0004 hand-wrote three members on the premise that sequential accumulation
+is the worst legitimate summation order, so bounding it bounds the class. ADR
+0005 measured that premise and it is false: seeded random permutations of the
+same reduction beat that ensemble by up to 8.45x on the attention family, and
+the member that sets the worst case is a permutation, never the
+magnitude-sorted order that theory nominates.
+
+So the ensemble is no longer a hand-written list. It is a prefix of the
+admissible-implementation contract in `kernelverify/tolerance/contract.py`,
+which states in full which implementations this verifier promises never to
+flag. Measured over the whole battery with the floor built from one draw of
+that population and scored against an independent draw (ADR 0005):
+
+- a one-member ensemble is not enough: it needs K = 2.119 and ships a false
+  positive at the shipped K;
+- from two members on, the held-out class needs exactly K = 1.000, so K stops
+  compensating for an unrepresentative ensemble and becomes pure margin;
+- the residual under-coverage on near-binding cases falls 8.45x -> 3.20x
+  between the three members ADR 0004 shipped and this budget of eight, and
+  only reaches 2.00x by twenty-four, which is why eight is the knee;
+- not one (case, fault) verdict in the battery moves, so every table in ADR
+  0002 through 0004 stands unchanged.
+
+K_ENSEMBLE = 1.5 is unchanged, and is now anchored rather than fitted. Over
+322,200 admissible implementations evaluated across the battery, with zero
+false positives: the class demanded at least 1.147 under the ADR 0004
+ensemble, and demands exactly 1.000 under this one.
 
 An input-perturbation probe is NOT a substitute for this floor: it measures
 input conditioning only, misses internal accumulation error by up to 64x, and
@@ -28,96 +50,27 @@ class the verifier exists to reject (ADR 0004 records the falsification).
 
 from __future__ import annotations
 
-import functools
-
 import numpy as np
 
-from kernelverify.reference.kernels import (
-    L2NORM_EPS,
-    RMSNORM_EPS,
-    attention,
-    flash_attention,
-    gelu,
-    leaky_relu,
-    matmul,
-    rmsnorm,
-    l2norm,
-    silu,
-    softmax,
-)
+from kernelverify.tolerance.contract import OPERATORS, contract_ensemble
 
 K_ENSEMBLE = 1.5
 
+# How many contract members the shipped floor pays for per case. Chosen by the
+# budget sweep in ADR 0005, not by taste: it is where the marginal member stops
+# buying coverage of the class.
+ENSEMBLE_BUDGET = 8
 
-def _f32(a):
-    return a.astype(np.float32)
-
-
-def serial_sum(a, axis):
-    """Sequential left-to-right fp32 accumulation: the worst legitimate order."""
-    return np.add.accumulate(_f32(a), axis=axis).take(-1, axis=axis)
-
-
-def softmax_serial(inputs):
-    x = _f32(inputs["input"])
-    rows = x.reshape(-1, x.shape[-1])
-    shifted = rows - rows.max(axis=1, keepdims=True)
-    e = np.exp(shifted)
-    out = e / serial_sum(e, 1)[:, None]
-    return out.reshape(x.shape).astype(inputs["input"].dtype)
+# Corpus operator -> the provably-correct working-precision ensemble, taken as
+# a prefix of the contract population so the members are derived from the
+# stated promise rather than chosen by hand.
+ENSEMBLE_MEMBERS = {op: contract_ensemble(op, ENSEMBLE_BUDGET) for op in OPERATORS}
+ENSEMBLES = {op: [fn for _, fn in members] for op, members in ENSEMBLE_MEMBERS.items()}
 
 
-def rmsnorm_serial(inputs):
-    x = _f32(inputs["input"])
-    ms = serial_sum(x * x, -1) / np.float32(x.shape[-1])
-    out = x / np.sqrt(ms + np.float32(RMSNORM_EPS))[..., None]
-    return out.astype(inputs["input"].dtype)
-
-
-def l2norm_serial(inputs):
-    x = _f32(inputs["input"])
-    norm = np.sqrt(serial_sum(x * x, -1) + np.float32(L2NORM_EPS))
-    return (x / norm[..., None]).astype(inputs["input"].dtype)
-
-
-def matmul_serial(inputs):
-    a, b = _f32(inputs["a"]), _f32(inputs["b"])
-    m, kdim = a.shape
-    n = b.shape[1]
-    out = np.empty((m, n), dtype=np.float32)
-    for n0 in range(0, n, 64):  # bound the products tensor to m*kdim*64 floats
-        prod = a[:, :, None] * b[None, :, n0:n0 + 64]
-        out[:, n0:n0 + 64] = np.add.accumulate(prod, axis=1)[:, -1, :]
-    return out.astype(inputs["a"].dtype)
-
-
-def attention_serial(inputs):
-    q, k, v = _f32(inputs["q"]), _f32(inputs["k"]), _f32(inputs["v"])
-    d = q.shape[-1]
-    prod = q[:, None, :] * k[None, :, :]
-    scores = np.add.accumulate(prod, axis=2)[:, :, -1] * np.float32(d ** -0.5)
-    scores = scores - scores.max(axis=1, keepdims=True)
-    e = np.exp(scores)
-    p = e / serial_sum(e, 1)[:, None]
-    pv = p[:, :, None] * v[None, :, :]
-    out = np.add.accumulate(pv, axis=1)[:, -1, :]
-    return out.astype(inputs["q"].dtype)
-
-
-_flash16 = functools.partial(flash_attention, block_n_cap=16)
-
-# Corpus operator -> the provably-correct working-precision ensemble.
-ENSEMBLES = {
-    "gelu_triton": [gelu],
-    "silu_triton": [silu],
-    "leaky_relu_triton": [leaky_relu],
-    "softmax_triton": [softmax, softmax_serial],
-    "rmsnorm_triton": [rmsnorm, rmsnorm_serial],
-    "l2norm_triton": [l2norm, l2norm_serial],
-    "matmul_triton": [matmul, matmul_serial],
-    "attention_triton": [attention, attention_serial, _flash16],
-    "flash_attention_triton": [flash_attention, attention_serial, _flash16],
-}
+def ensemble_labels(op: str) -> list[str]:
+    """The names of `op`'s ensemble members, for fingerprints and reports."""
+    return [label for label, _ in ENSEMBLE_MEMBERS[op]]
 
 
 def _max_abs_error(candidate, ref) -> float:
