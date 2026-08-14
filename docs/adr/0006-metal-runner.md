@@ -98,6 +98,22 @@ A speed claim made on a shape small enough to finish in microseconds is not a me
 Two versions of this component's own test failed in the suite by asserting a spread bound on a short kernel, which is how the floor was found.
 The test now asserts the separation between a 200 microsecond kernel and a 58 millisecond one, and asserts tightness only on the long one.
 
+### Interleaving: proposed as an independent rule, did not reproduce here
+
+Interleaving the two arms of a comparison within a round was proposed as load-bearing on top of ms-scale dispatches, after a sibling lane measured a 1.45x win reverse to 0.77-0.94x once interleaved, at dispatches already past 5 milliseconds.
+
+It did not reproduce on this runner.
+The same kernel at a known 1.300x iteration ratio, running at 29.0 and 37.7 milliseconds, returned exactly 1.300 in five trials, both blocked (all of A, then all of B) and interleaved (A, B, A, B), with no variation between trials at all.
+
+That does not refute the sibling result, it bounds it.
+The likely difference is the window rather than the order: both arms here sit seconds apart inside a single process, while a reversed comparison spanned minutes, and the drift measured above moves whole runs rather than samples within one.
+Two other differences are unexamined and could matter more: this probe is pure ALU with tiny buffers, so it is insensitive to memory bandwidth in a way a real quantized matmul is not, and it times GPU timestamps rather than a host-side lazy-evaluation boundary.
+
+So the rule that survives both measurements is about elapsed time, not ordering.
+A comparison whose arms are separated by minutes, by separate processes, or by anything else that lets the power state move must interleave.
+Arms measured back to back inside one process did not need it here.
+Interleaving is cheap, so it stays the default for any published comparison; the correction is that ms-scale dispatch alone is not sufficient, and neither is interleaving alone.
+
 ## Measurement 2: the ensemble floor covers a real GPU kernel
 
 ADR 0004 calibrated the shipped tolerance against an ensemble of provably correct implementations, all of them numpy: pairwise accumulation, sequential accumulation, a second flash tile width.
