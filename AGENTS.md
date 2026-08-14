@@ -19,12 +19,18 @@ Vlad's global instructions still apply; this file adds the project's layout, how
 
 - `kernelverify/reference/kernels.py` - parameterised kernels, correct by default; keyword seams introduce faults.
   Single source for both the corpus ports and the mutation catalogue, so the synthetic fault space provably contains the published faults.
-- `kernelverify/mutation/catalogue.py` - the fault catalogue (44 entries), corpus faults marked `from_corpus`.
+- `kernelverify/mutation/catalogue.py` - the fault catalogue (45 entries), corpus faults marked `from_corpus`.
+- `kernelverify/tolerance/contract.py` - the admissible-implementation contract: the class of kernels the verifier promises never to flag, plus the generator that samples it.
+  Read the module docstring before changing any tolerance; the exclusions are what keep precision faults faults.
+- `kernelverify/tolerance/floor.py` - the shipped conditioning-aware tolerance.
+  Its ensemble is a prefix of the contract population, not a hand-written list.
 - `bench/cpu_ports.py` - corpus kernel name to parameterisation mapping, plus each buggy kernel's correct control.
 - `bench/measure_escape.py` - escape-rate measurement against the vendored corpus.
   Frozen: reruns must reproduce the ADR 0001 tables exactly.
 - `bench/score_oracles.py` - mutation scoring of test policies at equal budget B.
 - `bench/probe_bottleneck.py` - one-off probe of where a given fault is detectable; rerun it whenever the catalogue grows.
+- `bench/calibrate_k.py` - measures what the admissible-implementation contract demands of K, and how many ensemble members it takes to represent that contract.
+  Rerun it whenever the contract, the ensemble or the catalogue changes.
 - `docs/adr/` - decisions with the measurements that forced them.
   Read these before changing any method.
 - `vendor/gpuemu-corpus/` - vendored unmodified at the commit pinned in `vendor/PINNED.txt`.
@@ -36,11 +42,14 @@ Vlad's global instructions still apply; this file adds the project's layout, how
 ```
 cd /Users/vlad/kernelverify
 .venv/bin/python bench/measure_escape.py   # ~1 min, must reproduce ADR 0001
-.venv/bin/python bench/score_oracles.py    # ~1 min warm, ~5 min after a catalogue change
+.venv/bin/python bench/score_oracles.py    # ~1 min warm, ~10 min after a catalogue or ensemble change
+.venv/bin/python bench/calibrate_k.py --n-random 24   # instant warm, ~20 min cold, must reproduce ADR 0005
 ```
 
-- Verdicts are cached at `bench/.cache/verdicts.pkl`, fingerprinted by mutation names and input modes; any catalogue or mode change rebuilds automatically.
+- Verdicts are cached at `bench/.cache/verdicts.pkl`, fingerprinted by mutation names, input modes, K and every ensemble member's label; any catalogue, mode or oracle change rebuilds automatically.
+- Contract measurements are cached at `bench/.cache/contract_k.pkl` under the same discipline, fingerprinted by the contract version and sample size as well.
 - Deleting `bench/.cache/` is the safe full reset.
+- The environment needs `torch`, which only `gelu[variant=erf]` uses; a worktree venv created without it fails part-way through a verdict build.
 
 ## Working rules for this repo
 
@@ -65,3 +74,9 @@ cd /Users/vlad/kernelverify
 - A deterministic-only test policy plateaued at 88% while random reached 98%; exploration must survive in any policy.
 - Pure pair-greedy coverage cratered to 67% at B=4 by buying pair density before basic diversity; cover single features first, then pairs, then random.
 - The corpus fp64 references run as subprocesses over a stdin/stdout protocol; they are the slow part of any rebuild, so batch and cache around them.
+- Sequential accumulation is not the worst legitimate summation order, despite what ADR 0004 assumed when it built the ensemble from it.
+  Seeded random permutations of the same reduction beat it by up to 8.45x on the attention family, and the magnitude-sorted order that theory nominates as worst is not worst either; ADR 0005 has the measurement.
+- A tolerance has two halves and both need fingerprinting.
+  ADR 0004's cache tag carried K but not the ensemble membership, so changing who computes the floor would have silently reused stale verdicts.
+- Any claim about how much of the admissible class an ensemble covers must be scored against an independently seeded draw of that class.
+  Scoring a sample against itself makes every ensemble look complete.
