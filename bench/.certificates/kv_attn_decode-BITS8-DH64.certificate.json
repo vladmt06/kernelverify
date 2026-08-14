@@ -1,0 +1,103 @@
+{
+  "schema_version": 2,
+  "kernel": "kv_attn_decode-BITS8-DH64",
+  "kernel_family": "kv_attn_decode",
+  "byte_bound": {
+    "_meaning": "these hashes identify WHAT was verified; they assert nothing about output values",
+    "translation_unit_sha256": "536f4c07239d1c670c455353d7f18b755c3376e6abd749e2d98828625519ed0f",
+    "catalogue_fingerprint": "none: no mutation-scored fault catalogue exists for this operator yet",
+    "harness_commit": "7d7c453",
+    "contract_version": "kv_attention contract (frozen at 8ec7eca; NATIVE_OPS['kv_attention'])",
+    "compile_options": {
+      "math_mode": "safe"
+    },
+    "extraction_provenance": "extracted-behaviorally-validated",
+    "extraction_provenance_meaning": "the translation unit was captured from the framework's own generator and reproduces the framework's outputs under this protocol on the pinned toolchain; it is not claimed to be byte-identical to what the framework compiled, because numerically equivalent programs pass that check by construction and compile options never appear in the captured source",
+    "not_attested_by_these_hashes": [
+      "host-side contiguity copies the framework may insert before launch",
+      "launch configuration beyond the declared spec",
+      "compile options, which do not appear in generated source and are recorded separately as inputs"
+    ]
+  },
+  "protocol_bound": {
+    "_assertion": "re-running the published protocol on a machine matching the recorded chip generation and toolchain reproduces these verdicts; output values are NOT asserted to be identical, which is not achievable on a GPU",
+    "operator": "kv_attention",
+    "policy": "pack-gate fixed-case sweep: 3 fixed (B, H, T, DH) shapes x 2 bit widths (4, 8), judged against the shipped NATIVE_OPS['kv_attention'] reference and tolerance, with the mlx-ops incumbent arm judged by the same oracle and artefact bytes checked identical to mx.quantize per case. This is NOT the 16-eval mutation-scored battery, which has not run against this operator; 2/3-bit widths have unit-test coverage only, no gate evidence.",
+    "budget_evaluations_per_operator": 1,
+    "cases_run": 1,
+    "cases_passed": 1,
+    "all_passed": true,
+    "seed_protocol": "np.random.default_rng(t + bits) per (shape, bits) in make_case(), q and new_k rescaled to peak 0.6 (the contract's QUERY_SCALE), caches at unit scale, in bench/pack_kv_attention.py verify()",
+    "tolerance_model": {
+      "anchor": "NATIVE_OPS['kv_attention'] fp64 reference",
+      "floor": "operator ensemble floor",
+      "K_quant": 4.0,
+      "form": "max(base_tol(dtype), K_QUANT * floor)"
+    }
+  },
+  "attestation": {
+    "_meaning": "not every clause is established the same way; a clause no test can separate is attested from source or not at all",
+    "clauses": [
+      {
+        "clause": "C1",
+        "statement": "every intermediate at binary32 or wider",
+        "mechanism": "source-attestation",
+        "evidence": "every accumulator in the kernel source is float (fp32); tree-reduced half-precision accumulation is separable on 0/280 fp16-activation cases, so source attestation is the only honest mechanism at this dtype",
+        "scope": "fp16 activations, tree-reduced accumulators"
+      },
+      {
+        "clause": "C5",
+        "statement": "the specified formula, not a defensible relative",
+        "mechanism": "numeric-battery",
+        "evidence": "judged against the operator's fp64 shipped reference within the shipped tolerance on every case in the protocol block"
+      },
+      {
+        "clause": "C4",
+        "statement": "exponential sums shifted by their own maximum",
+        "mechanism": "source-attestation",
+        "evidence": "the kernel subtracts the reduced maximum before exp in source; the pack gate's inputs do not provoke overflow, so this clause is source-read pending the battery extension to pack operators"
+      }
+    ],
+    "counts": {
+      "numeric": 1,
+      "source_attested": 2
+    }
+  },
+  "validity": {
+    "binding_on": {
+      "chip_generation": "Apple M3 Pro",
+      "toolchain": {
+        "mlx": "0.32.0",
+        "python": "3.14.6",
+        "numpy": "2.5.2",
+        "macos": "26.5.2"
+      }
+    },
+    "elsewhere": "advisory: a mismatched chip generation or toolchain may move numerics legitimately, so a failure there is a new matrix row to investigate, not a refutation",
+    "domain": {
+      "BITS": 8,
+      "DH": 64,
+      "T": "1..1024 inclusive - a CORRECTNESS bound, not profitability: the T+1 softmax buffer is compile-time threadgroup memory (TCAP=1024) and both doors reject t > 1024 loudly",
+      "batch": "any B >= 1; one threadgroup per (batch row, head), rows independent",
+      "cache_semantics": "K/V caches (H, T, DH) as MLX-affine group-64 artefacts bit-identical to mx.quantize; the step's own new_k/new_v enter at full precision inside the T+1 softmax"
+    }
+  },
+  "performance": [],
+  "notes": [
+    "evidence source: the pack_kv_attention pack gate, not the 16-eval mutation-scored battery; no fault catalogue has run against this operator yet (TODOS.md: pack-operator battery extension is the upgrade path)",
+    "extraction behaviorally validated on 1 of 1 gate cases (see validation_calls in the emitter)",
+    "no timings recorded: certification may run under contention (D12.2), so no performance claim is made or implied"
+  ],
+  "advisory": {
+    "_meaning": "advisory, NOT reproducible: GPU outputs are not bit-stable across runs, so these fingerprints and margins describe the certifying run only and are never a re-check criterion",
+    "cases": [
+      {
+        "label": "B=4 H=2 T=64 DH=64 8-bit",
+        "output_sha256": "72e2d4635a4de709ade142f2e570c9214da47dcca1da4e0cc1f5261c0f8e5468",
+        "err": 0.00010445905028300118,
+        "tol": 0.0013205167152016513,
+        "margin_err_over_tol": 0.079105
+      }
+    ]
+  }
+}

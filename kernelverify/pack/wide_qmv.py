@@ -239,8 +239,12 @@ kernel void {KERNEL_NAME}(
     )
 
 
+def mlx_door_source() -> str:
+    """The body in the MLX door's spelling, the single source `build()` uses."""
+    return WIDE_QMV_MSL.replace("D_IN", "x_shape[1]").replace("D_OUT", "scales_shape[0]")
+
+
 def build(mx):
     """The MLX callable. Takes mx so this module imports without it."""
-    source = WIDE_QMV_MSL.replace("D_IN", "x_shape[1]").replace("D_OUT", "scales_shape[0]")
     return mx.fast.metal_kernel(name=KERNEL_NAME, input_names=INPUT_NAMES,
-                                output_names=OUTPUT_NAMES, source=source)
+                                output_names=OUTPUT_NAMES, source=mlx_door_source())

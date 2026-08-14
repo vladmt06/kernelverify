@@ -172,20 +172,59 @@ def test_directional_claim_renders_as_directional():
 
 
 # ---------------------------------------------------------------------------
-# Emission is gated by the audit
+# Emission is gated by the audit, and refusal is per kernel family
 # ---------------------------------------------------------------------------
 def test_emit_refuses_a_certificate_the_audit_complains_about(tmp_path):
-    with pytest.raises(ValueError, match="refusing to emit"):
-        emit([cert(cases_run=16, cases_passed=10)], tmp_path)
+    report = emit([cert(cases_run=16, cases_passed=10)], tmp_path)
+    assert not report.ok
+    [reasons] = report.refused.values()
+    assert any("refusing to emit" in r and "did not pass" in r for r in reasons)
     assert not list(tmp_path.glob("*.json")), "nothing may be written on refusal"
 
 
 def test_emit_writes_valid_json(tmp_path):
-    [path] = emit([cert()], tmp_path)
+    report = emit([cert()], tmp_path)
+    assert report.ok
+    [path] = report.written
     doc = json.loads(path.read_text())
     assert doc["kernel"] == "wide_qmv"
     assert doc["validity"]["binding_on"]["chip_generation"] == "Apple M3"
     assert "advisory" in doc["validity"]["elsewhere"]
+
+
+def test_one_familys_failure_refuses_its_siblings_but_not_other_kernels(tmp_path):
+    """Audit-all-then-write-all inside a family: the failing specialization
+    drags its healthy sibling down with a named reason, and the unrelated
+    kernel still emits."""
+    bad_family = [
+        cert(kernel_name="qmv-b4-M5", kernel_family="kv_wide_qmv"),
+        cert(kernel_name="qmv-b4-M6", kernel_family="kv_wide_qmv",
+             cases_run=16, cases_passed=12),
+    ]
+    other = cert(kernel_name="attn-b8-DH128", kernel_family="kv_attn_decode")
+    report = emit(bad_family + [other], tmp_path)
+    assert list(report.refused) == ["kv_wide_qmv"]
+    assert any("qmv-b4-M6" in reason for reason in report.refused["kv_wide_qmv"])
+    written_names = {p.name for p in report.written}
+    assert written_names == {"attn-b8-DH128.certificate.json"}
+    on_disk = {p.name for p in tmp_path.glob("*.json")}
+    assert "qmv-b4-M5.certificate.json" not in on_disk, (
+        "a healthy sibling of a refused family must not be written")
+
+
+def test_the_validity_domain_travels_inside_the_validity_block(tmp_path):
+    report = emit([cert(domain={"T": "1..1024 (correctness bound)"})], tmp_path)
+    doc = json.loads(report.written[0].read_text())
+    assert doc["validity"]["domain"]["T"].startswith("1..1024")
+
+
+def test_advisory_cases_are_labeled_not_reproducible(tmp_path):
+    advisory = ({"label": "M=5 unit", "output_sha256": "ab" * 32,
+                 "err": 1e-3, "tol": 2e-3, "margin_err_over_tol": 0.5},)
+    report = emit([cert(advisory_cases=advisory)], tmp_path)
+    doc = json.loads(report.written[0].read_text())
+    assert "NOT reproducible" in doc["advisory"]["_meaning"]
+    assert doc["advisory"]["cases"][0]["label"] == "M=5 unit"
 
 
 # ---------------------------------------------------------------------------

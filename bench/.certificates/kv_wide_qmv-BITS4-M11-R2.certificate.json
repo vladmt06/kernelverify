@@ -1,0 +1,127 @@
+{
+  "schema_version": 2,
+  "kernel": "kv_wide_qmv-BITS4-M11-R2",
+  "kernel_family": "kv_wide_qmv",
+  "byte_bound": {
+    "_meaning": "these hashes identify WHAT was verified; they assert nothing about output values",
+    "translation_unit_sha256": "b0b488142cf3c9640c40c807a98191766c883af2316d3f63926755ffac6f25f5",
+    "catalogue_fingerprint": "none: no mutation-scored fault catalogue exists for this operator yet",
+    "harness_commit": "7d7c453",
+    "contract_version": "MLX-affine quant contract, device-joined ensemble, K_QUANT=4 (ADR 0009/0012)",
+    "compile_options": {
+      "math_mode": "safe"
+    },
+    "extraction_provenance": "extracted-behaviorally-validated",
+    "extraction_provenance_meaning": "the translation unit was captured from the framework's own generator and reproduces the framework's outputs under this protocol on the pinned toolchain; it is not claimed to be byte-identical to what the framework compiled, because numerically equivalent programs pass that check by construction and compile options never appear in the captured source",
+    "not_attested_by_these_hashes": [
+      "host-side contiguity copies the framework may insert before launch",
+      "launch configuration beyond the declared spec",
+      "compile options, which do not appear in generated source and are recorded separately as inputs"
+    ]
+  },
+  "protocol_bound": {
+    "_assertion": "re-running the published protocol on a machine matching the recorded chip generation and toolchain reproduces these verdicts; output values are NOT asserted to be identical, which is not achievable on a GPU",
+    "operator": "quantized_matmul",
+    "policy": "pack-gate fixed-case sweep: 2 matrix shapes x {unit, corpus} input scales per (BITS, M) specialization, judged against the shipped NATIVE_OPS['quantized_matmul'] reference and tolerance; artefact bytes checked identical to mx.quantize per (shape, bits). This is NOT the 16-eval mutation-scored battery, which has not run against this operator.",
+    "budget_evaluations_per_operator": 4,
+    "cases_run": 4,
+    "cases_passed": 4,
+    "all_passed": true,
+    "seed_protocol": "weights: np.random.default_rng(7) per (shape, bits); inputs: np.random.default_rng(11) per (shape, bits), drawn M-major then {unit, corpus} scale, in bench/pack_wide_qmv.py verify()",
+    "tolerance_model": {
+      "anchor": "r_contract (fp64 dequantized reference)",
+      "floor": "quant-contract ensemble",
+      "K_quant": 4.0,
+      "ensemble_members": [
+        "dequant-pairwise",
+        "dequant-reversed",
+        "dequant-serial",
+        "factored-groups",
+        "factored-serial",
+        "lut-gather"
+      ],
+      "form": "max(base_tol(dtype), K_QUANT * floor)"
+    }
+  },
+  "attestation": {
+    "_meaning": "not every clause is established the same way; a clause no test can separate is attested from source or not at all",
+    "clauses": [
+      {
+        "clause": "C1",
+        "statement": "every intermediate at binary32 or wider",
+        "mechanism": "source-attestation",
+        "evidence": "every accumulator in the kernel source is float (fp32); tree-reduced half-precision accumulation is separable on 0/280 fp16-activation cases, so source attestation is the only honest mechanism at this dtype",
+        "scope": "fp16 activations, tree-reduced accumulators"
+      },
+      {
+        "clause": "C5",
+        "statement": "the specified formula, not a defensible relative",
+        "mechanism": "numeric-battery",
+        "evidence": "judged against the operator's fp64 shipped reference within the shipped tolerance on every case in the protocol block"
+      }
+    ],
+    "counts": {
+      "numeric": 1,
+      "source_attested": 1
+    }
+  },
+  "validity": {
+    "binding_on": {
+      "chip_generation": "Apple M3 Pro",
+      "toolchain": {
+        "mlx": "0.32.0",
+        "python": "3.14.6",
+        "numpy": "2.5.2",
+        "macos": "26.5.2"
+      }
+    },
+    "elsewhere": "advisory: a mismatched chip generation or toolchain may move numerics legitimately, so a failure there is a new matrix row to investigate, not a refutation",
+    "domain": {
+      "BITS": 4,
+      "M": 11,
+      "R": 2,
+      "d_in": "any multiple of 64 (gate evidence at 2560 and 4096)",
+      "d_out": "any positive count (out-of-range rows clamp-read, stores guarded; gate evidence at 2560 and 4096)",
+      "dispatch_boundary": "should_dispatch: M >= 5; below it MLX already reads the weights once and 2-bit measures a loss - a routing boundary, not a correctness bound"
+    }
+  },
+  "performance": [],
+  "notes": [
+    "evidence source: the pack_wide_qmv pack gate, not the 16-eval mutation-scored battery; no fault catalogue has run against this operator yet (TODOS.md: pack-operator battery extension is the upgrade path)",
+    "extraction behaviorally validated on 2 of 4 gate cases (see validation_calls in the emitter)",
+    "no timings recorded: certification may run under contention (D12.2), so no performance claim is made or implied"
+  ],
+  "advisory": {
+    "_meaning": "advisory, NOT reproducible: GPU outputs are not bit-stable across runs, so these fingerprints and margins describe the certifying run only and are never a re-check criterion",
+    "cases": [
+      {
+        "label": "4-bit M=11 unit 2560x2560",
+        "output_sha256": "54104f458cd21fc099c6222e16137af37144c1e76ab9195990ded636132b12c3",
+        "err": 0.0019306812027934939,
+        "tol": 0.017120486147859482,
+        "margin_err_over_tol": 0.11277
+      },
+      {
+        "label": "4-bit M=11 corpus 2560x2560",
+        "output_sha256": "9837bd2bf741ee88c2f0df2668958253b214b3e7f4f18105b2706bf6a7df9920",
+        "err": 0.015142672811634839,
+        "tol": 0.15652077408089793,
+        "margin_err_over_tol": 0.096745
+      },
+      {
+        "label": "4-bit M=11 unit 4096x4096",
+        "output_sha256": "e280d2062cc43a86990424e7366e989e8f747a8e0e5eee86cd6e0da6f364d03f",
+        "err": 0.0019428266750765033,
+        "tol": 0.021734372591340628,
+        "margin_err_over_tol": 0.08939
+      },
+      {
+        "label": "4-bit M=11 corpus 4096x4096",
+        "output_sha256": "f3d6604f2d22a9b6bb36f246d40091bc34ac0213e6d309bab2ec19992f4523e7",
+        "err": 0.015617029075656319,
+        "tol": 0.21971318941522583,
+        "margin_err_over_tol": 0.071079
+      }
+    ]
+  }
+}

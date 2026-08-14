@@ -35,6 +35,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import mlx.core as mx  # noqa: E402
 
+from kernelverify.extraction.surface import LiveCall  # noqa: E402
+from kernelverify.pack.evidence import (  # noqa: E402
+    CaseEvidence,
+    GateEvidence,
+    output_fingerprint,
+    render_banner,
+)
 from kernelverify.pack.verify import (  # noqa: E402
     judge,
     qmv_inputs,
@@ -42,6 +49,7 @@ from kernelverify.pack.verify import (  # noqa: E402
 )
 from kernelverify.schemas.native_ops import K_QUANT  # noqa: E402
 from kernelverify.pack.wide_qmv import (  # noqa: E402
+    KERNEL_NAME,
     SUPPORTED_BITS,
     build,
     kernel_spec,
@@ -80,9 +88,23 @@ def artefact_for(d_out: int, d_in: int, seed: int, bits: int = 4):
 # --------------------------------------------------------------------------
 # verification
 # --------------------------------------------------------------------------
-def verify(runner: MetalRunner) -> bool:
-    print(f"correctness (runner-isolated, Phase 0 contract, K = {K_QUANT:g}):")
-    ok = True
+GATE_POLICY = (
+    "pack-gate fixed-case sweep: 2 matrix shapes x {unit, corpus} input "
+    "scales per (BITS, M) specialization, judged against the shipped "
+    "NATIVE_OPS['quantized_matmul'] reference and tolerance; artefact bytes "
+    "checked identical to mx.quantize per (shape, bits). This is NOT the "
+    "16-eval mutation-scored battery, which has not run against this operator."
+)
+SEED_PROTOCOL = (
+    "weights: np.random.default_rng(7) per (shape, bits); inputs: "
+    "np.random.default_rng(11) per (shape, bits), drawn M-major then "
+    "{unit, corpus} scale, in bench/pack_wide_qmv.py verify()"
+)
+
+
+def verify(runner: MetalRunner) -> GateEvidence:
+    evidence = GateEvidence(gate="pack_wide_qmv", policy=GATE_POLICY,
+                            seed_protocol=SEED_PROTOCOL)
     template = kernel_spec()
     for (d_out, d_in), bits in [(s, b) for s in SHAPES for b in SUPPORTED_BITS]:
         w, art = artefact_for(d_out, d_in, seed=7, bits=bits)
@@ -94,45 +116,60 @@ def verify(runner: MetalRunner) -> bool:
         identical = (np.array_equal(packed, np.array(mx_wq))
                      and np.array_equal(art.scales, np.array(mx_sc))
                      and np.array_equal(art.biases, np.array(mx_bi)))
-        print(f"  {d_out:>5} x {d_in:<5} {bits}-bit artefact identical to "
-              f"mx.quantize: {identical}")
-        if not identical:
-            ok = False
+        evidence.checks.append(CaseEvidence(
+            label=f"{d_out}x{d_in} {bits}-bit artefact identical to mx.quantize",
+            passed=identical))
 
         # One spec per tile width M (M and R are compile-time constants in the
         # raw door), all sharing one worker session as one candidate.
         rng = np.random.default_rng(11)
-        spec_batches, expected = [], []
+        spec_batches, case_refs = [], []
         for m in VERIFY_M:
             grid, threadgroup, r = launch_config(d_out, m)
-            spec = specialize(template, {"T": "half", "BITS": bits, "M": m, "R": r})
+            raw_template = {"T": "half", "BITS": bits, "M": m, "R": r}
+            spec = specialize(template, raw_template)
+            spec_ev = evidence.specialization(KERNEL_NAME, "quantized_matmul",
+                                              raw_template, threadgroup)
             cases = []
             for tag, scale in (("unit", 1.0), ("corpus", 10.0)):
                 x = (rng.standard_normal((m, d_in)).astype(np.float32)
                      * scale).astype(np.float16)
                 ref, tol = reference_and_tolerance(
                     "quantized_matmul", qmv_inputs(x, w, bits))
+                label = f"{bits}-bit M={m} {tag} {d_out}x{d_in}"
                 cases.append(RunCase(
                     inputs={"x": x, "w_q": packed,
                             "scales": art.scales, "biases": art.biases},
                     params={"d_in_arg": d_in, "d_out_arg": d_out,
                             "row_blocks": grid[1]},
                     output_shapes=[((m, d_out), "float16")],
-                    label=f"{bits}-bit M={m} {tag}"))
-                expected.append((m, tag, ref, tol))
+                    label=label))
+                spec_ev.calls.append(LiveCall(
+                    inputs={"x": x, "w_q": packed,
+                            "scales": art.scales, "biases": art.biases},
+                    output_shapes=[((m, d_out), "float16")],
+                    grid=grid, threadgroup=threadgroup,
+                    template=(("T", "float16"), ("BITS", bits),
+                              ("M", m), ("R", r)),
+                    label=label))
+                case_refs.append((spec_ev, label, ref, tol))
             spec_batches.append((spec, cases))
 
         results = [r for batch in runner.run_candidate(spec_batches) for r in batch]
-        for result, (m, tag, ref, tol) in zip(results, expected):
+        for result, (spec_ev, label, ref, tol) in zip(results, case_refs):
             if not result.ok:
-                print(f"    M={m:<3}{tag:<7} RUNNER FAIL: "
-                      f"{result.status.value}: {result.detail}")
-                ok = False
+                spec_ev.cases.append(CaseEvidence(
+                    label=label, passed=False, tol=tol,
+                    detail=f"runner {result.status.value}: {result.detail}"))
                 continue
             v = judge(result.outputs[0], ref, tol)
-            ok = ok and v.ok
-            print(f"    {bits}-bit M={m:<3}{tag:<7} {v}")
-    return ok
+            spec_ev.cases.append(CaseEvidence(
+                label=label, passed=v.ok, err=v.err, tol=v.tol,
+                output_sha256=output_fingerprint(result.outputs[0])))
+
+    render_banner(evidence, "correctness (runner-isolated, Phase 0 contract, "
+                            f"K = {K_QUANT:g}):")
+    return evidence
 
 
 # --------------------------------------------------------------------------
@@ -223,7 +260,7 @@ def main(argv=None) -> int:
     parser.add_argument("--verify-only", action="store_true",
                         help="run the correctness gate and stop; no timing")
     args = parser.parse_args(argv)
-    if not verify(MetalRunner()):
+    if not verify(MetalRunner()).ok:
         print("\nVERDICT: kernel does not verify; no timing claim permitted")
         return 1
     if args.verify_only:

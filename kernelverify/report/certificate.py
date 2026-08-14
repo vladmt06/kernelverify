@@ -31,9 +31,12 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Iterable
 
-SCHEMA_VERSION = 1
+# 2: adds the optional validity `domain`, the advisory per-case block, and
+# `kernel_family` (the per-kernel emission-refusal group).
+SCHEMA_VERSION = 2
 
 #: How a contract clause was established for this kernel.
 NUMERIC = "numeric-battery"        # the battery can separate a violation
@@ -145,6 +148,19 @@ class Certificate:
     toolchain: dict
     performance: tuple = ()        # PerformanceClaim
     notes: tuple = ()
+    #: The per-kernel emission-refusal group (D10). Certificates sharing a
+    #: family are audited together and written together or not at all;
+    #: empty means the certificate is its own family.
+    kernel_family: str = ""
+    #: The validity domain (D9): the parameter ranges and semantics the
+    #: evidence covers, including correctness bounds like kv_attention's
+    #: T <= 1024 capacity ceiling. Rendered inside `validity()`.
+    domain: dict = field(default_factory=dict)
+    #: Advisory per-case records (D8): output fingerprints and
+    #: error-vs-tolerance margins from the certifying run. GPU outputs are
+    #: not bit-stable, so these are labeled not-reproducible and are never
+    #: a re-check criterion.
+    advisory_cases: tuple = ()
 
     def __post_init__(self):
         if self.extraction_provenance not in PROVENANCE:
@@ -198,18 +214,31 @@ class Certificate:
         }
 
     def validity(self) -> dict:
-        return {
+        out = {
             "binding_on": {"chip_generation": self.chip_generation,
                            "toolchain": self.toolchain},
             "elsewhere": "advisory: a mismatched chip generation or toolchain may "
                          "move numerics legitimately, so a failure there is a new "
                          "matrix row to investigate, not a refutation",
         }
+        if self.domain:
+            out["domain"] = dict(self.domain)
+        return out
+
+    def advisory(self) -> dict:
+        return {
+            "_meaning": "advisory, NOT reproducible: GPU outputs are not "
+                        "bit-stable across runs, so these fingerprints and "
+                        "margins describe the certifying run only and are "
+                        "never a re-check criterion",
+            "cases": [dict(entry) for entry in self.advisory_cases],
+        }
 
     def to_json(self) -> dict:
-        return {
+        out = {
             "schema_version": SCHEMA_VERSION,
             "kernel": self.kernel_name,
+            "kernel_family": self.kernel_family or self.kernel_name,
             "byte_bound": self.byte_bound(),
             "protocol_bound": self.protocol_bound(),
             "attestation": self.attestation(),
@@ -217,6 +246,9 @@ class Certificate:
             "performance": [p.to_json() for p in self.performance],
             "notes": list(self.notes),
         }
+        if self.advisory_cases:
+            out["advisory"] = self.advisory()
+        return out
 
     def dumps(self) -> str:
         return json.dumps(self.to_json(), indent=2, sort_keys=False)
@@ -357,20 +389,43 @@ def contract_clauses(*, fp16_activations: bool) -> tuple:
     )
 
 
-def emit(certificates: Iterable[Certificate], directory) -> list:
-    """Write certificates as JSON beside the kernels they describe."""
-    from pathlib import Path
+@dataclass
+class EmitReport:
+    """What one emission run wrote, and what it refused by kernel family."""
 
+    written: list = field(default_factory=list)   # Paths, in emission order
+    refused: dict = field(default_factory=dict)   # family -> [named reasons]
+
+    @property
+    def ok(self) -> bool:
+        return not self.refused
+
+
+def emit(certificates: Iterable[Certificate], directory) -> EmitReport:
+    """Write certificates as JSON, refusing per kernel family (D10).
+
+    Refusal granularity is the kernel, with audit-all-then-write-all inside
+    each family: every certificate of a family is audited first, and one
+    audit complaint refuses the WHOLE family with named reasons while every
+    other family still emits. Nothing of a refused family is written, so a
+    directory never holds half of a kernel's specializations.
+    """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    written = []
+
+    groups: dict[str, list] = {}
     for cert in certificates:
-        problems = audit(cert)
+        groups.setdefault(cert.kernel_family or cert.kernel_name, []).append(cert)
+
+    report = EmitReport()
+    for family, group in groups.items():
+        problems = [f"refusing to emit a certificate for {cert.kernel_name}: {p}"
+                    for cert in group for p in audit(cert)]
         if problems:
-            raise ValueError(
-                f"refusing to emit a certificate for {cert.kernel_name}: "
-                + "; ".join(problems))
-        path = directory / f"{cert.kernel_name}.certificate.json"
-        path.write_text(cert.dumps() + "\n")
-        written.append(path)
-    return written
+            report.refused[family] = problems
+            continue
+        for cert in group:
+            path = directory / f"{cert.kernel_name}.certificate.json"
+            path.write_text(cert.dumps() + "\n")
+            report.written.append(path)
+    return report

@@ -29,7 +29,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import mlx.core as mx  # noqa: E402
 
+from kernelverify.extraction.surface import LiveCall  # noqa: E402
+from kernelverify.pack.evidence import (  # noqa: E402
+    CaseEvidence,
+    GateEvidence,
+    output_fingerprint,
+    render_banner,
+)
 from kernelverify.pack.moe_dispatch import (  # noqa: E402
+    DISPATCH_NAME,
+    ROUTING_NAME,
     build_dispatch,
     build_routing,
     dispatch_launch,
@@ -95,8 +104,25 @@ def make_case(n_tokens, d_model, n_experts, d_ffn, seed, mode="normal"):
 # --------------------------------------------------------------------------
 # verification
 # --------------------------------------------------------------------------
-def verify(runner: MetalRunner) -> bool:
-    print("correctness (runner-isolated, shipped moe_dispatch contract):")
+GATE_POLICY = (
+    "pack-gate fixed-case sweep: 3 (n_tokens, d_model, n_experts, d_ffn) "
+    "shapes x {normal, constant_rows} input modes; routing judged bit-exact "
+    "against the contract's top-2-by-probability with ties to the lower "
+    "index, dispatch judged against the shipped NATIVE_OPS['moe_dispatch'] "
+    "reference and tolerance over the exact dequantized experts. This is NOT "
+    "the 16-eval mutation-scored battery, which has not run against this "
+    "operator."
+)
+SEED_PROTOCOL = (
+    "np.random.default_rng(n_tokens * 31 + len(mode)) per (shape, mode) in "
+    "make_case(); constant_rows repeats one column so every logit ties, in "
+    "bench/pack_moe_dispatch.py verify()"
+)
+
+
+def verify(runner: MetalRunner) -> GateEvidence:
+    evidence = GateEvidence(gate="pack_moe_dispatch", policy=GATE_POLICY,
+                            seed_protocol=SEED_PROTOCOL)
     # The contract's own routing, from the shipped reference's helper.
     from kernelverify.reference.native_kernels import _topk_by_prob
 
@@ -114,67 +140,106 @@ def verify(runner: MetalRunner) -> bool:
             metas.append({"mode": mode, "n_tokens": n_tokens, "d_model": d_model,
                           "n_experts": n_experts, "d_ffn": d_ffn, "x": x,
                           "router": router, "packed": packed, "scales": scales,
-                          "biases": biases, "ref": ref, "tol": tol})
+                          "biases": biases, "ref": ref, "tol": tol,
+                          "label": f"{mode} n={n_tokens} E={n_experts}"})
 
     by_e: dict[int, list[int]] = {}
     for i, m in enumerate(metas):
         by_e.setdefault(m["n_experts"], []).append(i)
+    routing_evs = {}
+    for e, order in by_e.items():
+        rgrid, rtg = routing_launch(metas[order[0]]["n_tokens"])
+        routing_evs[e] = evidence.specialization(ROUTING_NAME, "moe_dispatch",
+                                                 {"E": e}, rtg)
     routing_batches = [
         (specialize(routing_spec(), {"E": e}),
          [RunCase(inputs={"x": metas[i]["x"], "router": metas[i]["router"]},
                   params={"d_in_arg": metas[i]["d_model"],
                           "n_tokens": metas[i]["n_tokens"]},
                   output_shapes=[((metas[i]["n_tokens"], 2), "uint32"),
-                                 ((metas[i]["n_tokens"], 2), "float32")])
+                                 ((metas[i]["n_tokens"], 2), "float32")],
+                  label=f"routing {metas[i]['label']}")
           for i in order])
         for e, order in by_e.items()]
-    for order, batch in zip(by_e.values(), runner.run_candidate(routing_batches)):
+    for e, order, batch in zip(by_e.keys(), by_e.values(),
+                               runner.run_candidate(routing_batches)):
         for i, route in zip(order, batch):
             metas[i]["route"] = route
+            rgrid, _rtg = routing_launch(metas[i]["n_tokens"])
+            routing_evs[e].calls.append(LiveCall(
+                inputs={"x": metas[i]["x"], "router": metas[i]["router"]},
+                output_shapes=[((metas[i]["n_tokens"], 2), "uint32"),
+                               ((metas[i]["n_tokens"], 2), "float32")],
+                grid=rgrid, threadgroup=_rtg,
+                template=(("E", e),),
+                label=f"routing {metas[i]['label']}"))
 
-    ok = True
-    dispatch_cases, dispatch_idx, spec_r = [], [], None
+    dispatch_cases, dispatch_calls, dispatch_idx, spec_r = [], [], [], None
+    dispatch_tg = None
     for i, m in enumerate(metas):
         route = m["route"]
+        e = m["n_experts"]
+        label = f"routing {m['label']}"
         if not route.ok:
-            print(f"    {m['mode']:<14} n={m['n_tokens']:<3} ROUTING RUNNER FAIL: "
-                  f"{route.status.value}: {route.detail}")
-            ok = False
+            routing_evs[e].cases.append(CaseEvidence(
+                label=label, passed=False,
+                detail=f"runner {route.status.value}: {route.detail}"))
             continue
         idx, gate = route.outputs
         logits = m["x"].astype(np.float32) @ m["router"].astype(np.float32).T
         probs = np.exp(logits - logits.max(-1, keepdims=True))
         probs /= probs.sum(-1, keepdims=True)
         want = _topk_by_prob(probs, 2, tie_high=False)
-        m["routing_exact"] = np.array_equal(idx.astype(int), want)
+        routing_exact = bool(np.array_equal(idx.astype(int), want))
+        m["routing_exact"] = routing_exact
+        # Exactness against the contract's tie rule IS the routing verdict.
+        routing_evs[e].cases.append(CaseEvidence(
+            label=label, passed=routing_exact,
+            detail="" if routing_exact else "top-2 indices differ from the "
+                                            "contract's tie-to-lower-index rule",
+            output_sha256=output_fingerprint(idx),
+            aux={"routing_exact": routing_exact}))
 
-        grid, threadgroup, spec_r = dispatch_launch(m["d_ffn"], m["n_tokens"])
+        grid, dispatch_tg, spec_r = dispatch_launch(m["d_ffn"], m["n_tokens"])
         dispatch_cases.append(RunCase(
             inputs={"x": m["x"], "idx": idx, "gate": gate, "w_q": m["packed"],
                     "scales": m["scales"], "biases": m["biases"]},
             params={"d_in_arg": m["d_model"], "d_out_arg": m["d_ffn"],
                     "row_blocks": grid[1], "n_tokens": m["n_tokens"]},
-            output_shapes=[((m["n_tokens"], m["d_ffn"]), "float16")]))
+            output_shapes=[((m["n_tokens"], m["d_ffn"]), "float16")],
+            label=f"dispatch {m['label']}"))
+        dispatch_calls.append(LiveCall(
+            inputs={"x": m["x"], "idx": idx, "gate": gate, "w_q": m["packed"],
+                    "scales": m["scales"], "biases": m["biases"]},
+            output_shapes=[((m["n_tokens"], m["d_ffn"]), "float16")],
+            grid=grid, threadgroup=dispatch_tg,
+            template=(("T", "float16"), ("R", spec_r)),
+            label=f"dispatch {m['label']}"))
         dispatch_idx.append(i)
 
-    if not dispatch_cases:
-        return ok
-    # R is the fixed rows-per-simdgroup, so one spec serves every case.
-    spec = specialize(dispatch_spec(), {"T": "half", "R": spec_r})
-    for i, result in zip(dispatch_idx, runner.run(spec, dispatch_cases)):
-        m = metas[i]
-        if not result.ok:
-            print(f"    {m['mode']:<14} n={m['n_tokens']:<3} DISPATCH RUNNER FAIL: "
-                  f"{result.status.value}: {result.detail}")
-            ok = False
-            continue
-        v = judge(result.outputs[0], m["ref"], m["tol"])
-        passed = v.ok and m["routing_exact"]
-        ok = ok and passed
-        print(f"    {m['mode']:<14} n={m['n_tokens']:<3} E={m['n_experts']:<3} "
-              f"routing exact {str(m['routing_exact']):<5} err {v.err:9.3e} "
-              f"tol {v.tol:9.3e}  {'pass' if passed else 'FAIL'}")
-    return ok
+    if dispatch_cases:
+        # R is the fixed rows-per-simdgroup, so one spec serves every case.
+        dispatch_ev = evidence.specialization(
+            DISPATCH_NAME, "moe_dispatch", {"T": "half", "R": spec_r}, dispatch_tg)
+        dispatch_ev.calls.extend(dispatch_calls)
+        spec = specialize(dispatch_spec(), {"T": "half", "R": spec_r})
+        for i, result in zip(dispatch_idx, runner.run(spec, dispatch_cases)):
+            m = metas[i]
+            label = f"dispatch {m['label']}"
+            if not result.ok:
+                dispatch_ev.cases.append(CaseEvidence(
+                    label=label, passed=False, tol=m["tol"],
+                    detail=f"runner {result.status.value}: {result.detail}"))
+                continue
+            v = judge(result.outputs[0], m["ref"], m["tol"])
+            dispatch_ev.cases.append(CaseEvidence(
+                label=label, passed=v.ok, err=v.err, tol=v.tol,
+                output_sha256=output_fingerprint(result.outputs[0]),
+                aux={"routing_exact": m["routing_exact"]}))
+
+    render_banner(evidence,
+                  "correctness (runner-isolated, shipped moe_dispatch contract):")
+    return evidence
 
 
 # --------------------------------------------------------------------------
@@ -318,7 +383,7 @@ def main(argv=None) -> int:
     parser.add_argument("--verify-only", action="store_true",
                         help="run the correctness gate and stop; no timing")
     args = parser.parse_args(argv)
-    if not verify(MetalRunner()):
+    if not verify(MetalRunner()).ok:
         print("\nVERDICT: kernel does not verify; no timing claim permitted")
         return 1
     if args.verify_only:
