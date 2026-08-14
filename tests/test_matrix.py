@@ -465,5 +465,11 @@ def test_the_real_v2_record_keeps_its_comparison_content():
         assert cell in comparisons, f"the {cell!r} cell vanished from the render"
     for ratio in ("1.12x", "1.19x", "2.25x", "0.70x"):
         assert ratio in comparisons, f"the record's {ratio} ratio vanished"
-    assert comparisons.count("| mlx-lm 0.31.3 |") == 4, \
-        "every cell must still pair both stacks"
+    # Scope the pairing check to the v2 run's own cells: the same dated file
+    # now legitimately carries later binding runs, whose cells must not be
+    # counted against the v2 record's four.
+    v2_cells = [chunk for chunk in comparisons.split("### ")
+                if chunk and "20260814T145747Z-6bc2d222" in chunk.splitlines()[0]]
+    assert len(v2_cells) == 4, "the v2 record's four cells must survive"
+    assert all(chunk.count("| mlx-lm 0.31.3 |") == 1 for chunk in v2_cells), \
+        "every v2 cell must still pair both stacks"
