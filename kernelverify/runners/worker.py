@@ -79,6 +79,7 @@ def main(argv: list[str]) -> int:
         return fatal(RunStatus.INVALID_SPEC, f"the request was not valid JSON: {error}")
     warmup = int(request.get("warmup", 1))
     repeats = int(request.get("repeats", 5))
+    math_mode = request.get("math_mode", "safe")
 
     for spec_index, entry in enumerate(request.get("specs", [])):
         try:
@@ -90,7 +91,7 @@ def main(argv: list[str]) -> int:
             continue
 
         try:
-            kernel = device.compile(spec)
+            kernel = device.compile(spec, math_mode=math_mode)
         except CompileError as error:
             emit({"event": "spec_failed", "spec": spec_index,
                   "result": RunResult(status=RunStatus.COMPILE_ERROR,
@@ -100,9 +101,13 @@ def main(argv: list[str]) -> int:
         # Saying so lets the parent stop granting the start-up budget to the
         # first case, which would otherwise be the slowest case to detect a
         # hang in.
+        # The compile options are echoed rather than assumed, so the parent
+        # records what the shader was actually built with; a certificate cites
+        # them as inputs.
         emit({"event": "compiled", "spec": spec_index,
               "max_threads_per_threadgroup": kernel.max_threads,
-              "thread_execution_width": kernel.execution_width})
+              "thread_execution_width": kernel.execution_width,
+              "compile_options": {"math_mode": kernel.math_mode}})
 
         for index, raw_case in enumerate(entry.get("cases", [])):
             try:

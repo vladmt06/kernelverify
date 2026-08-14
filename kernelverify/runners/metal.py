@@ -62,11 +62,16 @@ _EOF = object()
 
 @dataclass
 class BatchResult:
-    """One result per case, in the order the cases were given."""
+    """One result per case, in the order the cases were given.
+
+    `compile_options` is what the worker reported actually building the shader
+    with; a certificate records it as an input alongside the device.
+    """
 
     results: list = field(default_factory=list)
     device: DeviceInfo | None = None
     stderr: str = ""
+    compile_options: dict = field(default_factory=dict)
 
     def __iter__(self):
         return iter(self.results)
@@ -94,6 +99,7 @@ class _Session:
     spawn_error: str = ""
     #: runnable positions whose pipeline was built in this session
     compiled: set = field(default_factory=set)
+    compile_options: dict = field(default_factory=dict)
     stderr: str = ""
 
 
@@ -111,6 +117,10 @@ class MetalRunner:
     warmup: int = DEFAULT_WARMUP
     repeats: int = DEFAULT_REPEATS
     python: str = sys.executable
+    #: Metal math mode for shader compilation: "safe", "relaxed", or "fast".
+    #: The default mirrors MLX's documented default (Metal's own is fast), so
+    #: candidates are judged under the same math regime the framework runs.
+    math_mode: str = "safe"
 
     # -- device ------------------------------------------------------------
     def probe(self) -> DeviceInfo | None:
@@ -173,6 +183,7 @@ class MetalRunner:
                 runnable.append(position)
 
         device: DeviceInfo | None = None
+        compile_options: dict = {}
         stderr_parts: list[str] = []
         spec_cursor, case_cursor = 0, 0
         while spec_cursor < len(runnable):
@@ -180,6 +191,8 @@ class MetalRunner:
                                     slots, warmup, repeats)
             if session.device is not None and device is None:
                 device = session.device
+            if session.compile_options and not compile_options:
+                compile_options = session.compile_options
             if session.stderr:
                 stderr_parts.append(session.stderr)
 
@@ -237,7 +250,8 @@ class MetalRunner:
                         status=RunStatus.CRASH,
                         detail="the worker never reported this case",
                         label=cases[index].label)
-            batch_results.append(BatchResult(results=results, device=device, stderr=stderr))
+            batch_results.append(BatchResult(results=results, device=device, stderr=stderr,
+                                             compile_options=dict(compile_options)))
         return batch_results
 
     # -- one worker session ------------------------------------------------
@@ -262,6 +276,7 @@ class MetalRunner:
             "specs": request_specs,
             "warmup": self.warmup if warmup is None else warmup,
             "repeats": self.repeats if repeats is None else repeats,
+            "math_mode": self.math_mode,
         }
 
         try:
@@ -299,6 +314,8 @@ class MetalRunner:
                     if entry is not None:
                         request_index, (rpos, offset) = entry
                         outcome.compiled.add(rpos)
+                        if isinstance(event.get("compile_options"), dict):
+                            outcome.compile_options = event["compile_options"]
                         remaining = len(batches[runnable[rpos]][1]) - offset
                         budget = self.case_timeout if remaining else self.startup_timeout
                 elif kind == "spec_failed":

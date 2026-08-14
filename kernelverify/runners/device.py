@@ -49,6 +49,20 @@ _STORAGE_SHARED = Metal.MTLResourceStorageModeShared
 _STATUS_ERROR = 5  # MTLCommandBufferStatusError
 _MIN_SCALAR_BYTES = 4  # pad half scalars; Metal buffer arguments are word sized
 
+# Metal math modes, named the way MLX's compile_options documents them. The
+# choice matters to a verifier: Metal's own default is FAST math, MLX compiles
+# with SAFE (IEEE special values preserved), and a candidate judged under a
+# different math regime than the framework it is meant to replace can pass or
+# fail on reassociation rather than on its own arithmetic. The runner defaults
+# to MLX's documented default and records what it used, so a certificate can
+# cite the compile options as an input.
+MATH_MODES = {
+    "safe": Metal.MTLMathModeSafe,
+    "relaxed": Metal.MTLMathModeRelaxed,
+    "fast": Metal.MTLMathModeFast,
+}
+DEFAULT_MATH_MODE = "safe"  # MLX's documented default, mirrored deliberately
+
 
 class CompileError(RuntimeError):
     """The source did not become a compute pipeline."""
@@ -88,8 +102,15 @@ class MetalDevice:
             registry_id=int(self.device.registryID()),
         )
 
-    def compile(self, spec: KernelSpec) -> "CompiledKernel":
-        library, error = self.device.newLibraryWithSource_options_error_(spec.source, None, None)
+    def compile(self, spec: KernelSpec,
+                math_mode: str = DEFAULT_MATH_MODE) -> "CompiledKernel":
+        if math_mode not in MATH_MODES:
+            raise CompileError(
+                f"math mode {math_mode!r} is not one of {sorted(MATH_MODES)}")
+        options = Metal.MTLCompileOptions.new()
+        options.setMathMode_(MATH_MODES[math_mode])
+        library, error = self.device.newLibraryWithSource_options_error_(
+            spec.source, options, None)
         if library is None:
             raise CompileError(_describe(error) or "the Metal compiler rejected the source")
         function = library.newFunctionWithName_(spec.entry_point)
@@ -105,16 +126,18 @@ class MetalDevice:
                 _describe(error)
                 or f"{spec.entry_point!r} compiled but is not a compute function"
             )
-        return CompiledKernel(self, spec, pipeline)
+        return CompiledKernel(self, spec, pipeline, math_mode)
 
 
 class CompiledKernel:
     """One pipeline state, dispatched over as many cases as the battery has."""
 
-    def __init__(self, device: MetalDevice, spec: KernelSpec, pipeline):
+    def __init__(self, device: MetalDevice, spec: KernelSpec, pipeline,
+                 math_mode: str = DEFAULT_MATH_MODE):
         self.device = device
         self.spec = spec
         self.pipeline = pipeline
+        self.math_mode = math_mode
         self.max_threads = int(pipeline.maxTotalThreadsPerThreadgroup())
         self.execution_width = int(pipeline.threadExecutionWidth())
 

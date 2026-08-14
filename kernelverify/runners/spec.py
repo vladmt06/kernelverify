@@ -41,8 +41,15 @@ from typing import Any
 import numpy as np
 
 # Tensor element types the battery uses. The shader declares its own types;
-# these only decide how many bytes per element the host copies.
-TENSOR_DTYPES = {"float32": np.float32, "float16": np.float16}
+# these only decide how many bytes per element the host copies. The integer
+# entries exist for kernels extracted from MLX, whose ABI passes shape buffers
+# as int32 and stride buffers as int64.
+TENSOR_DTYPES = {
+    "float32": np.float32,
+    "float16": np.float16,
+    "int32": np.int32,
+    "int64": np.int64,
+}
 
 # Scalar argument types, bound with setBytes rather than a buffer allocation.
 SCALAR_DTYPES = {
