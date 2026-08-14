@@ -280,10 +280,18 @@ def bench(kernel) -> bool:
     return ok
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--verify-only", action="store_true",
+                        help="run the correctness gate and stop; no timing")
+    args = parser.parse_args(argv)
     if not verify(MetalRunner()):
         print("\nVERDICT: kernel does not verify; no timing claim permitted")
         return 1
+    if args.verify_only:
+        print("\nVERDICT: verified; timing skipped (--verify-only)")
+        return 0
     if not bench(build(mx)):
         print("\nSome rows were withheld: either the arms disagreed, or the "
               "reference arm's own time moved too much inside the round. "
