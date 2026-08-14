@@ -24,6 +24,7 @@ from kernelverify.mutation.catalogue import (  # noqa: E402
 )
 from kernelverify.reference.kernels import KERNELS  # noqa: E402
 from kernelverify.schemas.native_ops import K_NATIVE, K_QUANT, NATIVE_OPS  # noqa: E402
+from kernelverify.tolerance.contract import CONTRACT_VERSION  # noqa: E402
 from kernelverify.tolerance.floor import K_ENSEMBLE, conditioned_tolerance  # noqa: E402
 from measure_escape import (  # noqa: E402
     DISTRIBUTIONS,
@@ -168,7 +169,11 @@ def build_verdicts() -> dict:
                    + [f"oracle=ensemble-floor-k{K_ENSEMBLE}"]
                    + _oracle_member_labels()
                    + sorted(NATIVE_OPS)
-                   + [f"native-k=quant{K_QUANT},native{K_NATIVE}"])
+                   + [f"native-k=quant{K_QUANT},native{K_NATIVE}"]
+                   # Member labels alone cannot see a semantic change that
+                   # keeps every label the same (e.g. re-seeded permutations);
+                   # the contract version is bumped exactly for those.
+                   + [f"contract={CONTRACT_VERSION}"])
 
     def thaw(stored: dict) -> dict:
         spaces = {op: [Case(*t) for t in cases] for op, cases in stored["spaces"].items()}
