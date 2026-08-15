@@ -33,6 +33,15 @@ Vlad's global instructions still apply; this file adds the project's layout, how
   Prints both the pre-amendment and post-amendment reading of every width, which ADR 0009 relies on; do not remove either.
 - `bench/calibrate_quant_device.py` - the device-arithmetic membership calibration: trigger, membership-before-K repair order, K re-derivation, with its pre-registered rule in the module docstring.
   ADR 0012 is the reading of its run; reruns must reproduce its tables.
+- `bench/calibrate_quant_serving.py` - 3-bit adequacy at the Qwen3-4B E2E serving shapes, with its pre-registered rule in the module docstring: continuity anchor against the ADR 0012 cache, per-shape G0, the batch-regime probe with direct-match coverage, per-cell K demand against the shipped K = 4, and gates under width-pooled fault equivalence.
+  ADR 0013 is the reading of its run; reruns must reproduce its tables.
+  Amended 2026-08-15 after three SIGKILLs in step 2: per-shape and per-implementation progress lines carrying an RSS self-report, a per-step checkpoint at `bench/.cache/quant_serving_partial.json` (atomic write, `--resume` at step granularity only), and row-chunked dequantization so the lm_head weights stop paying a 3x whole-matrix transient.
+  The amendment and its bit-equality proof are in the module docstring.
+  Amended again the same night (memory-truthfulness): a phys_footprint budget with a distinct refusal exit (never a shrunk grid), a machine-global single-instance lock plus an available-memory gate, and child-process isolation per measurement iteration; the root leak was per-case Metal buffer allocation, fixed by the buffer pool in `kernelverify/runners/device.py`.
+  The three Jetsam kills that forced this (66.7, 69.4, 39.5 GB footprints on the 36 GB machine) are dissected in the module docstring's second amendment; `tests/test_serving_survival.py` is its proof suite.
+  Amended a third time (the merge review of that night's work, same docstring): the checkpoint fingerprint now carries a sha256 over the modules a record's value passes through, because the run resumed past STEP 0 - the pipeline's only end-to-end bit-exactness gate - on a checkpoint written by pre-buffer-pool code, and `--continuity-only` runs STEP 0 alone, which is the check to run after any change to the arithmetic path.
+  The single-instance lock moved to `machine_state.MeasurementLock`: ONE `fcntl.flock` shared by every heavy harness, since a per-harness lock let the pricing probe run beside the calibration, which is the 03:29 collapse itself, and a pid file cannot be read without a stale-pid judgement that eventually steals a live holder's lock.
+  The pinned 3-bit artifact lives at the absolute path `/Users/vlad/kernelverify/bench/.models/qwen3-4b-3bit-g64`; `bench/.models` is gitignored, so it exists in the main worktree only and never arrives via merge.
 - `bench/calibrate_k.py` - measures what the admissible-implementation contract demands of K, and how many ensemble members it takes to represent that contract.
   Rerun it whenever the contract, the ensemble or the catalogue changes.
 - `bench/roofline.py` and `bench/metal/roofline_probe.mm` - this machine's measured ceilings, GPU and CPU.
@@ -43,7 +52,7 @@ Vlad's global instructions still apply; this file adds the project's layout, how
 - `bench/probe_baseline_gaps.py` - one-off probes that closed the three claims ADR 0007 first shipped as inferred; rerun it whenever the baseline moves.
 - `bench/measure_baselines.py` - the one command that measures the machine's baselines across both stacks and appends them to `bench/.baselines/<date>.jsonl`.
   It alternates the arms within each workload cell (one sampling group per cell, schema v3), refuses to call a number binding on a busy or unplugged machine, and refuses sub-millisecond samples as absolute claims.
-- `bench/machine_state.py` - the idle gate and the timing floor, with the reason each exists.
+- `bench/machine_state.py` - the idle gate, the timing floor, and the one machine-wide measurement lock (`MeasurementLock`, an `fcntl.flock` on a fixed path) every heavy harness takes, with the reason each exists.
 - `bench/detached_run.py` and `bench/start_binding_run.sh` - the detached run path: a one-shot launchd job that waits for a strong-idle window, then runs `measure_baselines.py` with no terminal attached, retrying up to three passes on dispersion (ADR 0010).
 - `bench/OPERATOR-CARD.md` - the one-card instruction for starting a binding run and reading its outcome.
 - `bench/mlx_info.py` - the MLX safetensors equivalent of `gguf_info`, so both stacks get modelled bytes rather than file size.
@@ -64,6 +73,7 @@ cd /Users/vlad/kernelverify
 .venv/bin/python bench/calibrate_k.py --n-random 24   # instant warm, ~20 min cold, must reproduce ADR 0005
 .venv/bin/python bench/calibrate_quant_bits.py        # ~3 min, must reproduce ADR 0009
 .venv/bin/python bench/calibrate_quant_device.py      # ~7 min, needs the Metal GPU, must reproduce ADR 0012
+.venv/bin/python bench/calibrate_quant_serving.py     # ~45 min, needs the Metal GPU and the pinned artifact, must reproduce ADR 0013
 ```
 
 - Verdicts are cached at `bench/.cache/verdicts.pkl`, fingerprinted by mutation names, input modes, K and every ensemble member's label; any catalogue, mode or oracle change rebuilds automatically.
@@ -71,8 +81,8 @@ cd /Users/vlad/kernelverify
 - Deleting `bench/.cache/` is the safe full reset.
 - The environment needs `torch`, which only `gelu[variant=erf]` uses; a worktree venv created without it fails part-way through a verdict build.
 - It also needs `mlx==0.32.0` and `mlx-lm==0.31.3`, pinned across worktrees so binding comparisons stay on one toolchain.
-  Without mlx, three test modules are skipped whole by a module-level `importorskip`, so the suite reports 181 passed and 3 skipped where an mlx-equipped venv passes 187.
-  The skipped modules hide their contents rather than their count, so quote test counts from an mlx-equipped venv only.
+  Without mlx, the mlx-dependent test modules are skipped whole or fail to collect, so the suite under-reports badly.
+  Skipped modules hide their contents rather than their count, so quote test counts from an mlx-equipped venv only; the mlx-equipped suite passes 621 as of 2026-08-15.
 
 The machine baseline, in this order, because each step writes the denominators the next one divides by:
 
@@ -159,3 +169,7 @@ bench/start_binding_run.sh     # arms a launchd job, then quit Terminal
   Batching dispatches past 5 ms did NOT prevent this; interleaving the arms within each round is independently load-bearing.
   Interleaving is necessary and NOT sufficient: it equalizes a clock excursion across arms but cannot detect one, so the reference arm's own spread is the detector - reject any round whose reference samples exceed the class spread limit (1.5x max-to-min for kernel arms, tighter for steadier quantities).
   Interleave every comparative measurement, always, even when each dispatch is ms-scale.
+- Row-partitioning a matmul is NOT bit-exact, however plainly the arithmetic says each output element's dot product is untouched by it.
+  Measured on numpy 2.5.2 over Accelerate: cutting the output-row dimension of `x @ w.T` changes dgemm's blocking and moves fp64 results by up to 2e-14, at chunk sizes 1, 7 and 3276 and at shapes from (5, 128, 96) to (16, 2560, 20000).
+  Chunk the dequantization instead, which is elementwise per row and therefore exact by construction, and leave every matmul whole.
+  This one is silent rather than loud: it would have moved the fp64 anchor that every error is measured against, and the continuity anchor cannot catch it because the standing measure never takes the chunked path.
