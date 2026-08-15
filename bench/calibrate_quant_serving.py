@@ -189,7 +189,42 @@ was live. Authorized by the coordinator and recorded here before the rerun:
 
    Lazy construction is the other half: STEP 2 never reads the fp64
    reference, so at lm_head the probe was spending 3.1 GB resident (and a
-   9.3 GB transient) on a matrix it does not use.
+   9.3 GB transient) on a matrix it does not use. STEP 3 is the step that
+   DOES read it: eval_ref forces the build on the first record of each
+   (shape, draw, seed) iteration and w64 stays resident for that whole
+   iteration - 3.1 GB at lm_head - which the isolation amendment below
+   bounds by ending the iteration's process.
+
+AMENDMENT, 2026-08-15 (second): memory-truthfulness - budget, lock, isolation
+-----------------------------------------------------------------------------
+The first amendment made the run report and checkpoint honestly; it did not
+stop the machine from collapsing. Three Jetsam kills in one night (66.7,
+69.4 and 39.5 GB Python footprints on a 36 GB machine, all inside STEP 2)
+force three protections, none of which changes a measured value:
+
+1. FOOTPRINT BUDGET. The budget reads phys_footprint via proc_pid_rusage
+   (ctypes) - the number Jetsam kills on; one dead run self-reported 2.4 GB
+   RSS while dying at 39.5 GB footprint, so RSS survives as a secondary
+   print only. Between cells, and between records inside a child, footprint
+   over the CLI-overridable ``--budget-gb`` (default 24, well under machine
+   RAM) means REFUSAL: checkpoint written, live cell named, distinct exit
+   code. Never a silently shrunk grid.
+
+2. MACHINE-GLOBAL LOCK + AVAILABLE-MEMORY GATE. One live instance of this
+   harness per machine, keyed to the harness identity rather than the
+   worktree (a stale dead-pid lock is reclaimed), and a machine-available-
+   memory refusal (kern.memorystatus_level - Jetsam's own meter) before
+   each cell. Distinct exit codes for each gate.
+
+3. CHILD-PROCESS ISOLATION (ruling D3). Every measurement iteration -
+   continuity, one probe shape, one (shape, draw, seed) grid block - runs
+   in a child process; the iteration is rng-self-contained, so the records
+   are identical by construction (proven bit-exact across the boundary in
+   tests). The OS reclaims everything at child exit, bounding known AND
+   unknown leak classes; the parent streams the child's log, enforces the
+   budget on the child's self-reported footprint, and a child death marks
+   the cell in the checkpoint and refuses onward. The DeviceMemberSession
+   re-initializes per child (measured ~0.2 s; ruled acceptable).
 
 Machine discipline
 ------------------
@@ -201,11 +236,16 @@ smoke dispatches. Reruns must reproduce ADR 0013's tables.
 
 from __future__ import annotations
 
+import argparse
+import ctypes
 import json
+import math
 import os
 import resource
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -404,10 +444,14 @@ class ArtefactHoists:
     Fault dequants are deliberately NOT stored here: six extra fp32 weight
     matrices would add ~9 GB at lm_head, so ``fault_dequants`` yields them
     one at a time instead. The fp64 reference is deferred for the same reason
-    - it is the single largest array here and STEP 2 never reads it.
+    - it is the single largest array here and STEP 2 never reads it. STEP 3
+    DOES read it: ``eval_ref`` forces the build on the first record and the
+    reference then stays resident for the rest of that (shape, draw, seed)
+    iteration - 3.1 GB at lm_head - which is part of why each iteration runs
+    in its own child process, whose exit is what hands the memory back.
     """
 
-    def __init__(self, w: np.ndarray, artefact: QuantArtefact):
+    def __init__(self, artefact: QuantArtefact):
         rows, cols = artefact.q.shape
         g = artefact.contract.group_size
         self._artefact = artefact
@@ -546,6 +590,12 @@ def rss_line() -> str:
     return f"rss {current:.2f} GB, peak {peak:.2f} GB"
 
 
+def footprint_line() -> str:
+    """The budget's own number first; RSS stays a secondary print only."""
+    current, peak = phys_footprint_gb()
+    return f"footprint {current:.2f} GB (peak {peak:.2f} GB); {rss_line()}"
+
+
 def checkpoint_fingerprint(provenance: str, shapes) -> dict:
     """What a checkpoint must agree with before a --resume may reuse it.
     Resuming across a different artifact or shape set would splice two
@@ -575,6 +625,396 @@ def read_checkpoint(path: Path, fingerprint: dict) -> dict:
     if saved.get("fingerprint") != fingerprint:
         return {}
     return saved.get("steps", {})
+
+
+# ---------------------------------------------------------------------------
+# The 2026-08-15 memory-truthfulness amendment: budget, lock, isolation.
+# Three Jetsam kills in one night (66.7, 69.4 and 39.5 GB Python footprints on
+# a 36 GB machine) - the harness now refuses over a footprint budget instead
+# of letting Jetsam collapse the machine. All sizes are decimal GB (1e9),
+# matching rss_gb above.
+# ---------------------------------------------------------------------------
+
+# Exit codes. 0 = attested, 1 = measured-and-stopped, 2 = no Metal device
+# (all three pre-existing). The refusal codes are distinct so the coordinator
+# can tell a protective refusal from a measurement verdict without parsing
+# stdout, and each gate gets its own number.
+EXIT_BUDGET_REFUSAL = 3   # this process's phys_footprint crossed the budget
+EXIT_LOCK_HELD = 4        # a live instance of this harness already runs
+EXIT_LOW_MEMORY = 5       # machine-wide available memory too low for a cell
+EXIT_CHILD_DEATH = 6      # a measurement child died; its cell is named
+
+# Well under the machine's 38.7 decimal-GB (36 GiB) of unified memory: the
+# probes ruled 20-24 GB, and the default leaves the OS and the coordinator's
+# other lanes ~15 GB of headroom.
+DEFAULT_BUDGET_GB = 24.0
+
+
+def machine_ram_gb() -> float:
+    """Total unified memory in decimal GB, from sysctl hw.memsize."""
+    out = subprocess.run(["sysctl", "-n", "hw.memsize"],
+                         capture_output=True, text=True)
+    return int(out.stdout.strip()) / 1e9
+
+
+_RUSAGE_INFO_V4 = 4
+_RUSAGE_V4_WORDS = 40   # 16-byte uuid + 35 uint64 fields, rounded up
+_PHYS_FOOTPRINT_WORD = 9        # ri_phys_footprint: uuid is words 0-1
+_LIFETIME_FOOTPRINT_WORD = 30   # ri_lifetime_max_phys_footprint
+_libproc = None
+
+
+def phys_footprint_gb() -> tuple[float, float]:
+    """(current, lifetime peak) phys_footprint of THIS process, decimal GB.
+
+    phys_footprint is the number Jetsam kills on. RSS is not it: the 03:29
+    run self-reported 2.4 GB RSS while dying at a 39.5 GB footprint, because
+    compressed pages and IOKit/Metal memory charge the footprint without
+    being resident. So the budget reads the footprint via proc_pid_rusage
+    (one ctypes call - cheap enough to check between every record, no
+    per-check subprocess), and rss_line stays a secondary print only.
+
+    Word offsets follow rusage_info_v4 in <libproc.h> (ri_uuid occupies
+    words 0-1, ri_phys_footprint is word 9, ri_lifetime_max_phys_footprint
+    word 30); test_footprint_reader_reports_this_process_truthfully pins
+    them against a live allocation.
+    """
+    global _libproc
+    if _libproc is None:
+        _libproc = ctypes.CDLL("/usr/lib/libSystem.dylib", use_errno=True)
+    words = (ctypes.c_uint64 * _RUSAGE_V4_WORDS)()
+    ret = _libproc.proc_pid_rusage(os.getpid(), _RUSAGE_INFO_V4,
+                                   ctypes.byref(words))
+    if ret != 0:
+        raise RuntimeError(
+            f"proc_pid_rusage failed with {ret} (errno {ctypes.get_errno()}); "
+            f"a budget that cannot read the footprint must stop, not guess")
+    return (words[_PHYS_FOOTPRINT_WORD] / 1e9,
+            words[_LIFETIME_FOOTPRINT_WORD] / 1e9)
+
+
+class BudgetExceeded(RuntimeError):
+    """The footprint crossed the budget: the run refuses - checkpoint kept,
+    live cell named, distinct exit code. Never a silently shrunk grid."""
+
+    def __init__(self, cell: str, footprint_gb: float, budget_gb: float):
+        super().__init__(
+            f"footprint {footprint_gb:.2f} GB over budget "
+            f"{budget_gb:.2f} GB at cell {cell}")
+        self.cell = cell
+        self.footprint_gb = footprint_gb
+        self.budget_gb = budget_gb
+
+
+class BudgetGuard:
+    """The footprint cutoff, checked between cells and (per child) between
+    records. ``reader`` is injectable so the refusal path is testable without
+    allocating tens of GB."""
+
+    def __init__(self, budget_gb: float, reader=None):
+        self.budget_gb = budget_gb
+        self._reader = phys_footprint_gb if reader is None else reader
+
+    def check(self, cell: str) -> float:
+        current, _peak = self._reader()
+        if current > self.budget_gb:
+            raise BudgetExceeded(cell, current, self.budget_gb)
+        return current
+
+
+def refuse(code: int, reason: str, fingerprint: dict, steps: dict) -> int:
+    """The shared refusal path: keep the checkpoint whole on disk, say what
+    refused, exit with that gate's own code. OUT_PATH is never written here -
+    the results JSON means a finished run and nothing less.
+
+    Non-destructive by construction: finished steps already on disk under the
+    SAME fingerprint are kept even when this invocation had not (yet) loaded
+    them, so a refusal - resumed or not, however early - never costs a step.
+    """
+    kept = {**read_checkpoint(CHECKPOINT_PATH, fingerprint), **steps}
+    write_checkpoint(CHECKPOINT_PATH, fingerprint, kept)
+    print(f"REFUSAL (exit {code}): {reason}")
+    print(f"checkpoint intact at {CHECKPOINT_PATH}; rerun with --resume once "
+          f"the machine has room")
+    return code
+
+
+def _positive_float_arg(text: str, what: str, unit: str) -> float:
+    """A CLI number a gate depends on: infinities, NaN and non-positives are
+    rejected at parse time, never becoming a budget that cannot bite."""
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{what} {text!r} is not a number")
+    if not math.isfinite(value) or value <= 0.0:
+        raise argparse.ArgumentTypeError(
+            f"{what} must be positive finite {unit}, got {text!r}")
+    return value
+
+
+def _budget_gb_arg(text: str) -> float:
+    return _positive_float_arg(text, "budget", "decimal GB")
+
+
+def _wall_cap_arg(text: str) -> float:
+    return _positive_float_arg(text, "wall cap", "seconds")
+
+
+# The machine-global single-instance lock. Keyed to the HARNESS identity, not
+# the worktree: the 03:29 collapse was two large Pythons at once, so every
+# checkout of this harness must resolve to ONE lock. /tmp is machine-shared
+# across worktrees and cleared at boot, so a lock can never outlive a restart
+# (the durable-log lesson about /tmp is about logs; for a lock, boot-scoped is
+# exactly right). Stale locks - holder pid dead - are reclaimed.
+LOCK_PATH = Path("/tmp/kernelverify.calibrate_quant_serving.lock")
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # alive, just not ours to signal
+    return True
+
+
+def acquire_lock(path: Path = LOCK_PATH) -> tuple[bool, str]:
+    """(acquired, detail). A live holder refuses and nothing is modified; a
+    dead or unreadable holder is stale and its lock is reclaimed once."""
+    for attempt in (1, 2):
+        try:
+            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            try:
+                holder = int(path.read_text().strip())
+            except (OSError, ValueError):
+                holder = None
+            if holder is not None and _pid_alive(holder):
+                return False, f"held by live pid {holder}"
+            if attempt == 2:
+                return False, "still contended after one stale reclaim"
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            continue
+        with os.fdopen(fd, "w") as handle:
+            handle.write(str(os.getpid()))
+        return True, f"acquired by pid {os.getpid()}"
+    raise AssertionError("unreachable")
+
+
+def release_lock(path: Path = LOCK_PATH) -> None:
+    """Release only what this process holds; a foreign lock is never removed."""
+    try:
+        if int(path.read_text().strip()) == os.getpid():
+            path.unlink()
+    except (OSError, ValueError):
+        pass
+
+
+class LowMemoryRefusal(RuntimeError):
+    """The machine cannot offer the budget right now: refuse before the cell,
+    never push a doomed allocation into compression and Jetsam."""
+
+    def __init__(self, cell: str, available_gb: float, needed_gb: float):
+        super().__init__(
+            f"machine has {available_gb:.2f} GB available, cell needs room "
+            f"for the {needed_gb:.2f} GB budget at cell {cell}")
+        self.cell = cell
+        self.available_gb = available_gb
+        self.needed_gb = needed_gb
+
+
+def available_memory_gb() -> float:
+    """Machine-wide available memory in decimal GB.
+
+    kern.memorystatus_level is the memorystatus (Jetsam) subsystem's own
+    percentage of available memory - the same authority that killed the three
+    runs - so the refusal reads the exact meter the killer reads. Same
+    refusal-gate idiom as bench/machine_state.py: sample, refuse, name why.
+    """
+    out = subprocess.run(["sysctl", "-n", "kern.memorystatus_level"],
+                         capture_output=True, text=True)
+    return int(out.stdout.strip()) / 100.0 * machine_ram_gb()
+
+
+def require_available_memory(needed_gb: float, cell: str,
+                             reader=None) -> float:
+    available = (available_memory_gb if reader is None else reader)()
+    if available < needed_gb:
+        raise LowMemoryRefusal(cell, available, needed_gb)
+    return available
+
+
+# ---------------------------------------------------------------------------
+# Child-process isolation (ruling D3). Each measurement iteration runs in a
+# child process; the OS reclaims EVERYTHING at child exit, bounding the known
+# leak classes and the unknown ones alike. The parent spawns, streams the
+# child's log through (it inherits stdout/stderr - a foreground run stays a
+# foreground run), reads the result file, and enforces the budget on the
+# child's own footprint. In-process build-use-free surgery is deliberately
+# not attempted.
+# ---------------------------------------------------------------------------
+CHILD_DIR = Path(__file__).with_name(".cache")  # durable, never /tmp
+_CHILD_TASK_NAME = "quant_serving_child_task.json"
+_CHILD_RESULT_NAME = "quant_serving_child_result.json"
+
+
+def write_child_result(path: Path, result: dict) -> None:
+    """Atomic (temp then replace), bit-exact for every float.
+
+    json emits shortest-roundtrip decimal for finite doubles, which parses
+    back to the identical bits (including -0.0 and subnormals); numpy scalars
+    are widened by ``default=float``, exact for float64 and an exact widening
+    for float32/16. NaN and +/-Infinity policy, explicitly: ``allow_nan``
+    stays on, so json writes the ``NaN``/``Infinity`` literals and Python's
+    parser restores them - err() on an overflowed fp16 fault path survives
+    the boundary unchanged. A silent drift here would poison the continuity
+    anchor, which compares records exactly.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(result, default=float))
+    tmp.replace(path)
+
+
+def read_child_result(path: Path):
+    """The child's result, or None when there is nothing sound to read - an
+    absent or half-written file means the child died, never a crash here."""
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+class ChildRefusal(RuntimeError):
+    """A measurement child ended without a result. The parent marks the cell
+    and refuses onward - a dead child means the machine or the cell is not
+    safe to keep measuring."""
+
+    def __init__(self, cell: str, exit_for_parent: int, reason: str):
+        super().__init__(f"child {reason} at cell {cell}")
+        self.cell = cell
+        self.exit_for_parent = exit_for_parent
+        self.reason = reason
+
+
+def _child_death_reason(returncode: int) -> str:
+    if returncode < 0:
+        try:
+            name = signal.Signals(-returncode).name
+        except ValueError:
+            name = "?"
+        return f"died on signal {-returncode} ({name})"
+    return f"died with exit {returncode}"
+
+
+def spawn_measurement(cell: str, task: dict, budget_gb: float,
+                      wall_cap_s: float | None = None,
+                      command: list | None = None) -> tuple[dict, dict]:
+    """Run one measurement iteration in a child process; (payload, meta),
+    where meta carries the child's self-reported ``footprint_gb`` (and its
+    mx numbers when present).
+
+    The child inherits stdout/stderr so its progress lines land in the same
+    foreground log. ``command`` is injectable for tests; production spawns
+    this very file under the same interpreter. Raises ChildRefusal when the
+    child dies, self-refuses, or has no Metal device, and BudgetExceeded when
+    the child's own reported peak footprint crossed the budget - a child that
+    survived while exceeding it would just die next time.
+    """
+    task_path = CHILD_DIR / _CHILD_TASK_NAME
+    result_path = CHILD_DIR / _CHILD_RESULT_NAME
+    task_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.unlink(missing_ok=True)
+    task_path.write_text(json.dumps({**task, "cell": cell,
+                                     "budget_gb": budget_gb}))
+    argv = list(command) if command is not None else [
+        sys.executable, str(Path(__file__).resolve())]
+    argv += ["--child-task", str(task_path), "--child-out", str(result_path)]
+    try:
+        proc = subprocess.run(argv, timeout=wall_cap_s)
+    except subprocess.TimeoutExpired:
+        raise ChildRefusal(cell, EXIT_CHILD_DEATH,
+                           f"hit the {wall_cap_s:.0f}s wall cap")
+    finally:
+        task_path.unlink(missing_ok=True)
+    if proc.returncode == EXIT_BUDGET_REFUSAL:
+        raise ChildRefusal(cell, EXIT_BUDGET_REFUSAL,
+                           "refused over its own footprint budget")
+    if proc.returncode == 2:
+        raise ChildRefusal(cell, 2, "found no usable Metal device")
+    if proc.returncode != 0:
+        raise ChildRefusal(cell, EXIT_CHILD_DEATH,
+                           _child_death_reason(proc.returncode))
+    result = read_child_result(result_path)
+    result_path.unlink(missing_ok=True)
+    if result is None:
+        raise ChildRefusal(cell, EXIT_CHILD_DEATH,
+                           "exited 0 but left no result file")
+    peak = result.get("footprint_gb", {}).get("peak", 0.0)
+    if peak > budget_gb:
+        raise BudgetExceeded(cell, peak, budget_gb)
+    return result["payload"], {k: v for k, v in result.items()
+                               if k != "payload"}
+
+
+def refuse_child(exc: ChildRefusal, fingerprint: dict, steps: dict) -> int:
+    """A child refusal, through the shared refusal path, with the cell MARKED
+    in the checkpoint: the next run (or the coordinator) reads which cell
+    died without parsing the log. The mark lives beside the finished steps
+    and the next run's first own checkpoint write drops it."""
+    marked = {**steps, "refused_cell": {"cell": exc.cell, "reason": exc.reason,
+                                        "exit": exc.exit_for_parent}}
+    return refuse(exc.exit_for_parent, str(exc), fingerprint, marked)
+
+
+def child_main(args) -> int:
+    """The child half of the isolation protocol: run ONE measurement
+    iteration, self-guard the budget between records, self-report footprint
+    and mx memory, write the result atomically, exit. No lock (the parent
+    holds it), no checkpoint (the parent owns it), fresh DeviceMemberSession
+    per child by design (seconds of compile, ruled acceptable under D3)."""
+    task = json.loads(Path(args.child_task).read_text())
+    guard = BudgetGuard(task["budget_gb"])
+    cell = task.get("cell", task["kind"])
+    verbose = task.get("verbose", False)
+    print(f"  child {cell}: start ({footprint_line()})", flush=True)
+    try:
+        session = DeviceMemberSession()
+    except Exception as error:  # no PyObjC Metal, no GPU: nothing to measure
+        print(f"  child {cell}: no usable Metal device: {error}", flush=True)
+        return 2
+    try:
+        if task["kind"] == "continuity":
+            ok, detail = continuity_anchor(session)
+            payload = {"ok": ok, "detail": detail}
+        elif task["kind"] == "probe":
+            report = probe_batch_regimes(
+                [(task["name"], (task["d_out"], task["d_in"]))], session,
+                verbose=verbose, guard=guard)
+            payload = report[task["name"]]
+        elif task["kind"] == "grid":
+            payload = grid_iteration(
+                task["name"], task["d_out"], task["d_in"], task["draw"],
+                task["seed"], tuple(task["batches"]), session, guard=guard,
+                verbose=verbose)
+        else:
+            raise ValueError(f"unknown child task kind {task['kind']!r}")
+    except BudgetExceeded as exc:
+        print(f"  child {cell}: BUDGET REFUSAL - {exc}", flush=True)
+        return EXIT_BUDGET_REFUSAL
+    current, peak = phys_footprint_gb()
+    write_child_result(Path(args.child_out), {
+        "payload": payload,
+        "footprint_gb": {"current": current, "peak": peak},
+        "mx_gb": {"cache": mx.get_cache_memory() / 1e9,
+                  "peak": mx.get_peak_memory() / 1e9},
+    })
+    print(f"  child {cell}: done ({footprint_line()})", flush=True)
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -744,7 +1184,8 @@ def _carrier(artefact) -> dict:
 # Step 2: the probe driver
 # ---------------------------------------------------------------------------
 def probe_batch_regimes(shapes, session: DeviceMemberSession,
-                        verbose: bool = True) -> dict:
+                        verbose: bool = True,
+                        guard: BudgetGuard | None = None) -> dict:
     """The pre-registered batch-regime probe at every serving shape.
 
     Evaluates one (implementation, dtype) at a time across B = 1..16 and ANDs
@@ -753,10 +1194,14 @@ def probe_batch_regimes(shapes, session: DeviceMemberSession,
     Every stage announces itself with its RSS: this step died three times
     under SIGKILL with nothing in the log past the header, so the last line
     printed has to name the shape and the implementation that was live.
+    ``guard`` (when given) is checked before each shape starts, so an
+    over-budget process refuses before the next cell rather than mid-way.
     """
     contract = QuantContract(scheme="mlx-affine", bits=BITS, group_size=GROUP_SIZE)
     report = {}
     for name, (d_out, d_in) in shapes:
+        if guard is not None:
+            guard.check(f"probe {name} {d_out}x{d_in}")
         if verbose:
             print(f"  {name} {d_out}x{d_in}: quantizing ({rss_line()})",
                   flush=True)
@@ -766,7 +1211,7 @@ def probe_batch_regimes(shapes, session: DeviceMemberSession,
         if not exact:
             report[name] = {"g0_exact": False}
             continue
-        hoists = ArtefactHoists(w, artefact)
+        hoists = ArtefactHoists(artefact)
         carrier = _carrier(artefact)
         w_q, scales, biases = mlx_quantize_hoist(w)
         if verbose:
@@ -818,75 +1263,103 @@ def probe_batch_regimes(shapes, session: DeviceMemberSession,
 # ---------------------------------------------------------------------------
 # Step 3: the main grid
 # ---------------------------------------------------------------------------
+def grid_iteration(name: str, d_out: int, d_in: int, draw: str, seed: int,
+                   batches, session: DeviceMemberSession,
+                   guard: BudgetGuard | None = None,
+                   verbose: bool = False) -> dict:
+    """One (shape, draw, seed) block of the main grid: the isolation unit.
+
+    Rng-self-contained by construction - fresh ``default_rng(10_000 + seed)``,
+    stream order pinned (make_w first, then make_x per (batch, mode, dtype),
+    batch outermost) - which is exactly the property that makes running it in
+    a child process sound without renumbering anything. Records are
+    JSON-serializable pure-Python values throughout. ``guard`` is checked at
+    the start and between records, so an over-budget process refuses at a
+    boundary instead of meeting Jetsam mid-record.
+    """
+    if guard is not None:
+        guard.check(f"grid {name} {d_out}x{d_in} {draw} s{seed}")
+    contract = QuantContract(scheme="mlx-affine", bits=BITS, group_size=GROUP_SIZE)
+    rng = np.random.default_rng(10_000 + seed)
+    w = make_w(d_out, d_in, draw, rng)
+    artefact, exact = verify_against_mlx(w, contract)
+    xs = {}
+    for batch in batches:
+        for mode in MODES:
+            for dtype_name in ("float32", "float16"):
+                xs[(batch, mode, dtype_name)] = make_x(
+                    batch, d_in, _np_dtype(dtype_name), mode, rng)
+    if not exact:
+        return {"records": [], "exact": False}
+    hoists = ArtefactHoists(artefact)
+    carrier = _carrier(artefact)
+    w_q, scales, biases = mlx_quantize_hoist(w)
+    block = []
+    for (batch, mode, dtype_name), x in xs.items():
+        label = (f"b{BITS} {name} {d_out}x{d_in} B{batch} {draw} "
+                 f"s{seed} {mode} {dtype_name}")
+        if guard is not None:
+            guard.check(label)
+        ref = eval_ref(x, hoists.w64)
+        scale = float(np.abs(ref).max())
+        chunk = serial_chunk_rows(batch, d_in)
+        members = {n: err(out, ref)
+                   for n, out in _cpu_members(x, hoists, chunk).items()}
+        for member in DEVICE_MEMBERS:
+            out = _device_member_output(session, member, x, carrier,
+                                        d_out, d_in, label)
+            members[member] = err(out, ref)
+        record = {
+            "bits": BITS, "proj": name, "shape": f"{d_out}x{d_in}",
+            "batch": batch, "draw": draw, "seed": seed,
+            "heldout_draw": seed in HELDOUT_SEEDS,
+            "mode": mode, "dtype": dtype_name,
+            "ref_scale": scale,
+            "base_tol": base_tol(dtype_name, scale),
+            "members": members,
+            "heldout": {
+                "block-tiled": err(eval_block_tiled(x, hoists.w32), ref),
+                "mlx-on-device": err(
+                    mlx_qmm_heldout(x, w_q, scales, biases), ref),
+            },
+            "faults": {},
+            "boundary_fp16_dequant": err(
+                eval_boundary(x, hoists.w16_32), ref),
+        }
+        block.append((record, x, ref))
+        if verbose:
+            print(f"    {label} done ({rss_line()})", flush=True)
+    for fault_name, w_fault32 in fault_dequants(artefact):
+        for record, x, ref in block:
+            record["faults"][fault_name] = err(
+                eval_pairwise(x, w_fault32), ref)
+        del w_fault32
+    return {"records": [record for record, _, _ in block], "exact": True}
+
+
 def measure_serving(shapes, batches, session: DeviceMemberSession,
-                    verbose: bool, on_block=None) -> dict:
-    """Every record for the serving grid: the standing quantities, plus the
-    batch axis, through the tested exact-value paths. Per (shape, draw, seed)
-    block the rng stream is consumed in the pinned order: make_w first, then
-    make_x per (batch, mode, dtype), batch outermost.
+                    verbose: bool, on_block=None,
+                    guard: BudgetGuard | None = None) -> dict:
+    """Every record for the serving grid, iterated IN-PROCESS: the standing
+    quantities plus the batch axis, one ``grid_iteration`` at a time. The
+    production run executes each iteration in a child process instead (same
+    ``grid_iteration``, same arithmetic - see the STEP 3 loop in
+    ``_run_measured_steps``); this driver is the in-process seam the unit
+    tests measure against.
 
     ``on_block`` receives the records so far after each (shape, draw), so a
     death inside this step leaves the records it already earned on disk. It is
     a recorder only: a resume never restarts mid-step, because the rng stream
-    order above is pinned across the whole step."""
-    contract = QuantContract(scheme="mlx-affine", bits=BITS, group_size=GROUP_SIZE)
+    order is pinned across the whole step. ``guard`` (when given) is checked
+    at every iteration and record boundary inside grid_iteration."""
     records, exactness = [], []
     for name, (d_out, d_in) in shapes:
         for draw in WEIGHT_DRAWS:
             for seed in CALIBRATION_SEEDS + HELDOUT_SEEDS:
-                rng = np.random.default_rng(10_000 + seed)
-                w = make_w(d_out, d_in, draw, rng)
-                artefact, exact = verify_against_mlx(w, contract)
-                exactness.append(exact)
-                xs = {}
-                for batch in batches:
-                    for mode in MODES:
-                        for dtype_name in ("float32", "float16"):
-                            xs[(batch, mode, dtype_name)] = make_x(
-                                batch, d_in, _np_dtype(dtype_name), mode, rng)
-                if not exact:
-                    continue  # G0 verdict is taken over exactness at the end
-                hoists = ArtefactHoists(w, artefact)
-                carrier = _carrier(artefact)
-                w_q, scales, biases = mlx_quantize_hoist(w)
-                block = []
-                for (batch, mode, dtype_name), x in xs.items():
-                    ref = eval_ref(x, hoists.w64)
-                    scale = float(np.abs(ref).max())
-                    chunk = serial_chunk_rows(batch, d_in)
-                    members = {n: err(out, ref)
-                               for n, out in _cpu_members(x, hoists, chunk).items()}
-                    label = (f"b{BITS} {name} {d_out}x{d_in} B{batch} {draw} "
-                             f"s{seed} {mode} {dtype_name}")
-                    for member in DEVICE_MEMBERS:
-                        out = _device_member_output(session, member, x, carrier,
-                                                    d_out, d_in, label)
-                        members[member] = err(out, ref)
-                    record = {
-                        "bits": BITS, "proj": name, "shape": f"{d_out}x{d_in}",
-                        "batch": batch, "draw": draw, "seed": seed,
-                        "heldout_draw": seed in HELDOUT_SEEDS,
-                        "mode": mode, "dtype": dtype_name,
-                        "ref_scale": scale,
-                        "base_tol": base_tol(dtype_name, scale),
-                        "members": members,
-                        "heldout": {
-                            "block-tiled": err(eval_block_tiled(x, hoists.w32), ref),
-                            "mlx-on-device": err(
-                                mlx_qmm_heldout(x, w_q, scales, biases), ref),
-                        },
-                        "faults": {},
-                        "boundary_fp16_dequant": err(
-                            eval_boundary(x, hoists.w16_32), ref),
-                    }
-                    block.append((record, x, ref))
-                for fault_name, w_fault32 in fault_dequants(artefact):
-                    for record, x, ref in block:
-                        record["faults"][fault_name] = err(
-                            eval_pairwise(x, w_fault32), ref)
-                    del w_fault32
-                records.extend(record for record, _, _ in block)
-                del hoists, carrier, block, xs, w_q, scales, biases
+                block = grid_iteration(name, d_out, d_in, draw, seed, batches,
+                                       session, guard=guard)
+                exactness.append(block["exact"])
+                records.extend(block["records"])
             if verbose:
                 print(f"    {name} {d_out}x{d_in} {draw} done "
                       f"({len(records)} records, {rss_line()})", flush=True)
@@ -1003,9 +1476,187 @@ def demand_table(records: list) -> dict:
     return {"cells": table, "pooled": pooled}
 
 
-def main() -> int:
-    import argparse
+# ---------------------------------------------------------------------------
+# T4 probes: bounded, foreground, wall-capped, budget-guarded. The
+# ATTRIBUTION probe reruns the STEP 2 workload's components IN-PROCESS -
+# the pre-fix configuration that leaked - instrumented per stage, to convict
+# the holder of the unattributed 30-60 GB gap. The STABILITY probe runs the
+# post-fix path: the same shape, child-per-iteration, footprints per child.
+# Both write durable JSON under .cache after every stage, so even a refusal
+# mid-probe leaves the attribution numbers it earned.
+# ---------------------------------------------------------------------------
+ATTRIBUTION_PATH = Path(__file__).with_name(".cache") / "memfix_probe_attribution.json"
+STABILITY_PATH = Path(__file__).with_name(".cache") / "memfix_probe_stability.json"
 
+
+def _mem_snapshot() -> dict:
+    current, peak = phys_footprint_gb()
+    return {"footprint_gb": current, "footprint_peak_gb": peak,
+            "mx_cache_gb": mx.get_cache_memory() / 1e9,
+            "mx_peak_gb": mx.get_peak_memory() / 1e9}
+
+
+def attribution_probe(name: str, d_out: int, d_in: int, iterations: int,
+                      guard: BudgetGuard, deadline: float | None,
+                      out_path: Path = ATTRIBUTION_PATH,
+                      probe_batch_max: int = PROBE_BATCH_MAX) -> dict:
+    """The pre-fix attribution instrument, in-process by design.
+
+    Per iteration of the SAME shape: build the artefact hoists and carrier
+    (structural share), one CPU member pass (numpy share), the mx heldout
+    pass (mx-visible share), then the 96-call device-member sweep - the
+    production dispatch pattern and the PRIME SUSPECT, since each call
+    re-uploads the fp16 carrier through PyObjC Metal, invisible to
+    mx.get_cache_memory(). After freeing everything, mx.clear_cache()
+    separates the mx-cache share from what only the session (or the heap)
+    still holds. Footprint and mx numbers are recorded at every stage
+    boundary; growth across iterations is the leak the isolation fix bounds.
+    """
+    session = DeviceMemberSession()
+    contract = QuantContract(scheme="mlx-affine", bits=BITS,
+                             group_size=GROUP_SIZE)
+    report = {"kind": "attribution", "shape": [name, d_out, d_in],
+              "budget_gb": guard.budget_gb, "probe_batch_max": probe_batch_max,
+              "stages": [], "sweep_delta_gb": [], "iteration_end_gb": [],
+              "wall_capped_at": None}
+
+    def note(iteration: int, stage: str) -> dict:
+        snap = {"iteration": iteration, "stage": stage,
+                "t": time.monotonic() - t0, **_mem_snapshot()}
+        report["stages"].append(snap)
+        write_child_result(out_path, report)  # atomic, durable, incremental
+        print(f"  attr i{iteration} {stage:<24} footprint "
+              f"{snap['footprint_gb']:6.2f} GB (peak "
+              f"{snap['footprint_peak_gb']:6.2f}), mx cache "
+              f"{snap['mx_cache_gb']:5.2f} GB (peak {snap['mx_peak_gb']:5.2f})",
+              flush=True)
+        return snap
+
+    def capped(iteration: int, stage: str) -> bool:
+        if deadline is not None and time.monotonic() > deadline:
+            report["wall_capped_at"] = f"iteration {iteration} before {stage}"
+            print(f"  attr: wall cap hit before i{iteration} {stage}; "
+                  f"stopping with what was measured", flush=True)
+            write_child_result(out_path, report)
+            return True
+        return False
+
+    t0 = time.monotonic()
+    note(0, "baseline")
+    for i in range(1, iterations + 1):
+        if capped(i, "build"):
+            break
+        guard.check(f"attribution i{i} build {name}")
+        rng = np.random.default_rng(10_000 + PROBE_SEED)
+        w = make_w(d_out, d_in, "normal-0.02", rng)
+        artefact, exact = verify_against_mlx(w, contract)
+        if not exact:
+            report["g0_exact"] = False
+            break
+        hoists = ArtefactHoists(artefact)
+        carrier = _carrier(artefact)
+        w_q, scales, biases = mlx_quantize_hoist(w)
+        x16 = {d: make_x(probe_batch_max, d_in, _np_dtype(d), "unit", rng)
+               for d in ("float32", "float16")}
+        note(i, "built")
+        if capped(i, "cpu-pairwise"):
+            break
+        guard.check(f"attribution i{i} cpu {name}")
+        for batch in range(1, probe_batch_max + 1):
+            eval_pairwise(x16["float32"][:batch], hoists.w32)
+        note(i, "cpu-pairwise")
+        if capped(i, "mx-heldout"):
+            break
+        guard.check(f"attribution i{i} mx {name}")
+        for batch in range(1, probe_batch_max + 1):
+            mlx_qmm_heldout(x16["float32"][:batch], w_q, scales, biases)
+        note(i, "mx-heldout")
+        if capped(i, "device-sweep"):
+            break
+        before = _mem_snapshot()
+        calls = 0
+        for dtype_name in ("float32", "float16"):
+            for member in DEVICE_MEMBERS:
+                for batch in range(1, probe_batch_max + 1):
+                    guard.check(f"attribution i{i} sweep {member} "
+                                f"{dtype_name} B{batch}")
+                    _device_member_output(session, member,
+                                          x16[dtype_name][:batch], carrier,
+                                          d_out, d_in, f"attr {member}")
+                    calls += 1
+        after = note(i, f"device-sweep-{calls}calls")
+        delta = after["footprint_gb"] - before["footprint_gb"]
+        report["sweep_delta_gb"].append(delta)
+        print(f"  attr i{i} DEVICE-SWEEP DELTA {delta:+.2f} GB footprint, "
+              f"{after['mx_cache_gb'] - before['mx_cache_gb']:+.2f} GB mx "
+              f"cache ({calls} dispatches)", flush=True)
+        del hoists, carrier, w_q, scales, biases, x16, w, artefact
+        note(i, "freed")
+        mx.clear_cache()
+        end = note(i, "mx-cache-cleared")
+        report["iteration_end_gb"].append(end["footprint_gb"])
+        write_child_result(out_path, report)
+    ends = report["iteration_end_gb"]
+    if len(ends) >= 2:
+        report["growth_per_iteration_gb"] = [
+            round(b - a, 3) for a, b in zip(ends, ends[1:])]
+        print(f"  attr: end-of-iteration footprints {ends} GB; growth "
+              f"{report['growth_per_iteration_gb']} GB/iter", flush=True)
+    write_child_result(out_path, report)
+    print(f"  attr: written to {out_path}")
+    return report
+
+
+def _attribution_probe_main(args, shapes, guard) -> int:
+    by_name = dict(shapes)
+    d_out, d_in = by_name[args.probe_shape]
+    require_available_memory(args.budget_gb,
+                             f"attribution probe {args.probe_shape}")
+    deadline = (time.monotonic() + args.wall_cap_s
+                if args.wall_cap_s is not None else None)
+    print(f"\nATTRIBUTION PROBE (pre-fix configuration, in-process): "
+          f"{args.probe_iterations}x {args.probe_shape} {d_out}x{d_in}, "
+          f"budget {args.budget_gb:.0f} GB"
+          + (f", wall cap {args.wall_cap_s:.0f}s" if args.wall_cap_s else ""),
+          flush=True)
+    attribution_probe(args.probe_shape, d_out, d_in, args.probe_iterations,
+                      guard, deadline)
+    return 0
+
+
+def _stability_probe_main(args, shapes, spawn) -> int:
+    """POST-FIX: the same shape through the production child path, N times,
+    plus one kv_proj cell; each child's peak footprint is the stability
+    series, and the parent's own footprint must stay flat."""
+    by_name = dict(shapes)
+    runs = ([(args.probe_shape, by_name[args.probe_shape])]
+            * args.probe_iterations)
+    if args.probe_shape != "kv_proj":
+        runs.append(("kv_proj", by_name["kv_proj"]))
+    report = {"kind": "stability", "budget_gb": args.budget_gb, "children": []}
+    print(f"\nSTABILITY PROBE (post-fix, child-per-iteration): "
+          f"{args.probe_iterations}x {args.probe_shape} + kv_proj, "
+          f"budget {args.budget_gb:.0f} GB", flush=True)
+    for i, (name, (d_out, d_in)) in enumerate(runs, start=1):
+        payload, meta = spawn(
+            "probe", f"stability i{i} probe {name} {d_out}x{d_in}",
+            {"name": name, "d_out": d_out, "d_in": d_in})
+        parent = _mem_snapshot()
+        report["children"].append({
+            "iteration": i, "shape": [name, d_out, d_in],
+            "child_footprint_gb": meta.get("footprint_gb", {}),
+            "child_mx_gb": meta.get("mx_gb", {}),
+            "child_rss_gb": payload.get("rss_gb"),
+            "parent_footprint_gb": parent["footprint_gb"]})
+        write_child_result(STABILITY_PATH, report)
+    peaks = [c["child_footprint_gb"].get("peak") for c in report["children"]]
+    print(f"  stability: child peak footprints {peaks} GB; "
+          f"parent {footprint_line()}")
+    print(f"  stability: written to {STABILITY_PATH}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="3-bit device adequacy at the Qwen3-4B serving shapes")
     parser.add_argument("--probe-validate", action="store_true",
@@ -1017,8 +1668,58 @@ def main() -> int:
                              "by an earlier run of the SAME shapes and "
                              "artifact; step granularity only, and every "
                              "reused step is named in the output JSON")
-    args = parser.parse_args()
+    parser.add_argument("--budget-gb", type=_budget_gb_arg,
+                        default=DEFAULT_BUDGET_GB,
+                        help="phys_footprint budget in decimal GB; crossing "
+                             "it writes the checkpoint, names the live cell "
+                             f"and exits {EXIT_BUDGET_REFUSAL} (default "
+                             f"{DEFAULT_BUDGET_GB}, well under this machine's "
+                             "RAM)")
+    parser.add_argument("--wall-cap-s", type=_wall_cap_arg, default=None,
+                        help="kill any measurement child running longer than "
+                             "this many seconds and refuse onward; probes "
+                             "always pass one, the full run defaults to "
+                             "uncapped")
+    parser.add_argument("--attribution-probe", action="store_true",
+                        help="T4 pre-fix attribution: the STEP 2 workload's "
+                             "components in-process, instrumented per stage, "
+                             "to convict the holder of the unattributed gap; "
+                             "bounded by --budget-gb and --wall-cap-s")
+    parser.add_argument("--stability-probe", action="store_true",
+                        help="T4 post-fix stability: the same shape through "
+                             "the production child path, --probe-iterations "
+                             "times, plus one kv_proj cell")
+    parser.add_argument("--probe-shape", choices=["lm_head", "kv_proj"],
+                        default="lm_head",
+                        help="which serving shape the T4 probes exercise")
+    parser.add_argument("--probe-iterations", type=int, default=3,
+                        choices=range(1, 11), metavar="N",
+                        help="same-shape iterations for the T4 probes")
+    # The child half of the isolation protocol; spawned by this harness only.
+    parser.add_argument("--child-task", help=argparse.SUPPRESS)
+    parser.add_argument("--child-out", help=argparse.SUPPRESS)
+    return parser
 
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+
+    if args.child_task:
+        return child_main(args)  # no lock: the parent holds it
+
+    acquired, lock_detail = acquire_lock()
+    if not acquired:
+        print(f"REFUSAL (exit {EXIT_LOCK_HELD}): machine lock {LOCK_PATH} "
+              f"{lock_detail}; one instance of this harness per machine, and "
+              f"a refused run touches nothing")
+        return EXIT_LOCK_HELD
+    try:
+        return _locked_main(args)
+    finally:
+        release_lock()
+
+
+def _locked_main(args) -> int:
     config, provenance = resolve_serving_source(ARTIFACT_DIR)
     shapes = derive_serving_shapes(config)
     hashes_path = ARTIFACT_DIR.parent / "PINNED-HASHES.txt"
@@ -1029,26 +1730,62 @@ def main() -> int:
     print(f"source: {provenance}")
     print("serving shapes: "
           + ", ".join(f"{n} {d_out}x{d_in}" for n, (d_out, d_in) in shapes))
-    print(f"start: {rss_line()}")
+    print(f"budget: {args.budget_gb:.1f} GB phys_footprint on a "
+          f"{machine_ram_gb():.1f} GB machine; start {rss_line()}")
 
     fingerprint = checkpoint_fingerprint(provenance, shapes)
     saved = read_checkpoint(CHECKPOINT_PATH, fingerprint) if args.resume else {}
     steps, resumed = {}, []
+    guard = BudgetGuard(args.budget_gb)
 
     def checkpoint(step: str, payload) -> None:
         steps[step] = payload
         write_checkpoint(CHECKPOINT_PATH, fingerprint, steps)
 
-    try:
-        session = DeviceMemberSession()
-    except Exception as error:  # no PyObjC Metal, no GPU: nothing to calibrate
-        print(f"no usable Metal device for the device members: {error}")
-        return 2
+    def spawn(kind: str, cell: str, task: dict) -> tuple[dict, dict]:
+        """One measurement child, gated: machine-available memory before it,
+        the parent's own footprint before it, the child's reported peak
+        after it. The parent holds no Metal state - the session lives and
+        dies with each child."""
+        require_available_memory(args.budget_gb, cell)
+        guard.check(f"parent before {cell}")
+        payload, meta = spawn_measurement(
+            cell, {**task, "kind": kind, "verbose": not args.quiet},
+            budget_gb=args.budget_gb, wall_cap_s=args.wall_cap_s)
+        if not args.quiet and meta.get("footprint_gb"):
+            print(f"  {cell}: child peak footprint "
+                  f"{meta['footprint_gb'].get('peak', 0.0):.2f} GB "
+                  f"(parent {footprint_line()})", flush=True)
+        return payload, meta
 
+    try:
+        if args.attribution_probe:
+            return _attribution_probe_main(args, shapes, guard)
+        if args.stability_probe:
+            return _stability_probe_main(args, shapes, spawn)
+        return _run_measured_steps(args, shapes, spawn, saved, steps,
+                                   resumed, checkpoint, provenance, hashes)
+    except BudgetExceeded as exc:
+        return refuse(EXIT_BUDGET_REFUSAL, str(exc), fingerprint, steps)
+    except LowMemoryRefusal as exc:
+        return refuse(EXIT_LOW_MEMORY, str(exc), fingerprint, steps)
+    except ChildRefusal as exc:
+        if exc.exit_for_parent == 2:
+            print(f"no usable Metal device for the device members "
+                  f"(child at {exc.cell})")
+            return 2
+        return refuse_child(exc, fingerprint, steps)
+
+
+def _run_measured_steps(args, shapes, spawn, saved, steps, resumed,
+                        checkpoint, provenance, hashes) -> int:
+    """Steps 0-6 and the verdict, every measurement in a child process via
+    ``spawn``. Split from main() so every refusal raised anywhere inside the
+    measured steps funnels through one handler."""
     if args.probe_validate:
-        probe = probe_batch_regimes([("kv_proj", (1024, 2560))], session,
-                                    not args.quiet)
-        _print_probe(probe)
+        payload, _ = spawn("probe", "probe-validate kv_proj 1024x2560",
+                           {"name": "kv_proj", "d_out": 1024, "d_in": 2560})
+        _print_probe({"kv_proj": payload})
         return 0
 
     # -- step 0: the continuity anchor --------------------------------------
@@ -1058,7 +1795,9 @@ def main() -> int:
         resumed.append("continuity")
         ok, detail, note = True, saved["continuity"], " [RESUMED, not re-measured]"
     else:
-        (ok, detail), note = continuity_anchor(session), ""
+        payload, _ = spawn("continuity",
+                           f"continuity anchor {CONTINUITY_SHAPE}", {})
+        (ok, detail), note = (payload["ok"], payload["detail"]), ""
     print(f"\nSTEP 0 continuity anchor at {CONTINUITY_SHAPE}, bits={BITS}: "
           f"{'REPRODUCED - ' + detail + note if ok else 'FAILED - ' + detail}")
     if not ok:
@@ -1069,13 +1808,18 @@ def main() -> int:
     checkpoint("continuity", detail)
 
     # -- steps 1+2: G0 on the probe artefacts, then the batch-regime probe --
-    print("\nSTEP 2 batch-regime probe (G0 checked on each probe artefact):")
+    print("\nSTEP 2 batch-regime probe (G0 checked on each probe artefact):",
+          flush=True)
     if "probe" in saved:
         resumed.append("probe")
         probe = saved["probe"]
         print("  [RESUMED from the checkpoint, not re-measured]")
     else:
-        probe = probe_batch_regimes(shapes, session, not args.quiet)
+        probe = {}
+        for name, (d_out, d_in) in shapes:
+            probe[name], _ = spawn("probe", f"probe {name} {d_out}x{d_in}",
+                                   {"name": name, "d_out": d_out,
+                                    "d_in": d_in})
     _print_probe(probe)
     if not all(p.get("g0_exact") for p in probe.values()):
         print("STOP: G0 failed on a probe artefact; nothing here describes MLX")
@@ -1086,15 +1830,27 @@ def main() -> int:
     print(f"  grid batches: base {BASE_BATCHES}"
           + (f" + joined {joins} -> {batches}" if joins else " (no joins)"))
 
-    # -- step 3: the main grid ----------------------------------------------
-    print("\nSTEP 3 main grid:")
-    measured = measure_serving(
-        shapes, batches, session, not args.quiet,
-        on_block=lambda partial: checkpoint("grid_partial", partial))
-    records = measured["records"]
-    print(f"  G0: {'bit-exact on all' if measured['bit_exact'] else 'FAILED'} "
-          f"({measured['exact_checks']} checks)")
-    if not measured["bit_exact"]:
+    # -- step 3: the main grid, one child per (shape, draw, seed) -----------
+    print("\nSTEP 3 main grid:", flush=True)
+    records, exactness = [], []
+    for name, (d_out, d_in) in shapes:
+        for draw in WEIGHT_DRAWS:
+            for seed in CALIBRATION_SEEDS + HELDOUT_SEEDS:
+                payload, _ = spawn(
+                    "grid", f"grid {name} {d_out}x{d_in} {draw} s{seed}",
+                    {"name": name, "d_out": d_out, "d_in": d_in,
+                     "draw": draw, "seed": seed, "batches": list(batches)})
+                exactness.append(payload["exact"])
+                records.extend(payload["records"])
+                checkpoint("grid_partial", records)
+            if not args.quiet:
+                print(f"    {name} {d_out}x{d_in} {draw} done "
+                      f"({len(records)} records, {footprint_line()})",
+                      flush=True)
+    bit_exact = all(exactness)
+    print(f"  G0: {'bit-exact on all' if bit_exact else 'FAILED'} "
+          f"({len(exactness)} checks)")
+    if not bit_exact:
         print("STOP: canonical_quantize is not bit-exact against mx.quantize "
               "at a serving shape; nothing here describes MLX")
         return 1

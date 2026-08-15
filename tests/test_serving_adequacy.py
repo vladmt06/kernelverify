@@ -156,7 +156,7 @@ def _small_artefact(bits=3, d_out=96, d_in=128, seed=3):
 @pytest.fixture(scope="module")
 def small():
     w, artefact = _small_artefact()
-    return w, artefact, ArtefactHoists(w, artefact)
+    return w, artefact, ArtefactHoists(artefact)
 
 
 def _xs(d_in, mode="unit", dtype=np.float32, batch=5, seed=17):
@@ -269,7 +269,7 @@ def test_reference_weights_are_lazy(small):
     """STEP 2 never reads the fp64 reference, and at lm_head it is 3.1 GB of
     the probe's budget. Building it eagerly is what the amendment removes."""
     w, artefact, _ = small
-    hoists = ArtefactHoists(w, artefact)
+    hoists = ArtefactHoists(artefact)
     assert not hoists.reference_built
     built = hoists.w64
     assert np.array_equal(built, dequantize(artefact, np.float64))
@@ -290,7 +290,7 @@ def test_reference_matmul_is_never_row_partitioned():
     invariantly, never a licence for the harness to rely on one that does.
     """
     w, artefact = _small_artefact(d_out=1024, d_in=1024)
-    hoists = ArtefactHoists(w, artefact)
+    hoists = ArtefactHoists(artefact)
     x = _xs(1024, "unit", np.float32, batch=16)
     full = r_contract(x, artefact)
     x64 = x.astype(np.float64)

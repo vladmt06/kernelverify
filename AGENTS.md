@@ -37,6 +37,8 @@ Vlad's global instructions still apply; this file adds the project's layout, how
   ADR 0013 is the reading of its run; reruns must reproduce its tables.
   Amended 2026-08-15 after three SIGKILLs in step 2: per-shape and per-implementation progress lines carrying an RSS self-report, a per-step checkpoint at `bench/.cache/quant_serving_partial.json` (atomic write, `--resume` at step granularity only), and row-chunked dequantization so the lm_head weights stop paying a 3x whole-matrix transient.
   The amendment and its bit-equality proof are in the module docstring.
+  Amended again the same night (memory-truthfulness): a phys_footprint budget with a distinct refusal exit (never a shrunk grid), a machine-global single-instance lock plus an available-memory gate, and child-process isolation per measurement iteration; the root leak was per-case Metal buffer allocation, fixed by the buffer pool in `kernelverify/runners/device.py`.
+  The three Jetsam kills that forced this (66.7, 69.4, 39.5 GB footprints on the 36 GB machine) are dissected in the module docstring's second amendment; `tests/test_serving_survival.py` is its proof suite.
   The pinned 3-bit artifact lives at the absolute path `/Users/vlad/kernelverify/bench/.models/qwen3-4b-3bit-g64`; `bench/.models` is gitignored, so it exists in the main worktree only and never arrives via merge.
 - `bench/calibrate_k.py` - measures what the admissible-implementation contract demands of K, and how many ensemble members it takes to represent that contract.
   Rerun it whenever the contract, the ensemble or the catalogue changes.
@@ -77,8 +79,8 @@ cd /Users/vlad/kernelverify
 - Deleting `bench/.cache/` is the safe full reset.
 - The environment needs `torch`, which only `gelu[variant=erf]` uses; a worktree venv created without it fails part-way through a verdict build.
 - It also needs `mlx==0.32.0` and `mlx-lm==0.31.3`, pinned across worktrees so binding comparisons stay on one toolchain.
-  Without mlx, three test modules are skipped whole by a module-level `importorskip`, so the suite reports 181 passed and 3 skipped where an mlx-equipped venv passes 187.
-  The skipped modules hide their contents rather than their count, so quote test counts from an mlx-equipped venv only.
+  Without mlx, the mlx-dependent test modules are skipped whole or fail to collect, so the suite under-reports badly.
+  Skipped modules hide their contents rather than their count, so quote test counts from an mlx-equipped venv only; the mlx-equipped suite passes 621 as of 2026-08-15.
 
 The machine baseline, in this order, because each step writes the denominators the next one divides by:
 

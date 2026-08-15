@@ -7,7 +7,7 @@ array framework, because the contract is raw shading language: the host has to
 create the library from source, build the pipeline state, bind buffers at the
 indices the shader declares, and choose the grid itself.
 
-Three behaviours are load-bearing for a verifier rather than incidental:
+Four behaviours are load-bearing for a verifier rather than incidental:
 
 - Every failure is turned into a status. A generated kernel that misses a
   semicolon, names a function that does not exist, or asks for more threads per
@@ -19,10 +19,29 @@ Three behaviours are load-bearing for a verifier rather than incidental:
 - Correctness and timing are separate dispatches. The returned output comes
   from one clean run into a zeroed buffer, so a kernel that reads its output
   buffer cannot have earlier repeats leak into the tensor the oracle sees.
+- Buffers are POOLED on the device and reused across cases, never allocated
+  per case. Measured 2026-08-15 on this stack (PyObjC on Darwin 25): a
+  released MTLBuffer's dirty pages NEVER return to the OS while the process
+  lives - +4.5 MB footprint per dropped 4.5 MB buffer, linear over hundreds
+  of buffers, immune to autorelease-pool drains and gc.collect, identical
+  for newBufferWithBytes and for newBufferWithLength once written. Per-case
+  allocation therefore IS a leak: it grew the serving calibration by
+  +0.546 GB per 96-dispatch sweep at (1024, 2560) and ~0.83 GB per dispatch
+  at lm_head (151936, 2560), the mechanism behind that night's three Jetsam
+  kills at 66.7, 69.4 and 39.5 GB, invisible to RSS and to
+  mx.get_cache_memory(). The pool holds one buffer per binding index, grown
+  to the largest case seen, so device memory is bounded by a single case.
+  Sound because every dispatch here is synchronous (commit then
+  waitUntilCompleted before the next case) and every case rewrites each
+  input binding in full; a candidate that scribbles on its own inputs can
+  only corrupt what later cases of the SAME kernel read, which is a
+  wrong kernel failing, never a wrong kernel passing.
 
-Buffers are allocated once per case and reused across warmup and timed
-repeats, because on unified memory the allocation, not the copy, is what a
-short kernel would otherwise spend its time on.
+Within one case, the pooled buffers are also what warmup and timed repeats
+reuse, because on unified memory the allocation, not the copy, is what a
+short kernel would otherwise spend its time on. Each case additionally
+drains an autorelease pool, so the autoreleased command-buffer and encoder
+temporaries cannot accumulate over a long battery.
 """
 
 from __future__ import annotations
@@ -31,6 +50,7 @@ import time
 
 import numpy as np
 
+import objc  # PyObjC core: the per-case autorelease pool
 import Metal  # PyObjC; absent on non-Apple platforms, which the worker reports
 
 from kernelverify.runners.result import DeviceInfo, RunResult, RunStatus, Timing
@@ -92,6 +112,24 @@ class MetalDevice:
             raise RuntimeError("no Metal device on this machine")
         self.device = device
         self.queue = device.newCommandQueue()
+        self._buffer_pool: dict[int, tuple[int, object]] = {}
+
+    def pooled_buffer(self, index: int, nbytes: int):
+        """A shared-storage buffer of at least ``nbytes`` for this binding
+        index, reused across cases and kernels (see the module docstring for
+        why per-case allocation is a leak on this stack). Callers rewrite the
+        region they use, dispatch synchronously, and read back a copy, so
+        reuse can never alias a live result."""
+        held_bytes, held_buffer = self._buffer_pool.get(index, (0, None))
+        if held_buffer is not None and held_bytes >= nbytes:
+            return held_buffer
+        buffer = self.device.newBufferWithLength_options_(nbytes, _STORAGE_SHARED)
+        if buffer is None:
+            raise LaunchError(
+                f"the device would not allocate {nbytes} bytes for buffer "
+                f"index {index}")
+        self._buffer_pool[index] = (nbytes, buffer)
+        return buffer
 
     def info(self) -> DeviceInfo:
         return DeviceInfo(
@@ -143,7 +181,8 @@ class CompiledKernel:
 
     # -- buffer plumbing ---------------------------------------------------
     def _make_buffers(self, case: RunCase):
-        """One Metal buffer per tensor binding, plus the packed scalar bytes.
+        """The pooled Metal buffer per tensor binding (inputs rewritten in
+        full for this case), plus the packed scalar bytes.
 
         Returns the buffers by Metal index, the scalar payloads, and the
         buffer indices of the output bindings in binding order, which is the
@@ -159,16 +198,13 @@ class CompiledKernel:
                 continue
             if binding.kind is BindingKind.INPUT:
                 array = np.ascontiguousarray(case.inputs[binding.name])
-                buffer = self.device.device.newBufferWithBytes_length_options_(
-                    array.tobytes(), array.nbytes, _STORAGE_SHARED
-                )
+                buffer = self.device.pooled_buffer(index, array.nbytes)
+                _write_into(buffer, array)
             else:
                 shape, dtype = case.output_shapes[len(output_indices)]
                 nbytes = int(np.prod(shape)) * np.dtype(TENSOR_DTYPES[dtype]).itemsize
-                buffer = self.device.device.newBufferWithLength_options_(nbytes, _STORAGE_SHARED)
+                buffer = self.device.pooled_buffer(index, nbytes)
                 output_indices.append(index)
-            if buffer is None:
-                raise LaunchError(f"the device would not allocate the buffer at index {index}")
             buffers[index] = buffer
         return buffers, scalars, output_indices
 
@@ -224,19 +260,21 @@ class CompiledKernel:
             return RunResult(status=RunStatus.INVALID_SPEC, detail=str(error), label=case.label)
 
         try:
-            self._check_launch(grid, group, memory)
-            buffers, scalars, output_indices = self._make_buffers(case)
-            for slot, index in enumerate(output_indices):
-                _zero(buffers[index], *case.output_shapes[slot])
-            self._dispatch(buffers, scalars, grid, group, memory)
-            outputs = [_read_back(buffers[index], *case.output_shapes[slot])
-                       for slot, index in enumerate(output_indices)]
-            gpu_samples, wall_samples = [], []
-            for repeat in range(warmup + repeats):
-                gpu, wall = self._dispatch(buffers, scalars, grid, group, memory)
-                if repeat >= warmup:
-                    gpu_samples.append(gpu)
-                    wall_samples.append(wall)
+            with objc.autorelease_pool():
+                self._check_launch(grid, group, memory)
+                buffers, scalars, output_indices = self._make_buffers(case)
+                for slot, index in enumerate(output_indices):
+                    _zero(buffers[index], *case.output_shapes[slot])
+                self._dispatch(buffers, scalars, grid, group, memory)
+                outputs = [_read_back(buffers[index], *case.output_shapes[slot])
+                           for slot, index in enumerate(output_indices)]
+                gpu_samples, wall_samples = [], []
+                for repeat in range(warmup + repeats):
+                    gpu, wall = self._dispatch(buffers, scalars, grid, group,
+                                               memory)
+                    if repeat >= warmup:
+                        gpu_samples.append(gpu)
+                        wall_samples.append(wall)
         except LaunchError as error:
             return RunResult(status=RunStatus.LAUNCH_ERROR, detail=str(error), label=case.label)
 
@@ -257,6 +295,13 @@ def _pack_scalar(binding: Binding, value) -> bytes:
     if len(packed) < _MIN_SCALAR_BYTES:
         packed = packed.ljust(_MIN_SCALAR_BYTES, b"\x00")
     return packed
+
+
+def _write_into(buffer, array: np.ndarray) -> None:
+    """Copy this case's input into its pooled buffer, in full."""
+    view = np.frombuffer(buffer.contents().as_buffer(array.nbytes),
+                         dtype=array.dtype)
+    view[...] = array.ravel()
 
 
 def _output_view(buffer, shape: tuple, dtype: str) -> np.ndarray:
