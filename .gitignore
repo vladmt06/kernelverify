@@ -10,3 +10,10 @@ bench/.baselines/detached_status.json
 # Spartan AI config (contains API keys)
 .spartan/ai.env
 bench/.models/
+
+# Local-only bench inputs, same dot-dir convention as .cache/ and .models/:
+# large, machine-local, and nothing in the repo reads them.
+bench/.corpus/
+
+# Rendered planning pages from the lavish CLI: session artefacts, not source.
+.lavish/
