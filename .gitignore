@@ -6,3 +6,6 @@ __pycache__/
 bench/.cache/
 bench/.baselines/detached.log
 bench/.baselines/detached_status.json
+
+# Spartan AI config (contains API keys)
+.spartan/ai.env
