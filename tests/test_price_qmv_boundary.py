@@ -10,6 +10,8 @@ sweep parameters, which are decisions, not defaults.
 Pure verdict logic, no MLX and no timing here.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 pytest.importorskip("mlx.core")
@@ -72,22 +74,32 @@ def test_every_point_states_its_spread():
 # check, so a run that went busy left a complete-looking recording on disk
 # and exited 1 with only a printed warning.
 # ---------------------------------------------------------------------------
-from types import SimpleNamespace  # noqa: E402
-
-
 def _idle(flag, why="test blocker"):
     return {"idle": flag, "blockers": [] if flag else [why]}
 
 
 @pytest.fixture()
 def hardware_free(monkeypatch, tmp_path):
-    """main() with every hardware seam faked: no GPU, no sysctl, results in a
-    tmp dir. Returns the results dir."""
+    """main() with every hardware seam faked: no GPU, no sysctl, a private
+    measurement lock, results in a tmp dir. The fake verify honours the
+    guard-callback seam (it calls the guard once) so the refusal paths run
+    the way the real gate drives them. Returns the results dir."""
+    import machine_state
+
     monkeypatch.setattr(probe, "RESULTS_DIR", tmp_path)
     monkeypatch.setattr(probe, "build", lambda _mx: None)
     monkeypatch.setattr(probe, "MetalRunner", lambda: None)
-    monkeypatch.setattr(probe.gate, "verify",
-                        lambda *a, **k: SimpleNamespace(ok=True))
+    monkeypatch.setattr(
+        probe, "MeasurementLock",
+        lambda owner: machine_state.MeasurementLock(owner,
+                                                    path=tmp_path / "lock"))
+
+    def fake_verify(_runner, e2e_m=None, guard=None, **_kw):
+        if guard is not None:
+            guard("fake verification cell")
+        return SimpleNamespace(ok=True)
+
+    monkeypatch.setattr(probe.gate, "verify", fake_verify)
     monkeypatch.setattr(
         probe.gate, "E2E_SHAPES",
         (SimpleNamespace(name="q_proj", d_out=256, d_in=256),))
@@ -124,3 +136,62 @@ def test_a_run_that_went_busy_quarantines_its_recording(hardware_free,
     [written] = list(hardware_free.glob("*.json"))
     assert "REFUSED" in written.name
     assert not list(hardware_free.glob("qmv-boundary-pricing-*[0-9].json"))
+
+
+# ---------------------------------------------------------------------------
+# Guard refusals (T1/T3): the machine lock, the footprint budget and the
+# low-memory gate each refuse with their own exit code from the shared
+# vocabulary, and a refusal writes NOTHING - the probe has no checkpoint, so
+# a refused run is discarded deliberately.
+# ---------------------------------------------------------------------------
+def test_a_held_measurement_lock_refuses_before_the_idle_gate(
+        hardware_free, monkeypatch, tmp_path):
+    """One heavy measurement at a time: a held lock refuses with
+    EXIT_LOCK_HELD, and the idle gate must not even sample - co-armed idle
+    gates are exactly how the 03:29 two-harness collapse started."""
+    import machine_state
+
+    holder = machine_state.MeasurementLock("test-holder",
+                                           path=tmp_path / "lock")
+    acquired, _ = holder.acquire()
+    assert acquired
+
+    def never(_cores):
+        raise AssertionError("idle gate must not co-fire behind a held lock")
+
+    monkeypatch.setattr(probe.machine_state, "idle_check", never)
+    try:
+        assert probe.main([]) == probe.EXIT_LOCK_HELD
+    finally:
+        holder.release()
+    assert not list(hardware_free.glob("*.json"))
+
+
+def test_an_injected_tiny_budget_refuses_with_no_results(hardware_free,
+                                                         monkeypatch):
+    """The acceptance case: under a tiny budget the REAL footprint reader
+    convicts this very process, and the refusal leaves no results file."""
+    _sequence_idle_checks(monkeypatch, [_idle(True)])
+    assert probe.main(["--budget-gb", "0.001"]) == probe.EXIT_BUDGET_REFUSAL
+    assert not list(hardware_free.glob("*.json"))
+
+
+def test_low_machine_memory_refuses_with_no_results(hardware_free,
+                                                    monkeypatch):
+    _sequence_idle_checks(monkeypatch, [_idle(True)])
+
+    def parched(needed_gb, cell, reader=None):
+        raise probe.LowMemoryRefusal(cell, 1.0, needed_gb)
+
+    monkeypatch.setattr(probe, "require_available_memory", parched)
+    assert probe.main([]) == probe.EXIT_LOW_MEMORY
+    assert not list(hardware_free.glob("*.json"))
+
+
+def test_the_probe_speaks_the_shared_exit_vocabulary():
+    """The numbering must be THE shared one, never a probe-local copy."""
+    import memory_guard
+
+    assert probe.EXIT_BUDGET_REFUSAL is memory_guard.EXIT_BUDGET_REFUSAL
+    assert probe.EXIT_LOCK_HELD is memory_guard.EXIT_LOCK_HELD
+    assert probe.EXIT_LOW_MEMORY is memory_guard.EXIT_LOW_MEMORY

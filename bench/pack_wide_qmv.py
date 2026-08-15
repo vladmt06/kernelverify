@@ -147,19 +147,28 @@ def weight_sets(d_out: int, d_in: int, bits: int) -> list:
     return sets
 
 
-def interleaved_samples(build_a, build_b, rounds: int = ROUNDS) -> tuple:
+def interleaved_samples(build_a, build_b, rounds: int = ROUNDS,
+                        guard=None) -> tuple:
     """Per-round times of two arms, sampled interleaved within every round.
 
     Interleaving is load-bearing and NOT sufficient (AGENTS.md): it equalizes
     a clock excursion across the arms but cannot detect one, so the caller
     must still gate on the reference arm's own spread. Both arms are warmed
     first; the dispatch batch is calibrated on arm A to MIN_SAMPLE_MS.
+
+    ``guard``, when given, is called once per round with a cell label and may
+    refuse by raising (the pricing probe's memory checks); None leaves the
+    microbenchmark path exactly as it was. The seam lives HERE because this
+    loop is shared and a diverged sampler copy is the ADR 0004 two-halves
+    mistake.
     """
     mx.eval(build_a(0), build_b(0))
     mx.synchronize()
     copies = calibrate_copies(lambda c: dispatch(build_a, c))
     a_samples, b_samples = [], []
-    for _ in range(rounds):
+    for i in range(rounds):
+        if guard is not None:
+            guard(f"round {i + 1}/{rounds}")
         a_samples.append(dispatch(build_a, copies) / copies)
         b_samples.append(dispatch(build_b, copies) / copies)
     return a_samples, b_samples
@@ -185,10 +194,16 @@ SEED_PROTOCOL = (
 
 
 def verify(runner: MetalRunner, e2e_m: list | None = None, *,
-           retain_inputs: bool = False) -> GateEvidence:
+           guard=None, retain_inputs: bool = False) -> GateEvidence:
     """The correctness gate. `e2e_m` widens the E2E tile-width coverage past
     the routed zone; the pricing probe passes its full sweep so that nothing
     it times is unverified.
+
+    ``guard`` is called with a cell label before each tile width and after
+    each coverage group is judged, and may refuse by raising - the pricing
+    probe's memory checks enter through this seam because the tile-width
+    loop is shared with the microbenchmark gate (a diverged sampler copy is
+    the ADR 0004 two-halves mistake). None means no checks.
 
     Evidence retention follows ruling D2: every case records a sha256 per
     input, and a judged passing case's arrays are dropped after its coverage
@@ -228,6 +243,8 @@ def verify(runner: MetalRunner, e2e_m: list | None = None, *,
         rng = np.random.default_rng(11)
         spec_batches, case_refs = [], []
         for m in verify_m:
+            if guard is not None:
+                guard(f"verify {d_out}x{d_in}{site_tag} {bits}-bit M={m}")
             grid, threadgroup, r = launch_config(d_out, m)
             raw_template = {"T": "half", "BITS": bits, "M": m, "R": r}
             spec = specialize(template, raw_template)
@@ -273,6 +290,8 @@ def verify(runner: MetalRunner, e2e_m: list | None = None, *,
                 input_sha256=in_sha))
         if not retain_inputs:
             evidence.drop_verified_inputs()
+        if guard is not None:
+            guard(f"verified {d_out}x{d_in}{site_tag} {bits}-bit")
 
     render_banner(evidence, "correctness (runner-isolated, Phase 0 contract, "
                             f"K = {K_QUANT:g}):")

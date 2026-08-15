@@ -219,6 +219,65 @@ def test_the_extraction_pipeline_may_retain_inputs(reduced_gate):
         assert set(case.input_sha256) == INPUT_NAMES
 
 
+# ---------------------------------------------------------------------------
+# The guard-callback seam. The pricing probe's memory checks run between
+# verification tile-widths and between timing rounds, and both loops live in
+# THIS shared module (the probe's docstring forbids a diverged sampler copy,
+# the ADR 0004 two-halves mistake), so the checks enter through a callback:
+# `guard(cell)` may refuse by raising, and None means no checks - the
+# microbenchmark gate is unchanged.
+# ---------------------------------------------------------------------------
+def test_verify_calls_the_guard_between_tile_widths(reduced_gate, monkeypatch):
+    from kernelverify.runners import MetalRunner
+
+    monkeypatch.setattr(reduced_gate, "VERIFY_M", [5, 6])
+    seen = []
+    evidence = reduced_gate.verify(MetalRunner(), guard=seen.append)
+    assert evidence.ok
+    assert sum("M=5" in cell for cell in seen) == 1
+    assert sum("M=6" in cell for cell in seen) == 1
+
+
+def test_a_refusing_guard_stops_verification(reduced_gate):
+    from kernelverify.runners import MetalRunner
+
+    class Refused(RuntimeError):
+        pass
+
+    def guard(cell):
+        raise Refused(cell)
+
+    with pytest.raises(Refused):
+        reduced_gate.verify(MetalRunner(), guard=guard)
+
+
+def test_interleaved_samples_calls_the_guard_between_rounds():
+    import pack_wide_qmv
+
+    a = mx.array([1.0])
+    b = mx.array([2.0])
+    seen = []
+    ours, theirs = pack_wide_qmv.interleaved_samples(
+        lambda i: a + i, lambda i: b + i, rounds=3, guard=seen.append)
+    assert len(ours) == len(theirs) == 3
+    assert len(seen) == 3
+
+
+def test_a_refusing_guard_stops_the_rounds():
+    import pack_wide_qmv
+
+    class Refused(RuntimeError):
+        pass
+
+    def guard(cell):
+        raise Refused(cell)
+
+    with pytest.raises(Refused):
+        pack_wide_qmv.interleaved_samples(
+            lambda i: mx.array([1.0]), lambda i: mx.array([2.0]),
+            rounds=3, guard=guard)
+
+
 def test_gate_evidence_carries_e2e_cases_with_projection_names(monkeypatch):
     """A reduced gate run over one E2E shape must produce specialization
     evidence labelled with the projection name, so a certificate reader can

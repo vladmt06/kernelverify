@@ -46,7 +46,7 @@ __all__ = [
 ]
 
 
-def array_sha256(array) -> str:
+def _array_sha256(array) -> str:
     """sha256 over an array's bytes, the evidence module's one hash."""
     contiguous = np.ascontiguousarray(np.asarray(array))
     return hashlib.sha256(contiguous.tobytes()).hexdigest()
@@ -54,14 +54,14 @@ def array_sha256(array) -> str:
 
 def output_fingerprint(array) -> str:
     """Advisory sha256 of the output bytes from the certifying run."""
-    return array_sha256(array)
+    return _array_sha256(array)
 
 
 def input_fingerprints(inputs: dict) -> dict:
     """sha256 per input array: the audit trail's proof of exactly which bytes
     ran, kept for every case so the arrays themselves need keeping only where
     a failure has to be reproduced (ruling D2)."""
-    return {name: array_sha256(array) for name, array in inputs.items()}
+    return {name: _array_sha256(array) for name, array in inputs.items()}
 
 
 @dataclass(frozen=True)

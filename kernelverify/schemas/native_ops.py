@@ -19,6 +19,7 @@ independent implementation in tests (MLX's own ops where they exist).
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Callable
 
@@ -87,9 +88,28 @@ QUANTIZED_MATMUL_META = {
 }
 
 
+# One-slot artefact memo. Reference and tolerance each derive the artefact
+# from the RAW weights (the anchoring property: a surface cannot hand the
+# oracle an artefact that disagrees with the weights it passed), and a gate
+# judges up to 32 cases per (shape, bits) against the same matrix - without
+# reuse that is 64 canonical quantizations of a 389M-element matrix per
+# lm_head group, whose transients the 2026-08-15 pricing instrumentation
+# measured at 14-22 GB of ratcheted footprint. The key is a content hash of
+# the weight bytes, so the anchoring property survives verbatim: the memo
+# can only ever return the artefact of exactly the bytes passed in. One
+# slot, because the caller's locality is one weight matrix at a time.
+_QMM_MEMO: dict = {}
+
+
 def _qmm_artefact(inputs):
     bits = int(inputs["bits"][0])
-    return canonical_quantize(inputs["w"], QuantContract(bits=bits, group_size=64))
+    w = inputs["w"]
+    key = (hashlib.sha256(np.ascontiguousarray(w).tobytes()).hexdigest(),
+           w.dtype.str, w.shape, bits)
+    if _QMM_MEMO.get("key") != key:
+        artefact = canonical_quantize(w, QuantContract(bits=bits, group_size=64))
+        _QMM_MEMO["key"], _QMM_MEMO["artefact"] = key, artefact
+    return _QMM_MEMO["artefact"]
 
 
 def qmm_reference(inputs) -> np.ndarray:
