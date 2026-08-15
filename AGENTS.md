@@ -113,7 +113,7 @@ bench/start_binding_run.sh     # arms a launchd job, then quit Terminal
   Amended 2026-08-15 (final form): at plan time, two skills run with every review - /brainstorming (obra/superpowers: classify the request, widen the option space before converging, hard approval gate) and /grill-me (mattpocock: walk the design tree dependency-first until understanding is shared).
   /to-tickets slices each ruled plan into tracer-bullet tickets with blocking edges before lane dispatch; /tdd runs at every task start, binding on every implementation ticket in every lane brief.
 - Task lifecycle (Vlad, 2026-08-15): at task START, after a plan or decision is confirmed, run the superpowers workflow (worktree isolation, executing-plans or subagent-driven-development per the work's shape, test-driven-development, and verification-before-completion before any success claim).
-  DURING the work, the spartan quality gates (/spartan, installed in-repo) run between every step - the phase reviewer gates each phase and does not let work skip ahead.
+  DURING the work, the /spartan quality gates run between every step - the phase reviewer gates each phase and does not let work skip ahead.
   At task COMPLETION, run the code-simplifier plugin on the changed code.
   Completion is not claimable until the gates passed along the way and the simplifier pass is done.
   The coordinator writes the lane plans into a design doc under ~/.gstack/projects/kernelverify/, the review rules every open decision with Vlad, and a lane brief must trace to a ruled plan with no unresolved decisions, the way W1-W8 traced to the runner-consolidation review.
