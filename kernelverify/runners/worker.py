@@ -84,6 +84,12 @@ def main(argv: list[str]) -> int:
     math_mode = request.get("math_mode", "safe")
 
     for spec_index, entry in enumerate(request.get("specs", [])):
+        # One device serves every spec in this request, and its buffer pool is
+        # keyed by binding index alone, so without this the batch would carry
+        # its widest spec's buffers to the end. Releasing here bounds the
+        # session at one spec's footprint; the pool's own zeroing is what
+        # makes the bytes safe, this is what makes the memory come back.
+        device.release_pool()
         try:
             spec = KernelSpec.from_json(entry["spec"])
         except (SpecError, KeyError, TypeError) as error:

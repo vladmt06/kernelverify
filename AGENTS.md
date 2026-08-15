@@ -39,6 +39,8 @@ Vlad's global instructions still apply; this file adds the project's layout, how
   The amendment and its bit-equality proof are in the module docstring.
   Amended again the same night (memory-truthfulness): a phys_footprint budget with a distinct refusal exit (never a shrunk grid), a machine-global single-instance lock plus an available-memory gate, and child-process isolation per measurement iteration; the root leak was per-case Metal buffer allocation, fixed by the buffer pool in `kernelverify/runners/device.py`.
   The three Jetsam kills that forced this (66.7, 69.4, 39.5 GB footprints on the 36 GB machine) are dissected in the module docstring's second amendment; `tests/test_serving_survival.py` is its proof suite.
+  Amended a third time (the merge review of that night's work, same docstring): the checkpoint fingerprint now carries a sha256 over the modules a record's value passes through, because the run resumed past STEP 0 - the pipeline's only end-to-end bit-exactness gate - on a checkpoint written by pre-buffer-pool code, and `--continuity-only` runs STEP 0 alone, which is the check to run after any change to the arithmetic path.
+  The single-instance lock moved to `machine_state.MeasurementLock`: ONE `fcntl.flock` shared by every heavy harness, since a per-harness lock let the pricing probe run beside the calibration, which is the 03:29 collapse itself, and a pid file cannot be read without a stale-pid judgement that eventually steals a live holder's lock.
   The pinned 3-bit artifact lives at the absolute path `/Users/vlad/kernelverify/bench/.models/qwen3-4b-3bit-g64`; `bench/.models` is gitignored, so it exists in the main worktree only and never arrives via merge.
 - `bench/calibrate_k.py` - measures what the admissible-implementation contract demands of K, and how many ensemble members it takes to represent that contract.
   Rerun it whenever the contract, the ensemble or the catalogue changes.
@@ -50,7 +52,7 @@ Vlad's global instructions still apply; this file adds the project's layout, how
 - `bench/probe_baseline_gaps.py` - one-off probes that closed the three claims ADR 0007 first shipped as inferred; rerun it whenever the baseline moves.
 - `bench/measure_baselines.py` - the one command that measures the machine's baselines across both stacks and appends them to `bench/.baselines/<date>.jsonl`.
   It alternates the arms within each workload cell (one sampling group per cell, schema v3), refuses to call a number binding on a busy or unplugged machine, and refuses sub-millisecond samples as absolute claims.
-- `bench/machine_state.py` - the idle gate and the timing floor, with the reason each exists.
+- `bench/machine_state.py` - the idle gate, the timing floor, and the one machine-wide measurement lock (`MeasurementLock`, an `fcntl.flock` on a fixed path) every heavy harness takes, with the reason each exists.
 - `bench/detached_run.py` and `bench/start_binding_run.sh` - the detached run path: a one-shot launchd job that waits for a strong-idle window, then runs `measure_baselines.py` with no terminal attached, retrying up to three passes on dispersion (ADR 0010).
 - `bench/OPERATOR-CARD.md` - the one-card instruction for starting a binding run and reading its outcome.
 - `bench/mlx_info.py` - the MLX safetensors equivalent of `gguf_info`, so both stacks get modelled bytes rather than file size.

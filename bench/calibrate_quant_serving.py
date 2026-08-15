@@ -226,6 +226,34 @@ force three protections, none of which changes a measured value:
    the cell in the checkpoint and refuses onward. The DeviceMemberSession
    re-initializes per child (measured ~0.2 s; ruled acceptable).
 
+AMENDMENT, 2026-08-15 (third): what a resume and a lock actually cover
+-----------------------------------------------------------------------
+The merge review of the second amendment found two of its protections were
+narrower than they read. Neither changes a measured value; both change what
+the harness is allowed to skip or share.
+
+1. THE FINGERPRINT CARRIES CODE IDENTITY. ``checkpoint_fingerprint`` covered
+   the question being asked (bits, K, provenance, batches, shapes) and
+   nothing about the code answering it, so the run of 2026-08-15 resumed past
+   STEP 0 - this pipeline's only end-to-end bit-exactness gate against a
+   change in device arithmetic - on a continuity result recorded before the
+   runner's buffer pool existed. The fingerprint now includes a sha256 over
+   the modules a record's value passes through (``CODE_IDENTITY_PATHS``), so
+   an edit to any of them invalidates a resume and STEP 0 is re-measured.
+   ``--continuity-only`` runs that step alone, which is the check to run
+   after any change to the arithmetic path.
+
+2. ONE MACHINE-WIDE MEASUREMENT LOCK, taken with ``fcntl.flock``. The lock
+   was keyed to THIS harness, so the pricing probe - a different harness -
+   took a different lock and could run beside it, which is precisely the
+   03:29 two-large-Pythons collapse the lock exists to prevent. It now lives
+   in ``bench/machine_state.py`` as one lock every heavy harness shares. It
+   is a flock rather than a pid file because the kernel releases it on death
+   however the process died (Jetsam included), which deletes the stale-pid
+   judgement and, with it, the race that let a reader landing between the
+   file's creation and the pid's write call a LIVE holder stale and steal
+   its lock.
+
 Machine discipline
 ------------------
 One measuring lane at a time: the full run executes only in the
@@ -238,6 +266,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import hashlib
 import json
 import math
 import os
@@ -596,13 +625,57 @@ def footprint_line() -> str:
     return f"footprint {current:.2f} GB (peak {peak:.2f} GB); {rss_line()}"
 
 
+# The modules a measured record's value passes through: the harness itself,
+# the runner that dispatches on the GPU, the device members and the contract
+# they implement, and the three standing bench modules whose functions this
+# harness calls to produce and score records. A change to any of them can
+# move a number, so a change to any of them must invalidate a resume.
+CODE_IDENTITY_PATHS = (
+    Path(__file__).resolve(),
+    Path(__file__).resolve().parents[1] / "kernelverify" / "runners" / "device.py",
+    Path(__file__).resolve().parents[1] / "kernelverify" / "runners" / "spec.py",
+    Path(__file__).resolve().parents[1] / "kernelverify" / "schemas" / "quant_device.py",
+    Path(__file__).resolve().parents[1] / "kernelverify" / "schemas" / "quant_contract.py",
+    Path(__file__).with_name("calibrate_quant_device.py"),
+    Path(__file__).with_name("calibrate_quant_bits.py"),
+    Path(__file__).with_name("phase0_contract_k.py"),
+)
+
+
+def code_identity() -> str:
+    """A sha256 over the source of the code that produces the records.
+
+    CONTENT hashes rather than the git HEAD sha, deliberately. HEAD is blind
+    to an uncommitted edit, which is the state a lane actually measures in,
+    and it moves on commits that touch nothing numeric, which would throw
+    away a 40-minute step for a docstring. Content hashes bite exactly when
+    the arithmetic path changes and never otherwise. A file that cannot be
+    read raises here: a fingerprint that cannot see its own code must stop,
+    not guess.
+    """
+    digest = hashlib.sha256()
+    for path in CODE_IDENTITY_PATHS:
+        digest.update(path.name.encode())
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
 def checkpoint_fingerprint(provenance: str, shapes) -> dict:
     """What a checkpoint must agree with before a --resume may reuse it.
+
     Resuming across a different artifact or shape set would splice two
-    different calibrations into one attestation."""
+    different calibrations into one attestation. So would resuming across a
+    change in the measuring CODE, and that one actually happened: on
+    2026-08-15 a run resumed past STEP 0 - the only end-to-end bit-exactness
+    gate this pipeline has against a change in device arithmetic - reusing a
+    continuity result recorded before the runner's buffer pool existed,
+    because the fingerprint described the question and nothing about the code
+    answering it.
+    """
     return {"bits": BITS, "k_ship": K_SHIP, "provenance": provenance,
             "base_batches": list(BASE_BATCHES),
-            "shapes": {name: list(shape) for name, shape in shapes}}
+            "shapes": {name: list(shape) for name, shape in shapes},
+            "code": code_identity()}
 
 
 def write_checkpoint(path: Path, fingerprint: dict, steps: dict) -> None:
@@ -635,14 +708,22 @@ def read_checkpoint(path: Path, fingerprint: dict) -> dict:
 # matching rss_gb above.
 # ---------------------------------------------------------------------------
 
-# Exit codes. 0 = attested, 1 = measured-and-stopped, 2 = no Metal device
-# (all three pre-existing). The refusal codes are distinct so the coordinator
-# can tell a protective refusal from a measurement verdict without parsing
-# stdout, and each gate gets its own number.
+# Exit codes. 0 = attested, 1 = measured-and-stopped. Everything else is a
+# gate with its own number, so the coordinator can tell a protective refusal
+# from a measurement verdict without parsing stdout.
+#
+# 2 is NOT one of them, and used to be: it meant "no usable Metal device"
+# while argparse also exits 2 on any bad argument, and the Python interpreter
+# exits 2 on a failed import at startup. A child dying either of those ways
+# was therefore reported as a missing GPU - the coordinator sent to look at
+# the hardware for a typo. The device gate now has EXIT_NO_DEVICE and goes
+# through the normal refusal path (checkpoint written, cell marked), leaving
+# 2 to mean what the interpreter already makes it mean.
 EXIT_BUDGET_REFUSAL = 3   # this process's phys_footprint crossed the budget
-EXIT_LOCK_HELD = 4        # a live instance of this harness already runs
+EXIT_LOCK_HELD = 4        # another heavy measurement holds the machine lock
 EXIT_LOW_MEMORY = 5       # machine-wide available memory too low for a cell
 EXIT_CHILD_DEATH = 6      # a measurement child died; its cell is named
+EXIT_NO_DEVICE = 7        # no usable Metal device: nothing can be measured
 
 # Well under the machine's 38.7 decimal-GB (36 GiB) of unified memory: the
 # probes ruled 20-24 GB, and the default leaves the OS and the coordinator's
@@ -760,58 +841,15 @@ def _wall_cap_arg(text: str) -> float:
     return _positive_float_arg(text, "wall cap", "seconds")
 
 
-# The machine-global single-instance lock. Keyed to the HARNESS identity, not
-# the worktree: the 03:29 collapse was two large Pythons at once, so every
-# checkout of this harness must resolve to ONE lock. /tmp is machine-shared
-# across worktrees and cleared at boot, so a lock can never outlive a restart
-# (the durable-log lesson about /tmp is about logs; for a lock, boot-scoped is
-# exactly right). Stale locks - holder pid dead - are reclaimed.
-LOCK_PATH = Path("/tmp/kernelverify.calibrate_quant_serving.lock")
-
-
-def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True  # alive, just not ours to signal
-    return True
-
-
-def acquire_lock(path: Path = LOCK_PATH) -> tuple[bool, str]:
-    """(acquired, detail). A live holder refuses and nothing is modified; a
-    dead or unreadable holder is stale and its lock is reclaimed once."""
-    for attempt in (1, 2):
-        try:
-            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        except FileExistsError:
-            try:
-                holder = int(path.read_text().strip())
-            except (OSError, ValueError):
-                holder = None
-            if holder is not None and _pid_alive(holder):
-                return False, f"held by live pid {holder}"
-            if attempt == 2:
-                return False, "still contended after one stale reclaim"
-            try:
-                path.unlink()
-            except OSError:
-                pass
-            continue
-        with os.fdopen(fd, "w") as handle:
-            handle.write(str(os.getpid()))
-        return True, f"acquired by pid {os.getpid()}"
-    raise AssertionError("unreachable")
-
-
-def release_lock(path: Path = LOCK_PATH) -> None:
-    """Release only what this process holds; a foreign lock is never removed."""
-    try:
-        if int(path.read_text().strip()) == os.getpid():
-            path.unlink()
-    except (OSError, ValueError):
-        pass
+# The machine-wide measurement lock, shared with every other heavy harness
+# through bench/machine_state.py rather than owned here. A lock keyed to THIS
+# harness would have let the 03:29 collapse happen exactly as it did: the
+# second large Python that night was the pricing probe, a different harness,
+# which would have taken a different lock and run anyway.
+from machine_state import (  # noqa: E402
+    MEASUREMENT_LOCK_PATH,
+    MeasurementLock,
+)
 
 
 class LowMemoryRefusal(RuntimeError):
@@ -944,8 +982,8 @@ def spawn_measurement(cell: str, task: dict, budget_gb: float,
     if proc.returncode == EXIT_BUDGET_REFUSAL:
         raise ChildRefusal(cell, EXIT_BUDGET_REFUSAL,
                            "refused over its own footprint budget")
-    if proc.returncode == 2:
-        raise ChildRefusal(cell, 2, "found no usable Metal device")
+    if proc.returncode == EXIT_NO_DEVICE:
+        raise ChildRefusal(cell, EXIT_NO_DEVICE, "found no usable Metal device")
     if proc.returncode != 0:
         raise ChildRefusal(cell, EXIT_CHILD_DEATH,
                            _child_death_reason(proc.returncode))
@@ -986,7 +1024,7 @@ def child_main(args) -> int:
         session = DeviceMemberSession()
     except Exception as error:  # no PyObjC Metal, no GPU: nothing to measure
         print(f"  child {cell}: no usable Metal device: {error}", flush=True)
-        return 2
+        return EXIT_NO_DEVICE
     try:
         if task["kind"] == "continuity":
             ok, detail = continuity_anchor(session)
@@ -1662,6 +1700,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--probe-validate", action="store_true",
                         help="pre-slot smoke: the probe at kv_proj (1024, 2560) "
                              "only, no continuity run, no main grid")
+    parser.add_argument("--continuity-only", action="store_true",
+                        help="run STEP 0 (the continuity anchor against the "
+                             "ADR 0012 cache) and stop. The check to run "
+                             "after ANY change to the arithmetic path, since "
+                             "it is the pipeline's only end-to-end "
+                             "bit-exactness gate and costs minutes rather "
+                             "than the full run's 45")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--resume", action="store_true",
                         help="reuse the finished steps in the checkpoint left "
@@ -1707,16 +1752,18 @@ def main(argv=None) -> int:
     if args.child_task:
         return child_main(args)  # no lock: the parent holds it
 
-    acquired, lock_detail = acquire_lock()
+    lock = MeasurementLock("calibrate_quant_serving")
+    acquired, lock_detail = lock.acquire()
     if not acquired:
-        print(f"REFUSAL (exit {EXIT_LOCK_HELD}): machine lock {LOCK_PATH} "
-              f"{lock_detail}; one instance of this harness per machine, and "
-              f"a refused run touches nothing")
+        print(f"REFUSAL (exit {EXIT_LOCK_HELD}): machine measurement lock "
+              f"{MEASUREMENT_LOCK_PATH} {lock_detail}; one heavy measurement "
+              f"per machine - whichever harness it is - and a refused run "
+              f"touches nothing")
         return EXIT_LOCK_HELD
     try:
         return _locked_main(args)
     finally:
-        release_lock()
+        lock.release()
 
 
 def _locked_main(args) -> int:
@@ -1770,10 +1817,10 @@ def _locked_main(args) -> int:
     except LowMemoryRefusal as exc:
         return refuse(EXIT_LOW_MEMORY, str(exc), fingerprint, steps)
     except ChildRefusal as exc:
-        if exc.exit_for_parent == 2:
-            print(f"no usable Metal device for the device members "
-                  f"(child at {exc.cell})")
-            return 2
+        # Every child refusal, the missing device included, goes through the
+        # one path: the checkpoint keeps the finished steps and the cell that
+        # refused is marked in it. A gate that returns early leaves the next
+        # run guessing which cell it was.
         return refuse_child(exc, fingerprint, steps)
 
 
@@ -1806,6 +1853,11 @@ def _run_measured_steps(args, shapes, spawn, saved, steps, resumed,
               "and nothing new is measured on top of it")
         return 1
     checkpoint("continuity", detail)
+    if args.continuity_only:
+        print("--continuity-only: STEP 0 alone, nothing further measured; the "
+              "checkpoint now carries it for a later --resume under this "
+              "exact code")
+        return 0
 
     # -- steps 1+2: G0 on the probe artefacts, then the batch-regime probe --
     print("\nSTEP 2 batch-regime probe (G0 checked on each probe artefact):",

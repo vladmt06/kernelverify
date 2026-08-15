@@ -1,11 +1,41 @@
 # TODOS
 
+## STEP 3's per-block records are checkpointed and never read back
+
+- What: `bench/calibrate_quant_serving.py` writes `grid_partial` (the records accumulated so far) after every (shape, draw, seed) child, but `--resume` reuses steps at STEP granularity only, so nothing ever reads that key; the run drops it (`steps.pop("grid_partial", None)`) once the step finishes.
+  The work is to make a crash inside STEP 3 resumable from the last finished block: reuse `grid_partial` when the fingerprint matches, and skip the (shape, draw, seed) blocks it already holds.
+- Why: STEP 3 is the ~40-minute step and the one most likely to meet a refusal or a Jetsam kill, and today a crash in its last block costs the whole step even though every finished block's records are already on disk and bit-exact.
+- Pros: the records are per-(shape, draw, seed) and rng-self-contained by construction (that is what child isolation bought, and `test_real_child_grid_iteration_round_trips_bit_exactly` proves the boundary), so resuming block-wise splices nothing that was measured under different conditions; the checkpoint write already happens.
+- Cons: it breaks the "STEP granularity only" rule the first amendment pre-registered, which exists because a mid-step restart is unsound wherever the rng stream crosses iterations - so the change needs the argument written down that the grid's stream does NOT cross blocks, plus a test that a resumed block-wise run produces records identical to an uninterrupted one, and it needs coordinator sign-off since it edits a pre-registered rule.
+- Context: found in the 2026-08-15 merge review of branch phase0, alongside the fingerprint and lock defects that were fixed in that pass; the fingerprint now carries code identity, so a block-wise resume can no longer splice across a code change either.
+- Depends on / blocked by: nothing technical; needs the pre-registration amendment ruled with the coordinator before implementation.
+
+## The JSON writers would silently coerce numpy integers and booleans
+
+- What: `write_checkpoint`, `write_child_result` and the results write in `bench/calibrate_quant_serving.py` all pass `default=float`, which is exact for the float64/float32/float16 values records carry today but would turn an `np.integer` into a float and an `np.bool_` into 1.0/0.0 the moment a record grows such a field.
+  The work is a `default=` that dispatches on type (integer to int, bool to bool, floating to float) and raises on anything else, plus a test that each numpy scalar type crosses the boundary as its own kind.
+- Why: the continuity anchor compares records EXACTLY, and a batch index arriving back as 16.0 or a `heldout_draw` flag as 0.0 would be an equality failure with no visible cause - or worse, a silent one on the `float(a) != float(b)` comparisons the anchor uses.
+- Pros: small and local (one function, three call sites); removes a whole class of future boundary bug from the one serialization path the isolation amendment depends on.
+- Cons: pure prophylaxis today - every field that crosses the boundary is currently a float, a str, a bool or a Python int, and `test_child_records_round_trip_bit_exactly` covers those; a raise on an unknown type could stop a run that would otherwise have limped.
+- Context: raised in the 2026-08-15 merge review of branch phase0 as a latent defect, explicitly not a live one; the review's own framing was "if records ever grow to include them".
+- Depends on / blocked by: nothing; do it whenever a record gains a non-float numeric field.
+
+## A parent killed mid-child orphans that child
+
+- What: `spawn_measurement` runs each measurement iteration with `subprocess.run`, so a SIGKILL to the parent (Jetsam, or a coordinator stopping a lane) leaves the child running with the GPU and its whole footprint, and the machine-wide measurement lock is released by the dead parent while the orphan keeps measuring.
+  The work is to bind the child's lifetime to the parent's: a new process group plus a kill on parent exit, or the child watching for its parent's death (`getppid()` change) between records.
+- Why: the failure mode is the one this harness was hardened against - two large Pythons on a 36 GB machine - reached from the opposite direction, and it defeats the lock rather than the budget: the next run acquires the freed lock and starts measuring beside the orphan.
+- Pros: the child already checks its own budget between records, so a parent-death check has an obvious place to live and costs nothing; the isolation design is otherwise complete.
+- Cons: process-group signalling has its own edge cases (a child that spawns nothing is easy, but the kill must not race a normal exit), and the window is small - the parent does almost nothing while a child runs.
+- Context: raised in the 2026-08-15 merge review of branch phase0; nothing in the three Jetsam kills is known to have hit it, and it stays a hypothesis about a kill landing on the parent rather than the child.
+- Depends on / blocked by: nothing.
+
 ## Extend the memory budget + lock pattern to the pricing and A/B harnesses
 
-- What: apply the survival pattern that `bench/calibrate_quant_serving.py` now carries to `bench/price_qmv_boundary.py` (the pack boundary-pricing harness) and the four-arm `bench/serve_sub4bit.py` (the serving A/B harness): the phys_footprint budget guard with its distinct refusal exit (ctypes `proc_pid_rusage`, since Jetsam kills on footprint while RSS under-reads it by an order of magnitude), the machine-global single-instance lock keyed to each harness's identity with dead-pid reclaim, and the `kern.memorystatus_level` available-memory refusal before each large cell.
+- What: apply the survival pattern that `bench/calibrate_quant_serving.py` now carries to `bench/price_qmv_boundary.py` (the pack boundary-pricing harness) and the four-arm `bench/serve_sub4bit.py` (the serving A/B harness): the phys_footprint budget guard with its distinct refusal exit (ctypes `proc_pid_rusage`, since Jetsam kills on footprint while RSS under-reads it by an order of magnitude), `machine_state.MeasurementLock` (the ONE machine-wide lock, imported not copied - a per-harness lock is what let the 03:29 collapse happen), and the `kern.memorystatus_level` available-memory refusal before each large cell.
 - Why: the night of 2026-08-15 produced three Jetsam kills from the serving calibration (66.7, 69.4 and 39.5 GB Python footprints on a 36 GB machine), and the 03:29 event was a two-harness collapse: the 39.5 GB serving run plus a 27.9 GB pricing-probe Python whose idle gate co-fired; any large-footprint harness without the budget and lock can reproduce that collapse.
-- Pros: the pattern is already built, tested and measured in `calibrate_quant_serving.py` (budget guard, `acquire_lock`/`release_lock`, `require_available_memory`, and the refusal-exit vocabulary), so the extension is mostly wiring; the runner-level buffer-pool fix in `kernelverify/runners/device.py` already protects every harness that dispatches through `CompiledKernel.run`, which removes the largest single leak class fleet-wide.
-- Cons: the two harnesses live on other lanes' branches, so the wiring belongs to whoever next touches those files, and each harness needs its own lock identity rather than a copy of the serving lock path.
+- Pros: the pattern is already built, tested and measured in `calibrate_quant_serving.py` (budget guard, `machine_state.MeasurementLock`, `require_available_memory`, and the refusal-exit vocabulary), so the extension is mostly wiring; the runner-level buffer-pool fix in `kernelverify/runners/device.py` already protects every harness that dispatches through `CompiledKernel.run`, which removes the largest single leak class fleet-wide.
+- Cons: the two harnesses live on other lanes' branches, so the wiring belongs to whoever next touches those files; each one passes its own name to `MeasurementLock` for the refusal message, but they all take the same lock.
 - Context: tonight's fix landed on branch phase0; the attribution probe convicted per-case Metal buffer allocation (dirty MTLBuffer pages never return to the OS on this stack, ~0.83 GB retained per lm_head dispatch), and the cross-harness serialization gap itself is coordinator territory, fixed at the coordinator level and out of scope for the in-repo pattern.
 - Depends on / blocked by: this fix landing on phase0 and reaching the branches that carry `price_qmv_boundary.py` and `serve_sub4bit.py`; applied when those files are next touched.
 

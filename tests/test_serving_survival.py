@@ -25,19 +25,18 @@ from calibrate_quant_serving import (
     EXIT_CHILD_DEATH,
     EXIT_LOCK_HELD,
     EXIT_LOW_MEMORY,
-    LOCK_PATH,
+    EXIT_NO_DEVICE,
     BudgetExceeded,
     BudgetGuard,
     LowMemoryRefusal,
-    acquire_lock,
     available_memory_gb,
     build_parser,
     machine_ram_gb,
     phys_footprint_gb,
     refuse,
-    release_lock,
     require_available_memory,
 )
+from machine_state import MEASUREMENT_LOCK_PATH, MeasurementLock
 
 BENCH_DIR = Path(__file__).resolve().parents[1] / "bench"
 
@@ -82,9 +81,11 @@ def test_budget_guard_passes_under_budget():
 
 def test_refusal_exit_codes_are_distinct_and_leave_the_existing_ones_alone():
     codes = {EXIT_BUDGET_REFUSAL, EXIT_LOCK_HELD, EXIT_LOW_MEMORY,
-             EXIT_CHILD_DEATH}
-    assert len(codes) == 4
-    assert not codes & {0, 1, 2}, "0/1/2 already mean ok/stop/no-metal"
+             EXIT_CHILD_DEATH, EXIT_NO_DEVICE}
+    assert len(codes) == 5
+    assert not codes & {0, 1, 2}, (
+        "0 and 1 already mean attested/measured-and-stopped, and 2 is "
+        "argparse's own exit - a gate sharing it is unreadable")
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +94,79 @@ def test_refusal_exit_codes_are_distinct_and_leave_the_existing_ones_alone():
 # ---------------------------------------------------------------------------
 def _fingerprint(provenance="derived", shapes=(("tiny", (8, 64)),)):
     return harness.checkpoint_fingerprint(provenance, shapes)
+
+
+# ---------------------------------------------------------------------------
+# The checkpoint fingerprint must carry CODE identity, not just the question
+# the run is asking. Without it, tonight's run resumed past STEP 0 - the only
+# end-to-end bit-exactness gate against a change in device arithmetic - on a
+# checkpoint written by code from before the buffer pool existed.
+# ---------------------------------------------------------------------------
+def test_the_fingerprint_carries_the_identity_of_the_measuring_code():
+    fingerprint = _fingerprint()
+    assert fingerprint["code"], "a fingerprint with no code identity resumes " \
+                                "across an arithmetic change"
+    assert fingerprint == _fingerprint(), "the identity must be stable"
+    hashed = {p.name for p in harness.CODE_IDENTITY_PATHS}
+    assert "device.py" in hashed, "the runner is what dispatches every record"
+    assert "calibrate_quant_serving.py" in hashed, "this harness is measuring"
+    for path in harness.CODE_IDENTITY_PATHS:
+        assert path.exists(), f"{path} is hashed but not there"
+
+
+def test_a_change_in_the_measuring_code_invalidates_a_resume(tmp_path,
+                                                             monkeypatch):
+    """The buffer-pool change, in miniature: edit a module the records pass
+    through and the checkpoint written before it stops being reusable."""
+    source = tmp_path / "device.py"
+    source.write_text("EPSILON = 1\n")
+    monkeypatch.setattr(harness, "CODE_IDENTITY_PATHS", (source,))
+    before = _fingerprint()
+    checkpoint = tmp_path / "partial.json"
+    harness.write_checkpoint(checkpoint, before,
+                             {"continuity": "64 records reproduced exactly"})
+    assert harness.read_checkpoint(checkpoint, before)
+
+    source.write_text("EPSILON = 2\n")  # one byte of arithmetic changes
+    after = _fingerprint()
+    assert after["code"] != before["code"]
+    assert harness.read_checkpoint(checkpoint, after) == {}, \
+        "STEP 0 must be re-measured under changed code, never resumed past"
+
+
+def test_continuity_only_measures_step_zero_and_stops(sandboxed_paths, capsys):
+    """--continuity-only exists so the anchor can be run ALONE in the
+    foreground after a change to the arithmetic path, without spending the
+    45 minutes the full grid costs."""
+    calls, steps = [], {}
+
+    def spawn(kind, cell, task):
+        calls.append(kind)
+        return {"ok": True, "detail": "64 records reproduced exactly"}, {}
+
+    args = build_parser().parse_args(["--continuity-only"])
+    code = harness._run_measured_steps(
+        args, (("tiny", (8, 64)),), spawn, {}, steps, [],
+        lambda step, payload: steps.__setitem__(step, payload), "derived", "")
+    assert code == 0
+    assert calls == ["continuity"], "nothing beyond STEP 0 may be measured"
+    assert steps["continuity"] == "64 records reproduced exactly"
+    out = capsys.readouterr().out
+    assert "STEP 0" in out and "REPRODUCED" in out
+
+
+def test_continuity_only_reports_a_failed_anchor_as_a_stop(sandboxed_paths,
+                                                           capsys):
+    def spawn(kind, cell, task):
+        return {"ok": False, "detail": "record 3 member device-dequant-loop"}, {}
+
+    args = build_parser().parse_args(["--continuity-only"])
+    steps = {}
+    code = harness._run_measured_steps(
+        args, (("tiny", (8, 64)),), spawn, {}, steps, [],
+        lambda step, payload: steps.__setitem__(step, payload), "derived", "")
+    assert code == 1
+    assert "STOP" in capsys.readouterr().out
 
 
 @pytest.fixture
@@ -209,87 +283,135 @@ def test_probe_cli_flags_parse_and_reject_nonsense(capsys):
 
 
 # ---------------------------------------------------------------------------
-# T2: the machine-global lock. Keyed to the harness identity, never to the
-# worktree: the 03:29 collapse was two large Pythons at once, so two
-# checkouts of this harness must resolve to ONE lock.
+# T2: the machine-wide measurement lock. It is ONE lock for every heavy
+# measurement harness in this repo, not one per harness: the 03:29 collapse
+# was the serving calibration and the pricing probe running at once, so a
+# per-harness lock would have permitted exactly the event it exists to stop.
+# It is fcntl.flock on a fixed path, so the kernel releases it when the holder
+# dies - there is no pid to read, no staleness to judge, and no window between
+# creating the file and saying who owns it.
 # ---------------------------------------------------------------------------
-def test_lock_path_is_machine_global_and_keyed_to_harness_identity():
-    assert LOCK_PATH.is_absolute()
+def _acquire_in_child(path: Path, hold_s: float = 0.0) -> subprocess.Popen:
+    """A separate process that takes the lock and holds it until killed."""
+    script = ("import sys, time; from pathlib import Path;"
+              "sys.path.insert(0, sys.argv[2]);"
+              "from machine_state import MeasurementLock;"
+              "lock = MeasurementLock('probe', Path(sys.argv[1]));"
+              "ok, detail = lock.acquire();"
+              "print(int(ok), detail, flush=True);"
+              "time.sleep(float(sys.argv[3]))")
+    return subprocess.Popen(
+        [sys.executable, "-c", script, str(path), str(BENCH_DIR), str(hold_s)],
+        stdout=subprocess.PIPE, text=True)
+
+
+def test_the_lock_is_one_machine_wide_lock_every_harness_shares():
+    assert MEASUREMENT_LOCK_PATH.is_absolute()
     repo_root = Path(__file__).resolve().parents[1]
-    assert not str(LOCK_PATH).startswith(str(repo_root)), \
-        "a worktree-keyed lock is blind to a second checkout of this harness"
-    assert "calibrate_quant_serving" in LOCK_PATH.name
+    assert not str(MEASUREMENT_LOCK_PATH).startswith(str(repo_root)), \
+        "a worktree-keyed lock is blind to a second checkout of a harness"
+    assert "calibrate_quant_serving" not in MEASUREMENT_LOCK_PATH.name, \
+        "a per-harness lock lets a second harness run: the 03:29 collapse"
+    assert harness.MEASUREMENT_LOCK_PATH is MEASUREMENT_LOCK_PATH, \
+        "the harness must lock on the shared path, not a copy of its own"
 
 
-def test_lock_second_acquire_refuses_and_touches_nothing(tmp_path):
-    path = tmp_path / "harness.lock"
-    ok, _ = acquire_lock(path)
-    assert ok
-    before = path.read_text()
-    ok2, detail = acquire_lock(path)
-    assert not ok2
-    assert str(os.getpid()) in detail
-    assert path.read_text() == before, "a refused acquire must not modify the lock"
+def test_lock_second_acquire_refuses_and_names_the_holder(tmp_path):
+    path = tmp_path / "measurement.lock"
+    held = MeasurementLock("first", path)
+    assert held.acquire()[0]
+    try:
+        ok, detail = MeasurementLock("second", path).acquire()
+        assert not ok
+        assert str(os.getpid()) in detail and "first" in detail
+    finally:
+        held.release()
 
 
-def test_lock_held_by_live_foreign_pid_refuses(tmp_path):
-    """pid 1 is launchd: always alive, never ours, not signalable by us -
-    the alive check must read PermissionError as ALIVE."""
-    path = tmp_path / "harness.lock"
-    path.write_text("1")
-    ok, detail = acquire_lock(path)
-    assert not ok
-    assert "1" in detail
+def test_a_live_foreign_holder_refuses_across_processes(tmp_path):
+    """The two-harness collision for real, across a process boundary."""
+    path = tmp_path / "measurement.lock"
+    child = _acquire_in_child(path, hold_s=30.0)
+    try:
+        assert child.stdout.readline().startswith("1 "), "the child must hold"
+        ok, detail = MeasurementLock("ours", path).acquire()
+        assert not ok
+        assert str(child.pid) in detail
+    finally:
+        child.kill()
+        child.wait()
 
 
-def test_lock_stale_dead_pid_is_reclaimed(tmp_path):
-    proc = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"],
-                          capture_output=True, text=True)
-    dead_pid = int(proc.stdout)
-    path = tmp_path / "harness.lock"
-    path.write_text(str(dead_pid))
-    ok, _ = acquire_lock(path)
-    assert ok
-    assert path.read_text() == str(os.getpid())
+def test_a_holder_dying_releases_the_lock_with_nothing_to_reclaim(tmp_path):
+    """The kernel is the reclaim path. A SIGKILLed holder - the exact death
+    the three Jetsam kills produced - leaves a lock the next run can take,
+    with no pid to read and no staleness rule to get wrong."""
+    path = tmp_path / "measurement.lock"
+    child = _acquire_in_child(path, hold_s=30.0)
+    assert child.stdout.readline().startswith("1 ")
+    child.kill()
+    child.wait()
+    ours = MeasurementLock("after the kill", path)
+    try:
+        assert ours.acquire()[0], "a dead holder's lock must be free"
+    finally:
+        ours.release()
 
 
-def test_lock_garbage_content_reads_as_stale_not_a_crash(tmp_path):
-    path = tmp_path / "harness.lock"
-    path.write_text("not-a-pid")
-    ok, _ = acquire_lock(path)
-    assert ok
+def test_a_live_holder_mid_write_is_never_read_as_stale(tmp_path):
+    """The race the pid file had: it was created with O_EXCL and the pid was
+    written a moment later, so a concurrent reader saw an empty file, failed
+    to parse it, called a LIVE holder stale and took its lock. Here the
+    contents are diagnostics only - the flock decides - so an empty or
+    garbage file while a holder lives still refuses."""
+    path = tmp_path / "measurement.lock"
+    held = MeasurementLock("first", path)
+    assert held.acquire()[0]
+    try:
+        for content in ("", "not-a-pid", "999999999"):
+            path.write_text(content)
+            ok, detail = MeasurementLock("second", path).acquire()
+            assert not ok, f"a live holder was stolen from on content {content!r}"
+            assert detail, "a refusal must still say something usable"
+    finally:
+        held.release()
 
 
 def test_lock_release_frees_it_for_the_next_run(tmp_path):
-    path = tmp_path / "harness.lock"
-    assert acquire_lock(path)[0]
-    release_lock(path)
-    assert not path.exists()
-    assert acquire_lock(path)[0]
+    path = tmp_path / "measurement.lock"
+    first = MeasurementLock("first", path)
+    assert first.acquire()[0]
+    first.release()
+    second = MeasurementLock("second", path)
+    try:
+        assert second.acquire()[0]
+    finally:
+        second.release()
 
 
-def test_lock_release_never_removes_a_foreign_lock(tmp_path):
-    path = tmp_path / "harness.lock"
-    path.write_text("1")
-    release_lock(path)
-    assert path.exists()
+def test_release_without_the_lock_never_frees_a_foreign_holder(tmp_path):
+    path = tmp_path / "measurement.lock"
+    held = MeasurementLock("first", path)
+    assert held.acquire()[0]
+    try:
+        MeasurementLock("never acquired", path).release()  # must be a no-op
+        assert not MeasurementLock("third", path).acquire()[0]
+    finally:
+        held.release()
 
 
-def test_lock_is_one_per_machine_across_processes(tmp_path):
-    """A second PROCESS refuses while the first holds - the two-worktree
-    collision, reproduced for real across a process boundary."""
-    path = tmp_path / "harness.lock"
-    assert acquire_lock(path)[0]
-    script = ("import sys; from pathlib import Path;"
-              "sys.path.insert(0, sys.argv[2]);"
-              "from calibrate_quant_serving import acquire_lock;"
-              "ok, detail = acquire_lock(Path(sys.argv[1]));"
-              "print(int(ok), detail)")
-    out = subprocess.run(
-        [sys.executable, "-c", script, str(path), str(BENCH_DIR)],
-        capture_output=True, text=True)
-    assert out.returncode == 0, out.stderr
-    assert out.stdout.startswith("0 "), "the second process must refuse"
+def test_only_one_of_many_simultaneous_acquirers_wins(tmp_path):
+    """Contention with no holder to serialize them: whatever the interleaving,
+    the kernel hands the lock to exactly one."""
+    path = tmp_path / "measurement.lock"
+    children = [_acquire_in_child(path, hold_s=3.0) for _ in range(6)]
+    try:
+        verdicts = [c.stdout.readline().startswith("1 ") for c in children]
+        assert sum(verdicts) == 1, f"{sum(verdicts)} winners, expected exactly 1"
+    finally:
+        for child in children:
+            child.kill()
+            child.wait()
 
 
 # ---------------------------------------------------------------------------
@@ -427,12 +549,27 @@ def test_child_budget_self_refusal_propagates_as_budget_exit(child_dir):
     assert exc.value.exit_for_parent == EXIT_BUDGET_REFUSAL
 
 
-def test_child_without_metal_propagates_exit_two(child_dir):
+def test_child_without_metal_gets_its_own_code(child_dir):
     with pytest.raises(harness.ChildRefusal) as exc:
-        harness.spawn_measurement("continuity", {"kind": "continuity"},
-                                  budget_gb=24.0,
-                                  command=_cmd("raise SystemExit(2)"))
-    assert exc.value.exit_for_parent == 2
+        harness.spawn_measurement(
+            "continuity", {"kind": "continuity"}, budget_gb=24.0,
+            command=_cmd(f"raise SystemExit({EXIT_NO_DEVICE})"))
+    assert exc.value.exit_for_parent == EXIT_NO_DEVICE
+    assert "Metal" in exc.value.reason
+
+
+def test_a_child_dying_in_argument_parsing_is_a_death_not_a_missing_gpu(
+        child_dir):
+    """Exit 2 is argparse's own, and import errors reach the parent the same
+    way. Reading either as "no usable Metal device" would send the coordinator
+    looking at the GPU for a typo."""
+    with pytest.raises(harness.ChildRefusal) as exc:
+        harness.spawn_measurement(
+            "grid tiny 8x64", {"kind": "grid"}, budget_gb=24.0,
+            command=[sys.executable, str(BENCH_DIR / "calibrate_quant_serving.py"),
+                     "--budget-gb", "not-a-number"])
+    assert exc.value.exit_for_parent == EXIT_CHILD_DEATH
+    assert "exit 2" in exc.value.reason
 
 
 def test_child_exit_zero_without_result_is_a_death(child_dir):
@@ -529,6 +666,33 @@ def test_device_dispatch_does_not_retain_buffers_across_runs():
     assert growth < n * per_case_gb * 0.5, (
         f"{growth:.3f} GB across {n} dispatches of a {per_case_gb:.4f} GB "
         f"case: per-dispatch buffer retention is back")
+
+
+@needs_metal
+def test_releasing_the_buffer_pool_gives_the_memory_back():
+    """The other half of the pool's memory story, at readable scale.
+
+    A written MTLBuffer dropped plainly keeps its pages charged to this
+    process for as long as it lives, so a release between specs would cost
+    memory rather than save it: three cycles of 0.5 GB would land as +1.5 GB.
+    Marking each buffer purgeable-empty first is what makes the number come
+    back (+0.00 GB measured for four dropped 0.54 GB buffers), and this test
+    is what would catch that step being dropped.
+    """
+    _DEVICE.release_pool()
+    cycle_bytes, indices = 128 * 1024 * 1024, (910, 911, 912, 913)
+    before, _ = phys_footprint_gb()
+    for _cycle in range(3):
+        for index in indices:
+            buffer, _held = _DEVICE.pooled_buffer(index, cycle_bytes)
+            np.frombuffer(buffer.contents().as_buffer(cycle_bytes),
+                          dtype=np.uint8)[...] = 1  # dirty every page
+        _DEVICE.release_pool()
+    growth, _ = phys_footprint_gb()
+    one_cycle_gb = len(indices) * cycle_bytes / 1e9
+    assert growth - before < one_cycle_gb, (
+        f"{growth - before:.2f} GB kept after three released "
+        f"{one_cycle_gb:.2f} GB cycles: released buffers are retained again")
 
 
 @needs_metal

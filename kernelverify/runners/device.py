@@ -29,13 +29,30 @@ Four behaviours are load-bearing for a verifier rather than incidental:
   +0.546 GB per 96-dispatch sweep at (1024, 2560) and ~0.83 GB per dispatch
   at lm_head (151936, 2560), the mechanism behind that night's three Jetsam
   kills at 66.7, 69.4 and 39.5 GB, invisible to RSS and to
-  mx.get_cache_memory(). The pool holds one buffer per binding index, grown
-  to the largest case seen, so device memory is bounded by a single case.
-  Sound because every dispatch here is synchronous (commit then
-  waitUntilCompleted before the next case) and every case rewrites each
-  input binding in full; a candidate that scribbles on its own inputs can
-  only corrupt what later cases of the SAME kernel read, which is a
-  wrong kernel failing, never a wrong kernel passing.
+  mx.get_cache_memory().
+
+  What the pool holds, exactly: one buffer per BINDING INDEX, living on the
+  MetalDevice and therefore shared by every case AND every spec that device
+  compiles - worker.py runs many specs against one device, so buffer index 2
+  is one allocation for every kernel in a batch, not one per kernel. Each
+  index's buffer is grown to the largest extent ever bound there and never
+  shrunk, so device memory is bounded by the SUM over bound indices of the
+  largest extent ever bound at each, not by a single case. `release_pool`
+  gives that memory back between specs.
+
+  Reuse is sound because every case reads deterministic bytes and nothing
+  else: dispatches are synchronous (commit then waitUntilCompleted before
+  the next case), each case rewrites every input binding in full, each
+  output is zeroed before the correctness dispatch, and the slack past the
+  current case's extent is zeroed whenever a pooled buffer is larger than
+  the case receiving it. That last one is what a fresh allocation gave for
+  free: before the pool, a candidate reading past its declared extent read a
+  fresh page's zeros, and with an uncleared pool it would read whichever case
+  last used that index - a verdict that depends on what ran before it, which
+  is the one property a verifier may never have. A candidate that scribbles
+  outside its own bindings can therefore only corrupt bytes that the next
+  case overwrites or zeroes before reading, which is a wrong kernel failing,
+  never a wrong kernel passing.
 
 Within one case, the pooled buffers are also what warmup and timed repeats
 reuse, because on unified memory the allocation, not the copy, is what a
@@ -114,22 +131,60 @@ class MetalDevice:
         self.queue = device.newCommandQueue()
         self._buffer_pool: dict[int, tuple[int, object]] = {}
 
-    def pooled_buffer(self, index: int, nbytes: int):
-        """A shared-storage buffer of at least ``nbytes`` for this binding
-        index, reused across cases and kernels (see the module docstring for
-        why per-case allocation is a leak on this stack). Callers rewrite the
-        region they use, dispatch synchronously, and read back a copy, so
-        reuse can never alias a live result."""
+    def pooled_buffer(self, index: int, nbytes: int) -> tuple[object, int]:
+        """``(buffer, bytes held)``: a shared-storage buffer of at least
+        ``nbytes`` for this binding index, reused across cases and across
+        specs (see the module docstring for why per-case allocation is a leak
+        on this stack). Callers rewrite the region they use, dispatch
+        synchronously, and read back a copy, so reuse can never alias a live
+        result.
+
+        The held size is returned because it is routinely LARGER than the
+        case asked for, and the caller is entitled to know the extent it was
+        handed. Everything from ``nbytes`` to that extent is zeroed before
+        the buffer changes hands - whenever the case is smaller than the
+        buffer it gets, not only on the first such case, because a candidate
+        may have written outside its own bindings on any dispatch and nothing
+        here can know that it did not.
+        """
+        if nbytes <= 0:
+            raise LaunchError(
+                f"buffer index {index} asks for {nbytes} bytes: a zero-sized "
+                f"binding has nothing to bind, and before the pool it was a "
+                f"nil buffer from newBufferWithLength(0)")
         held_bytes, held_buffer = self._buffer_pool.get(index, (0, None))
         if held_buffer is not None and held_bytes >= nbytes:
-            return held_buffer
+            if held_bytes > nbytes:
+                _zero_span(held_buffer, nbytes, held_bytes)
+            return held_buffer, held_bytes
         buffer = self.device.newBufferWithLength_options_(nbytes, _STORAGE_SHARED)
         if buffer is None:
             raise LaunchError(
                 f"the device would not allocate {nbytes} bytes for buffer "
                 f"index {index}")
         self._buffer_pool[index] = (nbytes, buffer)
-        return buffer
+        return buffer, nbytes
+
+    def release_pool(self) -> None:
+        """Drop every pooled buffer and give its memory back to the OS.
+
+        The two steps are both load-bearing, measured on this stack
+        2026-08-15 with 0.54 GB buffers: dropping a written MTLBuffer plainly
+        returns NOTHING while the process lives (+2.15 GB of footprint
+        retained after four of them were dropped and collected), while
+        marking it MTLPurgeableStateEmpty first and then dropping it returns
+        all of it (+0.00 GB for the same four from a clean process). Empty
+        discards the contents there and then, which is right here and wrong
+        anywhere else: nothing may read a released buffer again, and nothing
+        does - the next `pooled_buffer` allocates a new one.
+
+        Callers release between units of work that do not share buffers, so
+        one spec's largest case cannot charge the process for the life of a
+        batch (worker.py releases between specs).
+        """
+        for _held_bytes, buffer in self._buffer_pool.values():
+            buffer.setPurgeableState_(Metal.MTLPurgeableStateEmpty)
+        self._buffer_pool.clear()
 
     def info(self) -> DeviceInfo:
         return DeviceInfo(
@@ -198,12 +253,12 @@ class CompiledKernel:
                 continue
             if binding.kind is BindingKind.INPUT:
                 array = np.ascontiguousarray(case.inputs[binding.name])
-                buffer = self.device.pooled_buffer(index, array.nbytes)
+                buffer, _held_bytes = self.device.pooled_buffer(index, array.nbytes)
                 _write_into(buffer, array)
             else:
                 shape, dtype = case.output_shapes[len(output_indices)]
                 nbytes = int(np.prod(shape)) * np.dtype(TENSOR_DTYPES[dtype]).itemsize
-                buffer = self.device.pooled_buffer(index, nbytes)
+                buffer, _held_bytes = self.device.pooled_buffer(index, nbytes)
                 output_indices.append(index)
             buffers[index] = buffer
         return buffers, scalars, output_indices
@@ -295,6 +350,14 @@ def _pack_scalar(binding: Binding, value) -> bytes:
     if len(packed) < _MIN_SCALAR_BYTES:
         packed = packed.ljust(_MIN_SCALAR_BYTES, b"\x00")
     return packed
+
+
+def _zero_span(buffer, start: int, stop: int) -> None:
+    """Clear ``[start, stop)`` of a pooled buffer: the slack a smaller case
+    inherits from whatever used this binding index before it."""
+    memory = buffer.contents().as_buffer(stop)
+    np.frombuffer(memory, dtype=np.uint8, count=stop - start,
+                  offset=start)[...] = 0
 
 
 def _write_into(buffer, array: np.ndarray) -> None:
