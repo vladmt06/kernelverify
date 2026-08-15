@@ -23,8 +23,6 @@ from kernelverify.pack.verify import (
     verify_output,
 )
 from kernelverify.pack.wide_qmv import (
-    MAX_PROFITABLE_M,
-    MIN_PROFITABLE_M,
     SUPPORTED_BITS,
     build,
     launch_config,
@@ -76,21 +74,45 @@ def test_rows_per_simdgroup_drops_at_the_register_wall():
     assert rows_per_simdgroup(11) == 2
 
 
-def test_routes_to_mlx_outside_the_measured_win_zone():
-    """The win zone is two-sided. Below M = 5 MLX already reads the weights
-    once and this kernel measured a loss at 2 bits (0.81-0.89x at M = 1, 2).
-    At M >= 12 MLX stops tiling by fives and switches kernels entirely, so the
-    extra-pass defect this kernel fixes no longer exists there. The bounds are
-    pinned as literals because the values ARE the ruled decision (D3.1: 5..11
-    default until priced at the E2E shapes); repricing moves them on purpose,
-    through this test."""
-    assert (MIN_PROFITABLE_M, MAX_PROFITABLE_M) == (5, 11)
-    assert not should_dispatch(4)    # below: MLX already reads weights once
-    assert should_dispatch(5)        # first tile width with a second pass to win
-    assert should_dispatch(11)       # last width MLX routes to qmv_wide
-    assert not should_dispatch(12)   # MLX switches kernels here
-    # The whole batch range the block serves (B = 1..16, ruling D1).
-    assert [m for m in range(1, 17) if should_dispatch(m)] == list(range(5, 12))
+Q_PROJ = (4096, 2560)
+LM_HEAD = (151936, 2560)
+
+
+def test_routes_per_shape_over_the_served_batch_range():
+    """Routing is per-shape and per-width, read off the priced table, not off
+    one pair of bounds. Five shapes route M = 5..9; lm_head routes one width
+    further because at 151936 rows MLX's second weight pass still costs more
+    than our single pass at M = 10. The batch range is the block's own
+    B = 1..16 (ruling D1)."""
+    assert ([m for m in range(1, 17) if should_dispatch(m, 3, *Q_PROJ)]
+            == [5, 6, 7, 8, 9])
+    assert ([m for m in range(1, 17) if should_dispatch(m, 3, *LM_HEAD)]
+            == [5, 6, 7, 8, 9, 10])
+
+
+def test_the_cells_the_old_uniform_window_got_wrong():
+    """The 5..11 default routed two widths that measure LOSS at q_proj, and
+    lm_head M=4 measures WIN but stays unrouted under ruling D2."""
+    assert not should_dispatch(10, 3, *Q_PROJ)   # LOSS, routed by the default
+    assert not should_dispatch(11, 3, *Q_PROJ)   # LOSS, routed by the default
+    assert not should_dispatch(4, 3, *LM_HEAD)   # WIN, refused by D2
+    assert should_dispatch(10, 3, *LM_HEAD)      # WIN only at this shape
+
+
+def test_anything_unpriced_routes_nowhere():
+    """4-bit routes nowhere until its own pricing run lands (ruling D1), and
+    an unrecorded shape has no evidence, so it gets no routing rather than a
+    default."""
+    assert not should_dispatch(7, 4, *Q_PROJ)
+    assert not should_dispatch(7, 2, *Q_PROJ)
+    assert not should_dispatch(7, 3, 4096, 2624)
+
+
+def test_should_dispatch_demands_the_whole_key():
+    """A caller written against the old one-argument boundary must fail loudly
+    rather than route on a shape and width nobody priced."""
+    with pytest.raises(TypeError):
+        should_dispatch(7)
 
 
 def test_handles_d_out_not_divisible_by_r(kernel):
@@ -130,7 +152,7 @@ def test_agrees_with_contract_at_every_bit_width(kernel, bits, m):
 def test_gate_covers_the_e2e_dispatch_shapes_at_3_bit():
     """The gate must price coverage where the serving path dispatches
     (ruling D1): all six distinct Qwen3-4B decode shapes, 3-bit only (D4 cut
-    2-bit), at exactly the M values should_dispatch routes to this kernel."""
+    2-bit), at exactly the M values should_dispatch routes to EACH of them."""
     import pack_wide_qmv as gate
 
     assert {(s.d_out, s.d_in) for s in gate.E2E_SHAPES} == {
@@ -138,7 +160,22 @@ def test_gate_covers_the_e2e_dispatch_shapes_at_3_bit():
         (9728, 2560), (2560, 9728), (151936, 2560),
     }
     assert gate.E2E_BITS == 3
-    assert gate.e2e_verify_m() == [5, 6, 7, 8, 9, 10, 11]
+    assert gate.e2e_verify_m(*LM_HEAD) == [5, 6, 7, 8, 9, 10]
+    assert all(gate.e2e_verify_m(s.d_out, s.d_in) == [5, 6, 7, 8, 9]
+               for s in gate.E2E_SHAPES if (s.d_out, s.d_in) != LM_HEAD)
+
+
+def test_gate_coverage_is_exactly_the_routed_cells_per_shape():
+    """One list applied to every shape would leave lm_head's widest routed
+    cell unverified or verify five cells the pack never dispatches, so the
+    coverage is per-shape and must equal the table cell for cell."""
+    import pack_wide_qmv as gate
+
+    from kernelverify.pack.routed_windows import window_for
+
+    for s in gate.E2E_SHAPES:
+        assert (set(gate.e2e_verify_m(s.d_out, s.d_in))
+                == window_for(gate.E2E_BITS, s.d_out, s.d_in))
 
 
 # ---------------------------------------------------------------------------

@@ -87,7 +87,8 @@ MAX_CANARY_SPREAD = 1.5
 
 # The serving block's E2E coverage (ruling D1): the qmv shapes mlx-lm
 # dispatches when decoding Qwen3-4B, verified at 3 bits only (D4 cut 2-bit
-# from the block) and at exactly the M values the pack routes here.
+# from the block) and at exactly the M values the pack routes to each of
+# them - which is not the same list at every shape.
 E2E_BITS = 3
 
 # The pinned artifact lives in the MAIN checkout (bench/.models is gitignored
@@ -112,10 +113,17 @@ E2E_CONFIG, E2E_PROVENANCE = e2e_config()
 E2E_SHAPES = qmv_dispatch_shapes(E2E_CONFIG)
 
 
-def e2e_verify_m() -> list[int]:
-    """Exactly the tile widths should_dispatch routes to this kernel over the
-    block's serving range B = 1..16; gate coverage follows the boundary."""
-    return [m for m in range(1, 17) if should_dispatch(m)]
+def e2e_verify_m(d_out: int, d_in: int) -> list[int]:
+    """Exactly the tile widths should_dispatch routes to this kernel AT THIS
+    SHAPE, over the block's serving range B = 1..16.
+
+    Per-shape because routing is per-shape: five of the six dispatch shapes
+    route M = 5..9 and lm_head routes M = 5..10, so one list applied to every
+    shape would either leave lm_head's widest routed cell unverified or verify
+    five cells the pack never dispatches. Gate coverage follows the routing
+    table cell for cell.
+    """
+    return [m for m in range(1, 17) if should_dispatch(m, E2E_BITS, d_out, d_in)]
 
 
 def weights_for(d_out: int, d_in: int, seed: int) -> np.ndarray:
@@ -180,7 +188,7 @@ def interleaved_samples(build_a, build_b, rounds: int = ROUNDS,
 GATE_POLICY = (
     "pack-gate fixed-case sweep: 2 microbenchmark matrix shapes at every "
     "supported bit width, plus the six Qwen3-4B E2E decode dispatch shapes "
-    "at 3 bits over the routed win-zone M values, x {unit, corpus} input "
+    "at 3 bits over each shape's OWN routed M values, x {unit, corpus} input "
     "scales per (BITS, M) specialization, judged against the shipped "
     "NATIVE_OPS['quantized_matmul'] reference and tolerance; artefact bytes "
     "checked identical to mx.quantize per (shape, bits). This is NOT the "
@@ -195,9 +203,12 @@ SEED_PROTOCOL = (
 
 def verify(runner: MetalRunner, e2e_m: list | None = None, *,
            guard=None, retain_inputs: bool = False) -> GateEvidence:
-    """The correctness gate. `e2e_m` widens the E2E tile-width coverage past
-    the routed zone; the pricing probe passes its full sweep so that nothing
-    it times is unverified.
+    """The correctness gate. By default each E2E shape is covered at exactly
+    the tile widths the pack routes to it, which differ by shape. `e2e_m`
+    overrides that with one explicit list for every E2E shape: the pricing
+    probe passes its full sweep so that nothing it times is unverified, and a
+    caller pricing a shape that has no routing table entry yet passes the
+    widths it means to cover.
 
     ``guard`` is called with a cell label before each tile width and after
     each coverage group is judged, and may refuse by raising - the pricing
@@ -210,7 +221,7 @@ def verify(runner: MetalRunner, e2e_m: list | None = None, *,
     group, so the evidence never holds more than one group's arrays. The
     certificate emitter passes `retain_inputs=True` because its extraction
     capture re-dispatches the gate's own calls."""
-    e2e_m = e2e_verify_m() if e2e_m is None else list(e2e_m)
+    override = None if e2e_m is None else list(e2e_m)
     evidence = GateEvidence(gate="pack_wide_qmv", policy=GATE_POLICY,
                             seed_protocol=SEED_PROTOCOL)
     if E2E_SHAPES:
@@ -220,7 +231,9 @@ def verify(runner: MetalRunner, e2e_m: list | None = None, *,
     template = kernel_spec()
     coverage = [(d_out, d_in, bits, list(VERIFY_M), "")
                 for (d_out, d_in) in SHAPES for bits in SUPPORTED_BITS]
-    coverage += [(s.d_out, s.d_in, E2E_BITS, e2e_m, s.name)
+    coverage += [(s.d_out, s.d_in, E2E_BITS,
+                  e2e_verify_m(s.d_out, s.d_in) if override is None else override,
+                  s.name)
                  for s in E2E_SHAPES]
     for d_out, d_in, bits, verify_m, site in coverage:
         site_tag = f" ({site})" if site else ""
