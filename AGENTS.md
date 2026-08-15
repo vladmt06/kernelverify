@@ -39,11 +39,16 @@ Vlad's global instructions still apply; this file adds the project's layout, how
   Everything the optimiser claims is scored against these, so they are the denominators of the whole phase 2 story.
 - `bench/baseline_llamacpp.py` - llama.cpp at a pinned master commit, placed on the roofline.
 - `bench/baseline_kernels.py` - upstream's own per-kernel perf set, each case scored against the roofline at its own arithmetic intensity.
+- `bench/external.py` - the canonical external toolchain: the llama.cpp checkout path, the model directory, the build flags recorded with every result, and the llama-bench invoker.
+  Every script that shells out to that checkout takes them from here, because two spellings of a path or a flag list are how a lane measures a different binary than it recorded.
 - `bench/gguf_info.py` - GGUF tensor table reader; supplies the flop and byte models those two scripts need.
 - `bench/probe_baseline_gaps.py` - one-off probes that closed the three claims ADR 0007 first shipped as inferred; rerun it whenever the baseline moves.
 - `bench/measure_baselines.py` - the one command that measures the machine's baselines across both stacks and appends them to `bench/.baselines/<date>.jsonl`.
   It alternates the arms within each workload cell (one sampling group per cell, schema v3), refuses to call a number binding on a busy or unplugged machine, and refuses sub-millisecond samples as absolute claims.
 - `bench/machine_state.py` - the idle gate and the timing floor, with the reason each exists.
+- `bench/interleave.py` - the shared interleaved-timing engine every GPU A/B in bench/ runs on: dispatch-size calibration to `MIN_SAMPLE_MS`, the timed dispatch itself, the canary spread limit a pack gate withholds a certificate above, and the arms-agree smoke check.
+  One copy of the discipline, so a timing rule amended in one gate cannot silently stay old in another.
+  Its `MAX_CANARY_SPREAD` is deliberately its own literal rather than the comparator's `DEFAULT_SPREAD_LIMIT`, because the limit is per class; `tests/test_interleave.py` is where a divergence surfaces.
 - `bench/detached_run.py` and `bench/start_binding_run.sh` - the detached run path: a one-shot launchd job that waits for a strong-idle window, then runs `measure_baselines.py` with no terminal attached, retrying up to three passes on dispersion (ADR 0010).
 - `bench/OPERATOR-CARD.md` - the one-card instruction for starting a binding run and reading its outcome.
 - `bench/mlx_info.py` - the MLX safetensors equivalent of `gguf_info`, so both stacks get modelled bytes rather than file size.
