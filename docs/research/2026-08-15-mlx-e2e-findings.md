@@ -58,14 +58,37 @@ Equivalently: attention share s = L x t_attn_stock / t_tok, and gain = s x (1 - 
 The noise floor is the stock arm's round-to-round tokens/s spread.
 Decision rule, pre-stated: if the expected gain is below the observed noise floor, the generation-level probe is reshaped (longer generations, more rounds) if arithmetic says the reshaped floor drops below the effect; otherwise the honest report is that the arithmetic already answers the question, and section 5's A/B is not run as a decider.
 
-Measured inputs to the derivation (quiet window, idle-gated):
+Measured inputs to the derivation (quiet window, idle-gated, 2026-08-14 23:53 UTC, mlx 0.32.0, mlx-lm 0.31.3, Qwen3-4B-4bit, 36 layers):
 
-<!-- MDE numbers from bench/spike_mlx_e2e.py --mde go here -->
+| bits | T | stock us | fused us | op ratio r | attn share s | expected tps gain | noise floor |
+|---|---|---|---|---|---|---|---|
+| 8 | 512 | 28.15 | 20.07 | 1.40 | 5.1% | +1.5% | 0.12% |
+| 8 | 896 | 26.47 | 26.58 | 1.00 | 4.8% | -0.0% | 0.20% |
+| 4 | 512 | 117.32 | 100.88 | 1.16 | 21.6% | +3.0% | 0.14% |
+| 4 | 896 | 22.24 | 28.03 | 0.79 | 4.1% | -1.1% | 0.19% |
+
+The microbenchmark's 9-10x does not survive the E2E shape: at 32-over-8 GQA with padded buffers, the per-op ratio collapses to 0.79-1.40x, because MLX's own composition is far cheaper inside the compiled generation graph than in the cold-op microbenchmark, and at (4, 896) the fused kernel is already slower per op.
+The expected gains (up to 3.0%) sit above the sub-0.2% noise floors, so the decision rule said the A/B IS powered to detect them, and it ran.
 
 ## 5. The generation-level A/B
 
-<!-- results from bench/spike_mlx_e2e.py --ab go here -->
+Same quiet window (23:55-00:03 UTC), 5-9 interleaved rounds per cell, spread-gated, zero hard fallbacks, 39k-87k fused calls per cell.
+
+| bits | T | fused arm A tps | mlx-quant arm B tps | stock fp16 arm C tps | ratio A/B | spreads A/B/C |
+|---|---|---|---|---|---|---|
+| 8 | 512 | 50.53 | 51.08 | 51.94 | 0.99x | 0.07 / 0.06 / 0.03% |
+| 8 | 896 | 49.61 | 50.55 | 51.39 | 0.98x | 0.12 / 0.17 / 0.17% |
+| 4 | 512 | 50.62 | 51.21 | 51.87 | 0.99x | 0.32 / 0.90 / 0.27% |
+| 4 | 896 | 49.68 | 50.70 | 51.34 | 0.98x | 0.09 / 0.29 / 0.14% |
 
 ## 6. Verdicts
 
-<!-- primary ratio verdict, demotion-rule outcome, integration recommendation -->
+Primary ratio: the fused kernel LOSES 1-2% end-to-end at every cell, and the deficit exceeds the summed spreads everywhere - this is a real negative result, not a swallowed delta.
+The op-level wins that survived at (8, 512) and (4, 512) are erased by the runtime patch's per-step host cost (a Python interception plus a scalar-array creation per layer per token), which the pre-registration's expected-gain arithmetic did not include; the measured A/B is the honest total.
+
+Demotion rule: FIRED at every cell - the stock fp16 cache beats both quantized arms, confirming quantized KV cache on this machine at these context lengths is a memory feature, not a speed feature.
+
+Integration recommendation: do NOT ship a B=1 decode-attention swap for mlx-lm; the pre-stated pivot applies, and its pre-stated cost stands - prefill/batch serving territory (where the record's width-16 hole is measured) requires a NEW kernel plus a full verification cycle, decided through its own plan review.
+
+What the spike bought regardless: the wiring shadow-check measured production mlx-lm decode attention sitting 15x further from the fp64 contract reference than the verified kernel (0.174 vs 0.011) - the fp16-score arithmetic the contract's canary bans, running in production today.
+The launch story writes itself from the machinery, not the kernel: the same gates that certify our kernels demoted our own headline microbenchmark when the end-to-end truth disagreed with it.
