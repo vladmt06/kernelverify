@@ -221,9 +221,14 @@ def main(argv=None) -> int:
     render(points)
     summarize(points)
 
+    # The final gate runs BEFORE any write. A file under the canonical name
+    # IS the claim that the machine stayed idle end to end; a run that went
+    # busy quarantines its samples under a REFUSED name instead, so the
+    # evidence survives for diagnosis without ever looking binding.
     after = machine_state.idle_check(fp["cores"])
     stamp = _dt.date.today().isoformat()
-    out = RESULTS_DIR / f"qmv-boundary-pricing-{stamp}.json"
+    suffix = ".json" if after["idle"] else ".REFUSED.json"
+    out = RESULTS_DIR / f"qmv-boundary-pricing-{stamp}{suffix}"
     out.write_text(json.dumps({
         "probe": "price_qmv_boundary",
         "date": stamp,
@@ -240,8 +245,9 @@ def main(argv=None) -> int:
     }, indent=2))
     print(f"\nrecorded: {out}")
     if not after["idle"]:
-        print("WARNING: machine went busy during the run; treat this "
-              "recording as non-binding and re-run")
+        print("WARNING: machine went busy during the run; recording "
+              "quarantined under a REFUSED name and binds nothing; re-run "
+              "in the coordinated quiet slot")
         return 1
     return 0
 

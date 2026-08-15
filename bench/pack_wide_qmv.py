@@ -44,6 +44,7 @@ from kernelverify.extraction.surface import LiveCall  # noqa: E402
 from kernelverify.pack.evidence import (  # noqa: E402
     CaseEvidence,
     GateEvidence,
+    input_fingerprints,
     output_fingerprint,
     render_banner,
 )
@@ -183,10 +184,17 @@ SEED_PROTOCOL = (
 )
 
 
-def verify(runner: MetalRunner, e2e_m: list | None = None) -> GateEvidence:
+def verify(runner: MetalRunner, e2e_m: list | None = None, *,
+           retain_inputs: bool = False) -> GateEvidence:
     """The correctness gate. `e2e_m` widens the E2E tile-width coverage past
     the routed zone; the pricing probe passes its full sweep so that nothing
-    it times is unverified."""
+    it times is unverified.
+
+    Evidence retention follows ruling D2: every case records a sha256 per
+    input, and a judged passing case's arrays are dropped after its coverage
+    group, so the evidence never holds more than one group's arrays. The
+    certificate emitter passes `retain_inputs=True` because its extraction
+    capture re-dispatches the gate's own calls."""
     e2e_m = e2e_verify_m() if e2e_m is None else list(e2e_m)
     evidence = GateEvidence(gate="pack_wide_qmv", policy=GATE_POLICY,
                             seed_protocol=SEED_PROTOCOL)
@@ -232,35 +240,39 @@ def verify(runner: MetalRunner, e2e_m: list | None = None) -> GateEvidence:
                 ref, tol = reference_and_tolerance(
                     "quantized_matmul", qmv_inputs(x, w, bits))
                 label = f"{bits}-bit M={m} {tag} {d_out}x{d_in}{site_tag}"
+                case_inputs = {"x": x, "w_q": packed,
+                               "scales": art.scales, "biases": art.biases}
                 cases.append(RunCase(
-                    inputs={"x": x, "w_q": packed,
-                            "scales": art.scales, "biases": art.biases},
+                    inputs=case_inputs,
                     params={"d_in_arg": d_in, "d_out_arg": d_out,
                             "row_blocks": grid[1]},
                     output_shapes=[((m, d_out), "float16")],
                     label=label))
                 spec_ev.calls.append(LiveCall(
-                    inputs={"x": x, "w_q": packed,
-                            "scales": art.scales, "biases": art.biases},
+                    inputs=case_inputs,
                     output_shapes=[((m, d_out), "float16")],
                     grid=grid, threadgroup=threadgroup,
                     template=(("T", "float16"), ("BITS", bits),
                               ("M", m), ("R", r)),
                     label=label))
-                case_refs.append((spec_ev, label, ref, tol))
+                case_refs.append((spec_ev, label, ref, tol,
+                                  input_fingerprints(case_inputs)))
             spec_batches.append((spec, cases))
 
         results = [r for batch in runner.run_candidate(spec_batches) for r in batch]
-        for result, (spec_ev, label, ref, tol) in zip(results, case_refs):
+        for result, (spec_ev, label, ref, tol, in_sha) in zip(results, case_refs):
             if not result.ok:
                 spec_ev.cases.append(CaseEvidence(
-                    label=label, passed=False, tol=tol,
+                    label=label, passed=False, tol=tol, input_sha256=in_sha,
                     detail=f"runner {result.status.value}: {result.detail}"))
                 continue
             v = judge(result.outputs[0], ref, tol)
             spec_ev.cases.append(CaseEvidence(
                 label=label, passed=v.ok, err=v.err, tol=v.tol,
-                output_sha256=output_fingerprint(result.outputs[0])))
+                output_sha256=output_fingerprint(result.outputs[0]),
+                input_sha256=in_sha))
+        if not retain_inputs:
+            evidence.drop_verified_inputs()
 
     render_banner(evidence, "correctness (runner-isolated, Phase 0 contract, "
                             f"K = {K_QUANT:g}):")

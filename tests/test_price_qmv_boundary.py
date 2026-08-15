@@ -64,3 +64,63 @@ def test_every_point_states_its_spread():
     point = classify([10.0, 12.0], [20.0, 21.0])
     assert point.spread_ours == pytest.approx(1.2)
     assert point.spread_mlx == pytest.approx(1.05)
+
+
+# ---------------------------------------------------------------------------
+# Results-write ordering: the recording is written AFTER the final idle gate.
+# The bug being pinned: main() wrote the results JSON before the idle_after
+# check, so a run that went busy left a complete-looking recording on disk
+# and exited 1 with only a printed warning.
+# ---------------------------------------------------------------------------
+from types import SimpleNamespace  # noqa: E402
+
+
+def _idle(flag, why="test blocker"):
+    return {"idle": flag, "blockers": [] if flag else [why]}
+
+
+@pytest.fixture()
+def hardware_free(monkeypatch, tmp_path):
+    """main() with every hardware seam faked: no GPU, no sysctl, results in a
+    tmp dir. Returns the results dir."""
+    monkeypatch.setattr(probe, "RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(probe, "build", lambda _mx: None)
+    monkeypatch.setattr(probe, "MetalRunner", lambda: None)
+    monkeypatch.setattr(probe.gate, "verify",
+                        lambda *a, **k: SimpleNamespace(ok=True))
+    monkeypatch.setattr(
+        probe.gate, "E2E_SHAPES",
+        (SimpleNamespace(name="q_proj", d_out=256, d_in=256),))
+    point = classify([10.0, 10.2], [13.0, 13.4])
+    monkeypatch.setattr(probe, "price_shape", lambda *a, **k: [point])
+    monkeypatch.setattr(probe.machine_state, "fingerprint",
+                        lambda: {"cores": 12})
+    return tmp_path
+
+
+def _sequence_idle_checks(monkeypatch, verdicts):
+    calls = iter(verdicts)
+    monkeypatch.setattr(probe.machine_state, "idle_check",
+                        lambda _cores: next(calls))
+
+
+def test_a_clean_run_records_under_the_canonical_name(hardware_free,
+                                                      monkeypatch):
+    _sequence_idle_checks(monkeypatch, [_idle(True), _idle(True)])
+    assert probe.main([]) == 0
+    [written] = list(hardware_free.glob("*.json"))
+    assert "REFUSED" not in written.name
+    assert written.name.startswith("qmv-boundary-pricing-")
+
+
+def test_a_run_that_went_busy_quarantines_its_recording(hardware_free,
+                                                        monkeypatch):
+    """The final gate runs BEFORE any write: a busy machine at idle_after
+    must never leave a complete-looking recording under the canonical name.
+    The samples land under a quarantine name instead, so the evidence
+    survives without being quotable as a binding recording."""
+    _sequence_idle_checks(monkeypatch, [_idle(True), _idle(False, "went busy")])
+    assert probe.main([]) == 1
+    [written] = list(hardware_free.glob("*.json"))
+    assert "REFUSED" in written.name
+    assert not list(hardware_free.glob("qmv-boundary-pricing-*[0-9].json"))

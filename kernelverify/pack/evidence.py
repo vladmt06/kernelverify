@@ -40,15 +40,28 @@ __all__ = [
     "GateEvidence",
     "SpecializationEvidence",
     "by_family",
+    "input_fingerprints",
     "output_fingerprint",
     "render_banner",
 ]
 
 
-def output_fingerprint(array) -> str:
-    """Advisory sha256 of the output bytes from the certifying run."""
+def array_sha256(array) -> str:
+    """sha256 over an array's bytes, the evidence module's one hash."""
     contiguous = np.ascontiguousarray(np.asarray(array))
     return hashlib.sha256(contiguous.tobytes()).hexdigest()
+
+
+def output_fingerprint(array) -> str:
+    """Advisory sha256 of the output bytes from the certifying run."""
+    return array_sha256(array)
+
+
+def input_fingerprints(inputs: dict) -> dict:
+    """sha256 per input array: the audit trail's proof of exactly which bytes
+    ran, kept for every case so the arrays themselves need keeping only where
+    a failure has to be reproduced (ruling D2)."""
+    return {name: array_sha256(array) for name, array in inputs.items()}
 
 
 @dataclass(frozen=True)
@@ -65,6 +78,7 @@ class CaseEvidence:
     tol: float | None = None
     detail: str = ""
     output_sha256: str = ""
+    input_sha256: dict = field(default_factory=dict)
     aux: dict = field(default_factory=dict)
 
 
@@ -141,6 +155,17 @@ class GateEvidence:
                                          threadgroup=tuple(threadgroup))
         self.specializations.append(created)
         return created
+
+    def drop_verified_inputs(self) -> None:
+        """D2: a judged, PASSING case's LiveCall gives up its input arrays;
+        the per-input sha256 on the case remains the audit trail. Failing
+        cases keep their arrays so the exact failing bytes ship with the
+        evidence. Idempotent, so a gate may call it after every coverage
+        group and the evidence never holds more than one group's arrays."""
+        for spec in self.specializations:
+            for case, call in zip(spec.cases, spec.calls):
+                if case.passed:
+                    call.inputs = {}
 
 
 def by_family(evidences) -> dict:

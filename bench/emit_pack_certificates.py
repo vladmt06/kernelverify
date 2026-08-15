@@ -451,7 +451,10 @@ def gate_evidence(runner: MetalRunner) -> list:
     import pack_moe_dispatch
     import pack_wide_qmv
 
-    return [pack_wide_qmv.verify(runner),
+    # retain_inputs: the extraction capture re-dispatches the gate's own
+    # calls, so this evidence must keep its arrays (the D2 default drops a
+    # passing case's inputs, keeping only their sha256 audit trail).
+    return [pack_wide_qmv.verify(runner, retain_inputs=True),
             pack_moe_dispatch.verify(runner),
             pack_kv_attention.verify(runner)]
 

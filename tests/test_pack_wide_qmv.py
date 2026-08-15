@@ -141,6 +141,84 @@ def test_gate_covers_the_e2e_dispatch_shapes_at_3_bit():
     assert gate.e2e_verify_m() == [5, 6, 7, 8, 9, 10, 11]
 
 
+# ---------------------------------------------------------------------------
+# D2 evidence retention: fingerprints always, full arrays only for failures.
+# The boundary-pricing probe was killed holding every case's input arrays in
+# GateEvidence for a whole 30-minute run; the ruling keeps the audit trail
+# (which exact bytes ran, tamper-evident) as sha256 per input and keeps the
+# arrays themselves only where a failure needs reproducing.
+# ---------------------------------------------------------------------------
+INPUT_NAMES = {"x", "w_q", "scales", "biases"}
+
+
+@pytest.fixture()
+def reduced_gate(monkeypatch):
+    """The real gate, one 256x256 shape at one tile width, so each test pays
+    seconds; nothing on the verify path is stubbed."""
+    import pack_wide_qmv
+
+    monkeypatch.setattr(pack_wide_qmv, "SHAPES", [(256, 256)])
+    monkeypatch.setattr(pack_wide_qmv, "VERIFY_M", [5])
+    monkeypatch.setattr(pack_wide_qmv, "SUPPORTED_BITS", (4,))
+    monkeypatch.setattr(pack_wide_qmv, "E2E_SHAPES", ())
+    return pack_wide_qmv
+
+
+def test_passing_evidence_keeps_fingerprints_not_arrays(reduced_gate):
+    from kernelverify.runners import MetalRunner
+
+    evidence = reduced_gate.verify(MetalRunner())
+    assert evidence.ok
+    [spec] = evidence.specializations
+    assert len(spec.calls) == len(spec.cases) == 2
+    for case, call in zip(spec.cases, spec.calls):
+        assert set(case.input_sha256) == INPUT_NAMES
+        assert all(len(h) == 64 for h in case.input_sha256.values())
+        assert call.inputs == {}, "a judged passing case must not retain arrays"
+
+
+def test_failing_evidence_keeps_the_arrays(reduced_gate, monkeypatch):
+    """One case passes, one fails: only the failing case's LiveCall keeps its
+    input arrays, and both keep their fingerprints."""
+    from types import SimpleNamespace
+
+    from kernelverify.runners import MetalRunner
+
+    real = reduced_gate.judge
+    verdicts = iter([True, False])  # unit passes, corpus fails
+
+    def selective(out, ref, tol):
+        v = real(out, ref, tol)
+        if next(verdicts, True):
+            return v
+        return SimpleNamespace(ok=False, err=v.err, tol=v.tol)
+
+    monkeypatch.setattr(reduced_gate, "judge", selective)
+    evidence = reduced_gate.verify(MetalRunner())
+    assert not evidence.ok
+    [spec] = evidence.specializations
+    passing, failing = spec.cases
+    assert passing.passed and not failing.passed
+    passing_call, failing_call = spec.calls
+    assert passing_call.inputs == {}
+    assert set(failing_call.inputs) == INPUT_NAMES, (
+        "a failing case must keep the exact bytes that failed")
+    assert set(failing.input_sha256) == INPUT_NAMES
+
+
+def test_the_extraction_pipeline_may_retain_inputs(reduced_gate):
+    """The certificate emitter re-dispatches the gate's own calls through the
+    extraction capture, so its evidence keeps the arrays on request."""
+    from kernelverify.runners import MetalRunner
+
+    evidence = reduced_gate.verify(MetalRunner(), retain_inputs=True)
+    assert evidence.ok
+    [spec] = evidence.specializations
+    for case, call in zip(spec.cases, spec.calls):
+        assert set(call.inputs) == INPUT_NAMES
+        assert set(case.input_sha256) == INPUT_NAMES
+
+
 def test_gate_evidence_carries_e2e_cases_with_projection_names(monkeypatch):
     """A reduced gate run over one E2E shape must produce specialization
     evidence labelled with the projection name, so a certificate reader can

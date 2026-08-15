@@ -42,14 +42,16 @@ if RUNNER.probe() is None:
 
 @pytest.fixture(scope="module")
 def qmv_evidence():
-    """Real gate evidence from a reduced wide-qmv gate run."""
+    """Real gate evidence from a reduced wide-qmv gate run, retained the way
+    the emitter's own gate run retains it (its extraction capture
+    re-dispatches the gate's calls, so the arrays must survive D2's drop)."""
     patch = pytest.MonkeyPatch()
     patch.setattr(pack_wide_qmv, "SHAPES", [(256, 256)])
     patch.setattr(pack_wide_qmv, "VERIFY_M", [5])
     patch.setattr(pack_wide_qmv, "SUPPORTED_BITS", (4,))
     patch.setattr(pack_wide_qmv, "E2E_SHAPES", ())
     try:
-        yield pack_wide_qmv.verify(RUNNER)
+        yield pack_wide_qmv.verify(RUNNER, retain_inputs=True)
     finally:
         patch.undo()
 
