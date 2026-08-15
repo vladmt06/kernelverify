@@ -8,7 +8,6 @@ samples cannot pass it, which exercises the rejection path deterministically.
 """
 
 import numpy as np
-import pytest
 
 from conftest import requires_metal
 from kernelverify.runners import (
@@ -16,10 +15,10 @@ from kernelverify.runners import (
     BindingKind,
     KernelSpec,
     LaunchSpec,
+    MetalRunner,
     RunCase,
     compare,
     specialize,
-    MetalRunner,
 )
 
 # The iteration count is baked into the source so the two arms are genuinely
