@@ -121,6 +121,8 @@ def test_canonical_artifact_path_is_absolute_and_shared():
 # ---------------------------------------------------------------------------
 from calibrate_quant_serving import (  # noqa: E402
     ArtefactHoists,
+    dequant_chunk_rows,
+    dequant_chunked,
     eval_block_tiled,
     eval_boundary,
     eval_factored_groups,
@@ -129,7 +131,9 @@ from calibrate_quant_serving import (  # noqa: E402
     eval_pairwise,
     eval_ref,
     eval_serial_chunked,
+    f16_roundtrip_chunked,
     fault_dequants,
+    lut_gather_chunked,
 )
 from calibrate_quant_bits import boundary_fp16_dequant  # noqa: E402
 from kernelverify.schemas.quant_contract import (  # noqa: E402
@@ -137,6 +141,7 @@ from kernelverify.schemas.quant_contract import (  # noqa: E402
     FAULTS,
     QuantContract,
     canonical_quantize,
+    dequantize,
     r_contract,
 )
 from phase0_contract_k import heldout_block_tiled, make_x  # noqa: E402
@@ -202,6 +207,157 @@ def test_hoisted_fault_paths_are_bit_identical(small):
         theirs = ENSEMBLE["dequant-pairwise"](x, FAULTS[fault_name](artefact))
         assert np.array_equal(eval_pairwise(x, w_fault32), theirs), fault_name
     assert seen == list(FAULTS), "every catalogue fault, in catalogue order"
+
+
+# ---------------------------------------------------------------------------
+# The 2026-08-15 memory amendment: row-chunked dequantization.
+#
+# The chunked path must be bit-identical at EVERY chunk size, because the row
+# partition is the whole safety argument: each dequantized element is an
+# independent elementwise expression of its own row, so no reduction and no
+# BLAS call can see the partition. A chunk size that changed a single bit
+# would mean that argument is false.
+# ---------------------------------------------------------------------------
+CHUNK_SIZES = [1, 2, 7, 64, 95, 96, 10_000]
+
+
+@pytest.mark.parametrize("chunk", CHUNK_SIZES)
+@pytest.mark.parametrize("dtype", [np.float64, np.float32, np.float16])
+@pytest.mark.parametrize("bits", [3, 4])
+def test_chunked_dequant_is_bit_identical(chunk, dtype, bits):
+    _, artefact = _small_artefact(bits=bits)
+    ours = dequant_chunked(artefact, dtype, chunk)
+    theirs = dequantize(artefact, dtype)
+    assert ours.dtype == theirs.dtype and ours.shape == theirs.shape
+    assert np.array_equal(ours, theirs)
+
+
+def test_chunked_dequant_default_chunk_is_bit_identical():
+    """The production call passes no chunk size and must be exact anyway."""
+    _, artefact = _small_artefact()
+    assert np.array_equal(dequant_chunked(artefact, np.float64),
+                          dequantize(artefact, np.float64))
+
+
+@pytest.mark.parametrize("chunk", CHUNK_SIZES)
+def test_chunked_lut_gather_is_bit_identical(chunk):
+    """lut-gather's table is per-row too, so its gather chunks exactly."""
+    _, artefact = _small_artefact()
+    x = _xs(128, "unit", np.float32)
+    ours = lut_gather_chunked(artefact, chunk)
+    assert np.array_equal(eval_lut(x, ours), ENSEMBLE["lut-gather"](x, artefact))
+
+
+@pytest.mark.parametrize("chunk", CHUNK_SIZES)
+def test_chunked_f16_roundtrip_is_bit_identical(chunk, small):
+    """The fp16-dequant boundary's weights: two elementwise casts, so chunked."""
+    _, artefact, hoists = small
+    x = _xs(128, "unit", np.float32)
+    ours = f16_roundtrip_chunked(hoists.w32, chunk)
+    assert np.array_equal(eval_boundary(x, ours),
+                          boundary_fp16_dequant(x, artefact))
+
+
+def test_dequant_chunk_rows_bounds_the_block_and_never_returns_zero():
+    """A row wider than the whole budget must still yield one row, not zero."""
+    assert dequant_chunk_rows(2560, 8) >= 1
+    assert dequant_chunk_rows(10 ** 9, 8) == 1
+    assert dequant_chunk_rows(2560, 8) < dequant_chunk_rows(2560, 4)
+
+
+def test_reference_weights_are_lazy(small):
+    """STEP 2 never reads the fp64 reference, and at lm_head it is 3.1 GB of
+    the probe's budget. Building it eagerly is what the amendment removes."""
+    w, artefact, _ = small
+    hoists = ArtefactHoists(w, artefact)
+    assert not hoists.reference_built
+    built = hoists.w64
+    assert np.array_equal(built, dequantize(artefact, np.float64))
+    assert hoists.reference_built
+    assert hoists.w64 is built, "built once, then reused"
+
+
+def test_reference_matmul_is_never_row_partitioned():
+    """The amendment as first proposed row-chunked the fp64 reference MATMUL.
+    Measured on this machine's Accelerate BLAS that is NOT bit-exact: cutting
+    the output-row dimension changes dgemm's blocking and moves results by up
+    to 2e-14. The harness therefore chunks the DEQUANTIZATION only and leaves
+    the matmul whole, so eval_ref must still agree with r_contract bit for bit
+    at a shape where a partitioned matmul demonstrably would not.
+
+    Sized to a shape that actually separates the two (the fixture's 96 rows do
+    not); the skip is the safety valve for a future BLAS that partitions
+    invariantly, never a licence for the harness to rely on one that does.
+    """
+    w, artefact = _small_artefact(d_out=1024, d_in=1024)
+    hoists = ArtefactHoists(w, artefact)
+    x = _xs(1024, "unit", np.float32, batch=16)
+    full = r_contract(x, artefact)
+    x64 = x.astype(np.float64)
+    partitioned = np.concatenate(
+        [x64 @ hoists.w64[s:s + 1].T for s in range(hoists.w64.shape[0])],
+        axis=1)
+    if np.array_equal(partitioned, full):
+        pytest.skip("this BLAS is row-partition invariant at this shape; the "
+                    "harness never relies on it either way")
+    assert np.array_equal(eval_ref(x, hoists.w64), full)
+
+
+# ---------------------------------------------------------------------------
+# Per-step checkpoint: a SIGKILL must cost one step, not the whole run
+# ---------------------------------------------------------------------------
+from calibrate_quant_serving import (  # noqa: E402
+    checkpoint_fingerprint,
+    read_checkpoint,
+    rss_gb,
+    write_checkpoint,
+)
+
+
+def _fingerprint(provenance="derived", shapes=(("tiny", (8, 64)),)):
+    return checkpoint_fingerprint(provenance, shapes)
+
+
+def test_checkpoint_round_trips_completed_steps(tmp_path):
+    path = tmp_path / "partial.json"
+    fingerprint = _fingerprint()
+    write_checkpoint(path, fingerprint, {"probe": {"kv_proj": {"g0_exact": True}}})
+    assert read_checkpoint(path, fingerprint) == {
+        "probe": {"kv_proj": {"g0_exact": True}}}
+
+
+def test_checkpoint_is_refused_when_the_run_identity_changed(tmp_path):
+    """Resuming across a different provenance or shape set would splice two
+    different calibrations into one attestation."""
+    path = tmp_path / "partial.json"
+    write_checkpoint(path, _fingerprint(), {"probe": {}})
+    assert read_checkpoint(path, _fingerprint(provenance="pinned-artifact:x")) == {}
+    assert read_checkpoint(path, _fingerprint(shapes=(("tiny", (16, 64)),))) == {}
+
+
+def test_checkpoint_absent_or_corrupt_reads_as_nothing_to_resume(tmp_path):
+    """A SIGKILL mid-write must not turn into a crash on the next run."""
+    assert read_checkpoint(tmp_path / "absent.json", _fingerprint()) == {}
+    corrupt = tmp_path / "corrupt.json"
+    corrupt.write_text('{"fingerprint": {"bits": 3}, "steps": {"probe"')
+    assert read_checkpoint(corrupt, _fingerprint()) == {}
+
+
+def test_checkpoint_write_leaves_no_partial_file_behind(tmp_path):
+    """The write is atomic (temp then replace), so the checkpoint on disk is
+    always a whole one; the scratch file must not survive."""
+    path = tmp_path / "partial.json"
+    write_checkpoint(path, _fingerprint(), {"probe": {}})
+    write_checkpoint(path, _fingerprint(), {"probe": {}, "grid": {"records": []}})
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["partial.json"]
+    assert set(read_checkpoint(path, _fingerprint())) == {"probe", "grid"}
+
+
+def test_rss_self_report_returns_current_and_peak_gigabytes():
+    """The line that confirms or refutes the memory hypothesis in the log."""
+    current, peak = rss_gb()
+    assert 0.0 < current < 1000.0
+    assert peak >= current * 0.5  # peak is a high-water mark, never far below
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +511,7 @@ from calibrate_quant_serving import (  # noqa: E402
     measure_serving,
     mlx_qmm_heldout,
     mlx_quantize_hoist,
+    probe_batch_regimes,
 )
 from kernelverify.runners.device import MetalDevice  # noqa: E402
 from kernelverify.schemas.quant_device import DeviceMemberSession  # noqa: E402
@@ -400,3 +557,27 @@ def test_measure_serving_records_feed_the_standing_machinery():
     assert set(per_cell) == {("128x128", 1), ("128x128", 2)}
     for rep in per_cell.values():
         assert rep["verdict"] in ("ADEQUATE", "INADEQUATE")
+
+
+@needs_metal
+def test_measure_serving_checkpoints_after_every_block():
+    """The recorder that makes a death inside the main grid cost one block
+    instead of the whole step: it fires per (shape, draw), and each call sees
+    every record earned so far."""
+    session = DeviceMemberSession(_DEVICE)
+    seen = []
+    measured = measure_serving([("tiny", (128, 128))], (1,), session,
+                               verbose=False,
+                               on_block=lambda rs: seen.append(len(rs)))
+    assert len(seen) == 2, "one checkpoint per (shape, draw)"
+    assert seen == sorted(seen) and seen[-1] == len(measured["records"])
+
+
+@needs_metal
+def test_probe_reports_its_own_rss_per_shape():
+    """The line that confirms or refutes the memory hypothesis has to reach
+    the JSON, not only the log."""
+    session = DeviceMemberSession(_DEVICE)
+    probe = probe_batch_regimes([("tiny", (64, 64))], session, verbose=False)
+    rss = probe["tiny"]["rss_gb"]
+    assert rss["current"] > 0.0 and rss["peak"] >= rss["current"] * 0.5

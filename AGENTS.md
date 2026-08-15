@@ -35,6 +35,8 @@ Vlad's global instructions still apply; this file adds the project's layout, how
   ADR 0012 is the reading of its run; reruns must reproduce its tables.
 - `bench/calibrate_quant_serving.py` - 3-bit adequacy at the Qwen3-4B E2E serving shapes, with its pre-registered rule in the module docstring: continuity anchor against the ADR 0012 cache, per-shape G0, the batch-regime probe with direct-match coverage, per-cell K demand against the shipped K = 4, and gates under width-pooled fault equivalence.
   ADR 0013 is the reading of its run; reruns must reproduce its tables.
+  Amended 2026-08-15 after three SIGKILLs in step 2: per-shape and per-implementation progress lines carrying an RSS self-report, a per-step checkpoint at `bench/.cache/quant_serving_partial.json` (atomic write, `--resume` at step granularity only), and row-chunked dequantization so the lm_head weights stop paying a 3x whole-matrix transient.
+  The amendment and its bit-equality proof are in the module docstring.
   The pinned 3-bit artifact lives at the absolute path `/Users/vlad/kernelverify/bench/.models/qwen3-4b-3bit-g64`; `bench/.models` is gitignored, so it exists in the main worktree only and never arrives via merge.
 - `bench/calibrate_k.py` - measures what the admissible-implementation contract demands of K, and how many ensemble members it takes to represent that contract.
   Rerun it whenever the contract, the ensemble or the catalogue changes.
@@ -163,3 +165,7 @@ bench/start_binding_run.sh     # arms a launchd job, then quit Terminal
   Batching dispatches past 5 ms did NOT prevent this; interleaving the arms within each round is independently load-bearing.
   Interleaving is necessary and NOT sufficient: it equalizes a clock excursion across arms but cannot detect one, so the reference arm's own spread is the detector - reject any round whose reference samples exceed the class spread limit (1.5x max-to-min for kernel arms, tighter for steadier quantities).
   Interleave every comparative measurement, always, even when each dispatch is ms-scale.
+- Row-partitioning a matmul is NOT bit-exact, however plainly the arithmetic says each output element's dot product is untouched by it.
+  Measured on numpy 2.5.2 over Accelerate: cutting the output-row dimension of `x @ w.T` changes dgemm's blocking and moves fp64 results by up to 2e-14, at chunk sizes 1, 7 and 3276 and at shapes from (5, 128, 96) to (16, 2560, 20000).
+  Chunk the dequantization instead, which is elementwise per row and therefore exact by construction, and leave every matmul whole.
+  This one is silent rather than loud: it would have moved the fp64 anchor that every error is measured against, and the continuity anchor cannot catch it because the standing measure never takes the chunked path.

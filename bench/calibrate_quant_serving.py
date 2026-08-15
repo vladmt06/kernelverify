@@ -135,6 +135,62 @@ proving bit-identity against the untouched reference implementation; a
 helper that is merely close is wrong. Device members and MLX's own
 ``quantized_matmul`` run per record, unhoisted, as on the standing grid.
 
+AMENDMENT, 2026-08-15: surviving STEP 2 (coordinator-authorized)
+---------------------------------------------------------------
+The rule above is unchanged; what follows changes only what the harness
+SPENDS and what it REPORTS, and it changes no measured value. Three runs
+died inside STEP 2, the third under instrumentation: exit 137, SIGKILL, with
+RSS already 2.4 GB early in the step and no log line naming the shape that
+was live. Authorized by the coordinator and recorded here before the rerun:
+
+1. STEP 2 announces every shape and every (dtype, implementation) as it
+   starts and finishes, each line carrying an RSS self-report (current and
+   peak), and each shape's report carries ``rss_gb`` into the JSON. The
+   memory hypothesis is then confirmed or refuted by the next run's log
+   rather than argued about.
+
+2. A per-step checkpoint at ``.cache/quant_serving_partial.json``, written
+   atomically (temp then replace, so a SIGKILL mid-write cannot leave a file
+   the next run chokes on) after each finished step, and after each (shape,
+   draw) block inside the main grid. ``--resume`` reuses finished steps, at
+   STEP granularity only - the pinned rng consumption order makes a mid-step
+   restart unsound - and every reused step is named in the output JSON and
+   on stdout, because a resumed run has not re-measured what it reports.
+
+3. The fp64 reference is memory-bounded by ROW-CHUNKING THE DEQUANTIZATION,
+   and it is now built lazily, on first read. Two separate findings forced
+   this exact shape:
+
+   (a) ``dequantize`` holds three whole-matrix arrays at once - the cast of
+       q, the product, the sum - so at lm_head an fp64 dequant peaks near
+       9.3 GB to return 3.1 GB, and the fp32 dequants near 4.7 GB to return
+       1.6 GB, six fault artefacts included. Every element of a dequant is
+       an independent elementwise expression of its own row's q, scale and
+       bias: no reduction, no BLAS. A row block therefore computes exactly
+       the bits the whole matrix computes, at EVERY block size, which
+       ``test_chunked_dequant_is_bit_identical`` proves across dtypes, bit
+       widths and seven chunk sizes (the lut gather and the fp16 round trip
+       are per-row for the same reason and carry the same tests).
+
+   (b) The amendment as first proposed row-chunked the fp64 reference
+       MATMUL, on the argument that each output element's dot product is
+       unchanged by an output-row partition. That argument is true of the
+       arithmetic and FALSE of this machine: measured on numpy 2.5.2 over
+       Accelerate, cutting the output-row dimension of ``x @ w64.T`` changes
+       dgemm's blocking and moves results by up to 2e-14, at chunk sizes 1,
+       7 and 3276, at shapes from (5, 128, 96) to (16, 2560, 20000). The
+       shift is numerically negligible and disciplinarily fatal: it would
+       have moved the fp64 anchor every error in this harness is measured
+       against, silently, and STEP 0's continuity anchor could not have
+       caught it because the standing measure never takes the chunked path.
+       The matmul is therefore left whole - one call, exactly the standing
+       one - and ``test_reference_matmul_is_never_row_partitioned`` pins it
+       at a shape where a partitioned matmul demonstrably differs.
+
+   Lazy construction is the other half: STEP 2 never reads the fp64
+   reference, so at lm_head the probe was spending 3.1 GB resident (and a
+   9.3 GB transient) on a matrix it does not use.
+
 Machine discipline
 ------------------
 One measuring lane at a time: the full run executes only in the
@@ -146,6 +202,9 @@ smoke dispatches. Reruns must reproduce ADR 0013's tables.
 from __future__ import annotations
 
 import json
+import os
+import resource
+import subprocess
 import sys
 from pathlib import Path
 
@@ -161,6 +220,7 @@ K_SHIP = 4.0  # ADR 0012: the shipped K over the three-class nine-name floor
 
 ARTIFACT_DIR = Path("/Users/vlad/kernelverify/bench/.models/qwen3-4b-3bit-g64")
 OUT_PATH = Path(__file__).with_name(".cache") / "quant_serving_adequacy.json"
+CHECKPOINT_PATH = Path(__file__).with_name(".cache") / "quant_serving_partial.json"
 CONTINUITY_CACHE = Path(__file__).with_name(".cache") / "quant_device_adequacy.json"
 CONTINUITY_SHAPE = (1024, 4096)
 
@@ -259,16 +319,82 @@ def resolve_serving_source(artifact_dir: Path) -> tuple[dict, str]:
 # merely close.
 # ---------------------------------------------------------------------------
 from kernelverify.schemas.quant_contract import (  # noqa: E402
-    ENSEMBLE,
     FAULTS,
     QuantArtefact,
     QuantContract,
-    dequantize,
 )
 
 
 def _f32(x: np.ndarray) -> np.ndarray:
     return x.astype(np.float32)
+
+
+# The 2026-08-15 memory amendment. ``dequantize`` holds three whole-matrix
+# arrays at once - the cast of q, the product, the sum - so at lm_head an
+# fp64 dequant peaks near 9.3 GB to return 3.1 GB. Every element of it is an
+# independent elementwise expression of its own row's q, scale and bias: no
+# reduction, no BLAS. Row blocks therefore compute exactly the bits the whole
+# matrix computes, at every block size, and the transient becomes proportional
+# to a block. Bit-identity is proven, not assumed, in tests/test_serving_adequacy.py.
+DEQUANT_CHUNK_BYTES = 1 << 27  # ~134 MB per row block of the working array
+
+
+def dequant_chunk_rows(d_in: int, itemsize: int) -> int:
+    return max(1, DEQUANT_CHUNK_BYTES // max(1, d_in * itemsize))
+
+
+def _row_blocks(rows: int, chunk_rows: int):
+    for start in range(0, rows, chunk_rows):
+        yield start, min(start + chunk_rows, rows)
+
+
+def dequant_chunked(a: QuantArtefact, dtype,
+                    chunk_rows: int | None = None) -> np.ndarray:
+    """``dequantize`` evaluated in output-row blocks, bit-identical to it."""
+    g = a.contract.group_size
+    rows, cols = a.q.shape
+    if chunk_rows is None:
+        chunk_rows = dequant_chunk_rows(cols, np.dtype(dtype).itemsize)
+    out = np.empty((rows, cols), dtype=dtype)
+    for start, stop in _row_blocks(rows, chunk_rows):
+        block_rows = stop - start
+        q = a.q[start:stop].reshape(block_rows, cols // g, g).astype(dtype)
+        block = (a.scales[start:stop].astype(dtype)[:, :, None] * q
+                 + a.biases[start:stop].astype(dtype)[:, :, None])
+        out[start:stop] = block.reshape(block_rows, cols)
+    return out
+
+
+def lut_gather_chunked(a: QuantArtefact,
+                       chunk_rows: int | None = None) -> np.ndarray:
+    """member_lut_gather's weights in row blocks; the per-group table is a
+    function of the row's own scale and bias, so the gather chunks exactly."""
+    g = a.contract.group_size
+    rows, cols = a.q.shape
+    levels = np.arange(1 << a.contract.bits, dtype=np.float32)
+    if chunk_rows is None:
+        chunk_rows = dequant_chunk_rows(cols, np.dtype(np.float32).itemsize)
+    out = np.empty((rows, cols), dtype=np.float32)
+    for start, stop in _row_blocks(rows, chunk_rows):
+        block_rows = stop - start
+        table = (a.scales[start:stop].astype(np.float32)[:, :, None]
+                 * levels[None, None, :]
+                 + a.biases[start:stop].astype(np.float32)[:, :, None])
+        q = a.q[start:stop].reshape(block_rows, cols // g, g)
+        block = np.take_along_axis(table, q, axis=2)
+        out[start:stop] = block.reshape(block_rows, cols)
+    return out
+
+
+def f16_roundtrip_chunked(w32: np.ndarray,
+                          chunk_rows: int | None = None) -> np.ndarray:
+    """The fp16-dequant boundary's weights: two elementwise casts, so chunked."""
+    if chunk_rows is None:
+        chunk_rows = dequant_chunk_rows(w32.shape[1], w32.dtype.itemsize)
+    out = np.empty_like(w32)
+    for start, stop in _row_blocks(w32.shape[0], chunk_rows):
+        out[start:stop] = w32[start:stop].astype(np.float16).astype(np.float32)
+    return out
 
 
 class ArtefactHoists:
@@ -277,34 +403,43 @@ class ArtefactHoists:
 
     Fault dequants are deliberately NOT stored here: six extra fp32 weight
     matrices would add ~9 GB at lm_head, so ``fault_dequants`` yields them
-    one at a time instead.
+    one at a time instead. The fp64 reference is deferred for the same reason
+    - it is the single largest array here and STEP 2 never reads it.
     """
 
     def __init__(self, w: np.ndarray, artefact: QuantArtefact):
-        g = artefact.contract.group_size
         rows, cols = artefact.q.shape
-        levels = 1 << artefact.contract.bits
-        self.w64 = dequantize(artefact, np.float64)
-        self.w32 = dequantize(artefact, np.float32)
-        # lut-gather's weights, exactly member_lut_gather's construction
-        table = (artefact.scales.astype(np.float32)[:, :, None]
-                 * np.arange(levels, dtype=np.float32)[None, None, :]
-                 + artefact.biases.astype(np.float32)[:, :, None])
-        q = artefact.q.reshape(rows, cols // g, g)
-        self.w_lut32 = np.take_along_axis(table, q, axis=2).reshape(rows, cols)
+        g = artefact.contract.group_size
+        self._artefact = artefact
+        self._w64 = None
+        self.w32 = dequant_chunked(artefact, np.float32)
+        self.w_lut32 = lut_gather_chunked(artefact)
         # the int-domain members' operands
         self.qg32 = artefact.q.reshape(rows, cols // g, g).astype(np.float32)
         self.scales32 = artefact.scales.astype(np.float32)
         self.biases32 = artefact.biases.astype(np.float32)
         # the fp16-dequant boundary's weights
-        self.w16_32 = self.w32.astype(np.float16).astype(np.float32)
+        self.w16_32 = f16_roundtrip_chunked(self.w32)
+
+    @property
+    def reference_built(self) -> bool:
+        return self._w64 is not None
+
+    @property
+    def w64(self) -> np.ndarray:
+        """The fp64 reference weights, built on first read. At lm_head they are
+        3.1 GB and the batch-regime probe never asks for them, so building them
+        with the rest spent the probe's whole budget on a matrix it never reads."""
+        if self._w64 is None:
+            self._w64 = dequant_chunked(self._artefact, np.float64)
+        return self._w64
 
 
 def fault_dequants(artefact: QuantArtefact):
     """(name, fp32 dequant of the faulted artefact), one at a time, in
     catalogue order; the consumer frees each before the next is built."""
     for name, fault in FAULTS.items():
-        yield name, dequantize(fault(artefact), np.float32)
+        yield name, dequant_chunked(fault(artefact), np.float32)
 
 
 def eval_ref(x: np.ndarray, w64: np.ndarray) -> np.ndarray:
@@ -379,6 +514,67 @@ def eval_block_tiled(x: np.ndarray, w32: np.ndarray) -> np.ndarray:
 def eval_boundary(x: np.ndarray, w16_32: np.ndarray) -> np.ndarray:
     """boundary_fp16_dequant with the fp16-rounded weights hoisted."""
     return (_f32(x) @ w16_32.T).astype(x.dtype)
+
+
+# ---------------------------------------------------------------------------
+# Run survival: the RSS self-report and the per-step checkpoint. Three runs
+# died at STEP 2 with exit 137 (SIGKILL) and no log past the step header, so
+# the run reports its own footprint as it goes and records each finished step
+# before starting the next.
+# ---------------------------------------------------------------------------
+def rss_gb() -> tuple[float, float]:
+    """(current, peak) resident set size in GB.
+
+    ``ru_maxrss`` is bytes on Darwin and kilobytes elsewhere; current RSS has
+    no stdlib reader, so it comes from ``ps``. Current separates a transient
+    spike from a leak across shapes, peak says how close the spike came to the
+    machine's limit, and only the pair answers the memory hypothesis.
+    """
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    peak_gb = peak / 1e9 if sys.platform == "darwin" else peak / 1e6
+    try:
+        ps = subprocess.run(["ps", "-o", "rss=", "-p", str(os.getpid())],
+                            capture_output=True, text=True, timeout=10)
+        current_gb = int(ps.stdout.strip()) / 1e6  # ps reports kilobytes
+    except (OSError, ValueError, subprocess.SubprocessError):
+        current_gb = peak_gb
+    return current_gb, peak_gb
+
+
+def rss_line() -> str:
+    current, peak = rss_gb()
+    return f"rss {current:.2f} GB, peak {peak:.2f} GB"
+
+
+def checkpoint_fingerprint(provenance: str, shapes) -> dict:
+    """What a checkpoint must agree with before a --resume may reuse it.
+    Resuming across a different artifact or shape set would splice two
+    different calibrations into one attestation."""
+    return {"bits": BITS, "k_ship": K_SHIP, "provenance": provenance,
+            "base_batches": list(BASE_BATCHES),
+            "shapes": {name: list(shape) for name, shape in shapes}}
+
+
+def write_checkpoint(path: Path, fingerprint: dict, steps: dict) -> None:
+    """Atomic: a SIGKILL landing mid-write must not leave a half-written file
+    that the next run then fails to parse."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps({"fingerprint": fingerprint, "steps": steps},
+                              default=float))
+    tmp.replace(path)
+
+
+def read_checkpoint(path: Path, fingerprint: dict) -> dict:
+    """The steps a --resume may reuse; empty when there is nothing sound to
+    reuse, so an absent or truncated file is never a crash."""
+    try:
+        saved = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    if saved.get("fingerprint") != fingerprint:
+        return {}
+    return saved.get("steps", {})
 
 
 # ---------------------------------------------------------------------------
@@ -547,15 +743,23 @@ def _carrier(artefact) -> dict:
 # ---------------------------------------------------------------------------
 # Step 2: the probe driver
 # ---------------------------------------------------------------------------
-def probe_batch_regimes(shapes, session: DeviceMemberSession) -> dict:
+def probe_batch_regimes(shapes, session: DeviceMemberSession,
+                        verbose: bool = True) -> dict:
     """The pre-registered batch-regime probe at every serving shape.
 
     Evaluates one (implementation, dtype) at a time across B = 1..16 and ANDs
     its pairwise matrix into the joint one, bounding residency at lm_head.
+
+    Every stage announces itself with its RSS: this step died three times
+    under SIGKILL with nothing in the log past the header, so the last line
+    printed has to name the shape and the implementation that was live.
     """
     contract = QuantContract(scheme="mlx-affine", bits=BITS, group_size=GROUP_SIZE)
     report = {}
     for name, (d_out, d_in) in shapes:
+        if verbose:
+            print(f"  {name} {d_out}x{d_in}: quantizing ({rss_line()})",
+                  flush=True)
         rng = np.random.default_rng(10_000 + PROBE_SEED)
         w = make_w(d_out, d_in, "normal-0.02", rng)
         artefact, exact = verify_against_mlx(w, contract)
@@ -565,6 +769,8 @@ def probe_batch_regimes(shapes, session: DeviceMemberSession) -> dict:
         hoists = ArtefactHoists(w, artefact)
         carrier = _carrier(artefact)
         w_q, scales, biases = mlx_quantize_hoist(w)
+        if verbose:
+            print(f"    hoists + carrier built ({rss_line()})", flush=True)
         # rng order pinned: float32 then float16
         x16 = {d: make_x(PROBE_BATCH_MAX, d_in, _np_dtype(d), "unit", rng)
                for d in ("float32", "float16")}
@@ -593,12 +799,17 @@ def probe_batch_regimes(shapes, session: DeviceMemberSession) -> dict:
                 outs = {B: fn(x_full[:B]) for B in range(1, PROBE_BATCH_MAX + 1)}
                 matrix &= match_matrix([outs])
                 del outs
+                if verbose:
+                    print(f"    {dtype_name} {impl_name} done ({rss_line()})",
+                          flush=True)
+        current, peak = rss_gb()
         report[name] = {
             "g0_exact": True,
             "matrix": matrix.tolist(),
             "components": [sorted(c) for c in match_components(matrix)],
             "joins": coverage_joins(matrix, BASE_BATCHES),
             "weak_prefix_covered": weak_prefix_cover(matrix, BASE_BATCHES),
+            "rss_gb": {"current": current, "peak": peak},
         }
         del hoists, carrier, w_q, scales, biases
     return report
@@ -608,11 +819,16 @@ def probe_batch_regimes(shapes, session: DeviceMemberSession) -> dict:
 # Step 3: the main grid
 # ---------------------------------------------------------------------------
 def measure_serving(shapes, batches, session: DeviceMemberSession,
-                    verbose: bool) -> dict:
+                    verbose: bool, on_block=None) -> dict:
     """Every record for the serving grid: the standing quantities, plus the
     batch axis, through the tested exact-value paths. Per (shape, draw, seed)
     block the rng stream is consumed in the pinned order: make_w first, then
-    make_x per (batch, mode, dtype), batch outermost."""
+    make_x per (batch, mode, dtype), batch outermost.
+
+    ``on_block`` receives the records so far after each (shape, draw), so a
+    death inside this step leaves the records it already earned on disk. It is
+    a recorder only: a resume never restarts mid-step, because the rng stream
+    order above is pinned across the whole step."""
     contract = QuantContract(scheme="mlx-affine", bits=BITS, group_size=GROUP_SIZE)
     records, exactness = [], []
     for name, (d_out, d_in) in shapes:
@@ -673,7 +889,9 @@ def measure_serving(shapes, batches, session: DeviceMemberSession,
                 del hoists, carrier, block, xs, w_q, scales, biases
             if verbose:
                 print(f"    {name} {d_out}x{d_in} {draw} done "
-                      f"({len(records)} records)")
+                      f"({len(records)} records, {rss_line()})", flush=True)
+            if on_block is not None:
+                on_block(records)
     return {"records": records, "bit_exact": all(exactness),
             "exact_checks": len(exactness)}
 
@@ -794,6 +1012,11 @@ def main() -> int:
                         help="pre-slot smoke: the probe at kv_proj (1024, 2560) "
                              "only, no continuity run, no main grid")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--resume", action="store_true",
+                        help="reuse the finished steps in the checkpoint left "
+                             "by an earlier run of the SAME shapes and "
+                             "artifact; step granularity only, and every "
+                             "reused step is named in the output JSON")
     args = parser.parse_args()
 
     config, provenance = resolve_serving_source(ARTIFACT_DIR)
@@ -806,6 +1029,15 @@ def main() -> int:
     print(f"source: {provenance}")
     print("serving shapes: "
           + ", ".join(f"{n} {d_out}x{d_in}" for n, (d_out, d_in) in shapes))
+    print(f"start: {rss_line()}")
+
+    fingerprint = checkpoint_fingerprint(provenance, shapes)
+    saved = read_checkpoint(CHECKPOINT_PATH, fingerprint) if args.resume else {}
+    steps, resumed = {}, []
+
+    def checkpoint(step: str, payload) -> None:
+        steps[step] = payload
+        write_checkpoint(CHECKPOINT_PATH, fingerprint, steps)
 
     try:
         session = DeviceMemberSession()
@@ -814,27 +1046,41 @@ def main() -> int:
         return 2
 
     if args.probe_validate:
-        probe = probe_batch_regimes([("kv_proj", (1024, 2560))], session)
+        probe = probe_batch_regimes([("kv_proj", (1024, 2560))], session,
+                                    not args.quiet)
         _print_probe(probe)
         return 0
 
     # -- step 0: the continuity anchor --------------------------------------
-    ok, detail = continuity_anchor(session)
+    # The marker stays out of `detail`: `detail` is what gets checkpointed, so
+    # concatenating it there would stack a marker per resume.
+    if "continuity" in saved:
+        resumed.append("continuity")
+        ok, detail, note = True, saved["continuity"], " [RESUMED, not re-measured]"
+    else:
+        (ok, detail), note = continuity_anchor(session), ""
     print(f"\nSTEP 0 continuity anchor at {CONTINUITY_SHAPE}, bits={BITS}: "
-          f"{'REPRODUCED - ' + detail if ok else 'FAILED - ' + detail}")
+          f"{'REPRODUCED - ' + detail + note if ok else 'FAILED - ' + detail}")
     if not ok:
         print("STOP: the pipeline does not reproduce ADR 0012's records; "
               "toolchain drift is a finding to raise with the coordinator, "
               "and nothing new is measured on top of it")
         return 1
+    checkpoint("continuity", detail)
 
     # -- steps 1+2: G0 on the probe artefacts, then the batch-regime probe --
     print("\nSTEP 2 batch-regime probe (G0 checked on each probe artefact):")
-    probe = probe_batch_regimes(shapes, session)
+    if "probe" in saved:
+        resumed.append("probe")
+        probe = saved["probe"]
+        print("  [RESUMED from the checkpoint, not re-measured]")
+    else:
+        probe = probe_batch_regimes(shapes, session, not args.quiet)
     _print_probe(probe)
     if not all(p.get("g0_exact") for p in probe.values()):
         print("STOP: G0 failed on a probe artefact; nothing here describes MLX")
         return 1
+    checkpoint("probe", probe)
     joins = sorted({b for p in probe.values() for b in p["joins"]})
     batches = tuple(sorted(set(BASE_BATCHES) | set(joins)))
     print(f"  grid batches: base {BASE_BATCHES}"
@@ -842,7 +1088,9 @@ def main() -> int:
 
     # -- step 3: the main grid ----------------------------------------------
     print("\nSTEP 3 main grid:")
-    measured = measure_serving(shapes, batches, session, not args.quiet)
+    measured = measure_serving(
+        shapes, batches, session, not args.quiet,
+        on_block=lambda partial: checkpoint("grid_partial", partial))
     records = measured["records"]
     print(f"  G0: {'bit-exact on all' if measured['bit_exact'] else 'FAILED'} "
           f"({measured['exact_checks']} checks)")
@@ -850,6 +1098,8 @@ def main() -> int:
         print("STOP: canonical_quantize is not bit-exact against mx.quantize "
               "at a serving shape; nothing here describes MLX")
         return 1
+    steps.pop("grid_partial", None)
+    checkpoint("grid", records)
 
     # -- step 4: K demand ---------------------------------------------------
     demands = demand_table(records)
@@ -926,6 +1176,7 @@ def main() -> int:
     OUT_PATH.write_text(json.dumps({
         "k_ship": K_SHIP, "bits": BITS,
         "provenance": provenance, "pinned_hashes": hashes,
+        "resumed_steps": resumed,
         "shapes": {n: list(s) for n, s in shapes},
         "base_batches": list(BASE_BATCHES), "grid_batches": list(batches),
         "probe": probe,
@@ -937,6 +1188,10 @@ def main() -> int:
         "records": records,
     }, default=float))
     print(f"\nrecords: {OUT_PATH}")
+    print(f"peak footprint: {rss_line()}")
+    if resumed:
+        print(f"RESUMED steps (not re-measured in this process): {resumed}; "
+              f"ADR 0013 must say so")
 
     if misses:
         print(f"DEMAND MISS at {misses}: per the pre-registered branch, "
@@ -954,10 +1209,13 @@ def _print_probe(probe: dict) -> None:
             continue
         components = p["components"]
         weak = p["weak_prefix_covered"]
+        rss = p.get("rss_gb")
+        rss_note = (f" [rss {rss['current']:.2f} GB, "
+                    f"peak {rss['peak']:.2f} GB]" if rss else "")
         print(f"  {name}: {len(components)} regime component(s) "
               f"{[f'{min(c)}..{max(c)}' for c in components]}, "
               f"joins {p['joins'] or 'none'}, "
-              f"weak-prefix covered {weak or 'none'}")
+              f"weak-prefix covered {weak or 'none'}{rss_note}")
 
 
 if __name__ == "__main__":
