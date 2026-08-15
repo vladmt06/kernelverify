@@ -271,7 +271,15 @@ def render_measurements(claims: list[Claim]) -> list[str]:
         row = claim.row
         result = row.get("result") or {}
         model = (row.get("model") or {}).get("name", "-")
-        kind = (row.get("measurement") or {}).get("kind", "-")
+        measurement = row.get("measurement") or {}
+        kind = measurement.get("kind", "-")
+        # A scoped row has no cross-stack counterpart (the batch_decode cells
+        # are mlx-only while the llama.cpp serving arm is deferred, D6), and
+        # the scope must reach the reader or the aggregate will be set beside
+        # the other stack's single-stream decode anyway.
+        scope = measurement.get("stack_scope")
+        if scope:
+            kind = f"{kind} ({scope})"
         resource, pct = utilisation(row)
         # The run identity keeps a second binding run from rendering as an
         # indistinguishable duplicate of the first: two absolutes for the same

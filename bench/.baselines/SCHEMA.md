@@ -5,6 +5,9 @@ A v2 group was one harness invocation: every spec in the run shared one group an
 A v3 group is one workload cell: exactly the specs that realise one workload (same kind, matmul width, and prefill length), with the arms alternating back to back every round.
 A v3 group is therefore one real A/B session by construction, never a relabel of a run-wide rotation, and `sampling.group` is `<run_id>/<cell label>` rather than the bare run id.
 Version 3 also adds `model.logical_name` (required on measurement rows, one canonical spelling from a constrained set) and constrains `roofline.binding_resource` to exactly `compute`, `memory`, `unknown`.
+Version 3 later gained the `batch_decode` kind (2026-08-15): serving decode cells at `n_parallel` streams, mlx-only this block.
+It took no version bump because existing cells and consumers are untouched.
+The ruled regression rule is what makes that safe: new cells only add, never replace, and every existing v3 cell of the 2026-08-14 record must reproduce within the producer's repeat-disagreement limit (`tests/test_measure_baselines.py` enforces both).
 Version 2 added `sampling` (how the row was interleaved) and the dispersion fields on `result`, both of which gate what a consumer may do with a row.
 Version 1 rows were produced before those gates existed, were never consumed, and were discarded rather than left in the record claiming a bindingness they had not been checked for.
 An earlier revision of this document said version 2 in its header while the field table below still said 1; the table is part of the contract, so it now states the version it documents and must move with the header.
@@ -57,7 +60,7 @@ A published absolute number requires `provenance_tier` in (`owner-run`, `rental-
 | `idle_before`, `idle_after` | object | load1/5/15, load_threshold, power {source, low_power_mode, thermal_warning}, idle, blockers |
 | `stack` | object | name, version, plus build_flags and path where they exist; `mlx-lm` rows also carry `mlx_version` |
 | `model` | object or null | name, `logical_name`, path, `sha256_32`, quant. Null on ceiling rows. `logical_name` (v3) is the cross-stack identity of what ran, one canonical spelling from a constrained set (currently `qwen3-4b`); `name` is the per-stack artefact and differs across stacks for one logical model |
-| `measurement` | object | kind, matmul_width, n_prompt, n_gen, width_mechanism |
+| `measurement` | object | kind, matmul_width, n_prompt, n_gen, width_mechanism; `batch_decode` rows add n_parallel and stack_scope |
 | `result` | object | metric, median, spread_pct, reps, samples, min_sample_ms, floor_ms, below_timing_floor |
 | `sampling` | object | interleaved, rotation, rounds, group, group_members. Required on every non-ceiling row. v3: `group` is one workload cell (`<run_id>/<cell label>`), `group_members` are its arms only, `rotation` is `arm-alternation` |
 | `roofline` | object | present on every non-ceiling row, see below |
@@ -70,10 +73,16 @@ A published absolute number requires `provenance_tier` in (`owner-run`, `rental-
 | `decode` | single-stream generation, matmul width 1 |
 | `prefill` | prompt processing at `n_prompt` tokens |
 | `matmul_width` | the weight matmul's n dimension swept as a first-class row |
+| `batch_decode` | serving decode: `n_parallel` independent streams decoded together, one forward pass per step; `result.median` is the AGGREGATE tokens/s across streams |
 
 `measurement.width_mechanism` is `prompt-width` on llama.cpp and `batch-size` on MLX.
 Both widen the same matmul dimension, but they are not the same workload: prompt width is one causal sequence, batch size is independent streams.
 Render the mechanism next to the width or the two stacks will look more comparable than they are.
+
+`batch_decode` rows additionally carry `measurement.n_parallel` (the stream count, which is also the decode matmul's width) and `measurement.stack_scope`.
+This block ships these cells for mlx-lm only, `stack_scope: "mlx-only"`: llama-bench has no parallel mode, and the honest llama.cpp path (llama-batched-bench plus a new parser) is deferred to its own block - TODOS.md carries the scoping.
+The producer refuses to write a llama.cpp `batch_decode` row until that block lands, and refuses an unlabeled one, because an unlabeled serving aggregate is exactly the number a reader would set beside the other stack's single-stream decode.
+Each `batch_decode` cell is a single-arm sampling group by construction, so no cross-stack ratio can form from these rows; per-stream throughput is `result.median / n_parallel`, derivable rather than stored.
 
 ### `roofline`
 
@@ -106,3 +115,5 @@ Use `bandwidth_read` for decode-dominated rows: decode streams weights and barel
 - Refuse to render a comparative claim across rows whose `sampling.interleaved` is false or absent, the same way absolutes are refused when `binding` is false. A contributed row from someone else's harness is the case this exists for.
 - `result.spread_pct` is `(max - min) / median` across repeats. Treat a difference smaller than the spread as no difference.
 - A `run_id` may contain both binding and non-binding rows only if the machine changed state mid-run; `idle_before` and `idle_after` say which end moved.
+- Render `measurement.stack_scope` next to the kind wherever the kind appears.
+  A `batch_decode` row's aggregate looks like a decode number at a flattering multiple, and only the scope label tells a reader it has no cross-stack counterpart to be compared against.
