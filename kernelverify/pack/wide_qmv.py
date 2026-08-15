@@ -137,6 +137,7 @@ WIDE_QMV_MSL = """
 INPUT_NAMES = ["x", "w_q", "scales", "biases"]
 OUTPUT_NAMES = ["out"]
 KERNEL_NAME = "kv_wide_qmv"
+SUPPORTED_BITS = (2, 3, 4)
 
 
 def should_dispatch(m: int, bits: int, d_out: int, d_in: int) -> bool:
@@ -167,8 +168,9 @@ def should_dispatch(m: int, bits: int, d_out: int, d_in: int) -> bool:
     a direction either way - undecided, not bad. M = 4 is a measured LOSS at
     q_proj only, and a measured WIN at lm_head that ruling D2 does not route
     (routed_windows.EXCLUDED_CELLS has the reason). Two more REFUSED cells sit
-    lower still, at M = 2 (gate/up_proj) and M = 3 (down_proj). Only M <= 3 is
-    a measured loss everywhere it was priced. An undecided cell routes to MLX
+    lower still, at M = 2 (gate/up_proj) and M = 3 (down_proj), so M = 1 is the
+    only width that is a measured loss at every shape it was priced at, and
+    M = 2 and M = 3 lose at five of six. An undecided cell routes to MLX
     for the same reason a losing one does - no evidence supports taking it -
     but it is one pricing run away from moving, not a closed question.
     """
@@ -178,9 +180,6 @@ def should_dispatch(m: int, bits: int, d_out: int, d_in: int) -> bool:
 def rows_per_simdgroup(m: int) -> int:
     """R, from the measured register wall: 4 up to M = 10, then 2."""
     return 4 if m <= 10 else 2
-
-
-SUPPORTED_BITS = (2, 3, 4)
 
 
 def pack_codes(q: np.ndarray, bits: int) -> np.ndarray:

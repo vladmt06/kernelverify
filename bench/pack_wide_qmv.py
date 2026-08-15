@@ -221,7 +221,6 @@ def verify(runner: MetalRunner, e2e_m: list | None = None, *,
     group, so the evidence never holds more than one group's arrays. The
     certificate emitter passes `retain_inputs=True` because its extraction
     capture re-dispatches the gate's own calls."""
-    override = None if e2e_m is None else list(e2e_m)
     evidence = GateEvidence(gate="pack_wide_qmv", policy=GATE_POLICY,
                             seed_protocol=SEED_PROTOCOL)
     if E2E_SHAPES:
@@ -231,10 +230,9 @@ def verify(runner: MetalRunner, e2e_m: list | None = None, *,
     template = kernel_spec()
     coverage = [(d_out, d_in, bits, list(VERIFY_M), "")
                 for (d_out, d_in) in SHAPES for bits in SUPPORTED_BITS]
-    coverage += [(s.d_out, s.d_in, E2E_BITS,
-                  e2e_verify_m(s.d_out, s.d_in) if override is None else override,
-                  s.name)
-                 for s in E2E_SHAPES]
+    for s in E2E_SHAPES:
+        widths = e2e_verify_m(s.d_out, s.d_in) if e2e_m is None else list(e2e_m)
+        coverage.append((s.d_out, s.d_in, E2E_BITS, widths, s.name))
     for d_out, d_in, bits, verify_m, site in coverage:
         site_tag = f" ({site})" if site else ""
         w, art = artefact_for(d_out, d_in, seed=7, bits=bits)

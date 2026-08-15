@@ -102,12 +102,12 @@ def _derive(record: dict) -> tuple[dict, dict]:
     LOSS and REFUSED cells route nowhere; REFUSED in particular is undecided,
     not measured-bad.
 
-    A shape that was priced and won nowhere stays in `priced` and drops out of
-    `windows`, so "0 of 6 shapes" can still name its denominator.
+    A shape that was priced and won nowhere stays in PRICED_SHAPES and drops
+    out of ROUTED_WINDOWS, so "0 of 6 shapes" can still name its denominator.
     """
-    bits = record["bits"]
+    bits = record["bits"]          # one recording prices one bit width
 
-    priced: dict[int, list[tuple[int, int]]] = {}
+    shapes: list[tuple[int, int]] = []
     windows: dict[tuple[int, int, int], set[int]] = {}
     for point in record["points"]:
         m, r = point["m"], point["r"]
@@ -117,7 +117,6 @@ def _derive(record: dict) -> tuple[dict, dict]:
                 f"launch config launches R={ROWS_PER_SIMDGROUP[m]}: the "
                 "recording does not describe the shipped kernel")
         shape = (point["d_out"], point["d_in"])
-        shapes = priced.setdefault(bits, [])
         if shape not in shapes:
             shapes.append(shape)
         window = windows.setdefault((bits, *shape), set())
@@ -125,7 +124,7 @@ def _derive(record: dict) -> tuple[dict, dict]:
             window.add(m)
     for key, excluded in EXCLUDED_CELLS.items():
         windows[key] -= excluded
-    return ({b: tuple(s) for b, s in priced.items()},
+    return ({bits: tuple(shapes)},
             {key: frozenset(ms) for key, ms in windows.items() if ms})
 
 
@@ -166,8 +165,10 @@ def dispatch_boundary_prose(bits: int, m: int) -> str:
                 f"lands; {tail}")
     routed = [f"{d_out}x{d_in}" for d_out, d_in in shapes
               if m in window_for(bits, d_out, d_in)]
-    where = (f"{len(routed)} of the {len(shapes)} priced dispatch shapes "
-             f"({', '.join(routed)})" if routed
-             else f"none of the {len(shapes)} priced dispatch shapes")
+    if routed:
+        where = (f"{len(routed)} of the {len(shapes)} priced dispatch shapes "
+                 f"({', '.join(routed)})")
+    else:
+        where = f"none of the {len(shapes)} priced dispatch shapes"
     return (f"{head}: at BITS={bits}, M={m} it routes here at {where} and "
             f"nowhere else, per {PROVENANCE}; {tail}")
