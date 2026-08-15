@@ -32,17 +32,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import mlx.core as mx  # noqa: E402
 
-from kernelverify.runners.compare import DEFAULT_SPREAD_LIMIT  # noqa: E402
-
 # Below this, a single sample is measuring the power manager (see
 # bench/machine_state.py TIMING_FLOOR_MS for why the floor exists at all;
 # this is the batching target that keeps every sample safely above it).
 MIN_SAMPLE_MS = 5.0
 
-# The canary limit is the SAME quantity runners/compare.py rejects rounds on
-# (DEFAULT_SPREAD_LIMIT, decision D6: the reference arm's max/min per round),
-# imported so the gates and the live-worker comparator cannot drift apart.
-MAX_CANARY_SPREAD = DEFAULT_SPREAD_LIMIT
+# The same QUANTITY runners/compare.py rejects rounds on: decision D6's
+# reference-arm max/min per round, which is why both read 1.5 today. Held as a
+# literal rather than imported from DEFAULT_SPREAD_LIMIT, because D6 sets the
+# limit per class - 1.5x for kernel arms, tighter for steadier quantities - so
+# tightening the live comparator would otherwise silently re-gate every pack
+# certificate this constant publishes. tests/test_interleave.py asserts the two
+# are equal today, so a deliberate divergence is a test to update rather than a
+# behaviour change nobody sees.
+MAX_CANARY_SPREAD = 1.5
 
 
 def dispatch(build_one, copies: int) -> float:
