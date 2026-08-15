@@ -26,8 +26,9 @@ import sys
 from pathlib import Path
 from statistics import median
 
+from external import TEST_BACKEND_OPS
+
 ROOT = Path(__file__).resolve().parent.parent
-TEST_BACKEND_OPS = Path("/Users/vlad/llama.cpp/build/bin/test-backend-ops")
 ROOFLINE = ROOT / "bench" / "results" / "roofline.json"
 OUT = ROOT / "bench" / "results" / "kernel_baseline.json"
 

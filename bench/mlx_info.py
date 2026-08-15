@@ -16,6 +16,12 @@ import json
 import struct
 from pathlib import Path
 
+# The byte models are shared with the GGUF side deliberately: both cost
+# models emit the same keys (body_bytes, head_bytes, n_head_kv, d_head_*,
+# n_layer), so bytes-per-token is one formula, not two copies. The readers
+# stay separate because the file formats have nothing in common.
+from gguf_info import gen_bytes, kv_bytes  # noqa: F401 - re-exported
+
 DTYPE_BYTES = {
     "F64": 8, "F32": 4, "F16": 2, "BF16": 2,
     "I64": 8, "I32": 4, "I16": 2, "I8": 1, "U8": 1, "U32": 4, "U16": 2, "BOOL": 1,
@@ -86,15 +92,6 @@ def cost_model(model_dir: Path) -> dict:
         "n_tensors": tensors,
         "quantization": config.get("quantization"),
     }
-
-
-def gen_bytes(cost: dict) -> int:
-    return cost["body_bytes"] + cost["head_bytes"]
-
-
-def kv_bytes(cost: dict, context: float, bytes_per_elem: int = 2) -> int:
-    per_position = cost["n_head_kv"] * (cost["d_head_k"] + cost["d_head_v"])
-    return int(cost["n_layer"] * per_position * context * bytes_per_elem)
 
 
 def resolve_hf_model(repo: str, cache: Path | None = None) -> Path:

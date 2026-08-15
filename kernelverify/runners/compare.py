@@ -32,7 +32,7 @@ import statistics
 from dataclasses import dataclass, field
 
 from kernelverify.runners.metal import MetalRunner, _EventStream, _stream
-from kernelverify.runners.result import RunResult, RunStatus
+from kernelverify.runners.result import RunResult
 from kernelverify.runners.spec import KernelSpec, RunCase, SpecError
 
 DEFAULT_SPREAD_LIMIT = 1.5  # decision D6: the reference arm's max/min per round

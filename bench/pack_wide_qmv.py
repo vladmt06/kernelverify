@@ -24,9 +24,9 @@ one is enough.
 
 from __future__ import annotations
 
+import json
 import statistics
 import sys
-import time
 from pathlib import Path
 
 import numpy as np
@@ -35,15 +35,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import mlx.core as mx  # noqa: E402
 
+from interleave import (  # noqa: E402
+    MAX_CANARY_SPREAD,
+    MIN_SAMPLE_MS,
+    calibrate_copies,
+    dispatch,
+)
+from kernelverify.pack.dispatch_shapes import (  # noqa: E402
+    PINNED_QWEN3_4B,
+    qmv_dispatch_shapes,
+)
 from kernelverify.extraction.surface import LiveCall  # noqa: E402
 from kernelverify.pack.evidence import (  # noqa: E402
     CaseEvidence,
     GateEvidence,
-    output_fingerprint,
+    input_fingerprints,
     render_banner,
 )
 from kernelverify.pack.verify import (  # noqa: E402
-    judge,
+    judge_case,
     qmv_inputs,
     reference_and_tolerance,
 )
@@ -55,6 +65,7 @@ from kernelverify.pack.wide_qmv import (  # noqa: E402
     kernel_spec,
     launch_config,
     pack_codes,
+    should_dispatch,
 )
 from kernelverify.runners import MetalRunner, RunCase, specialize  # noqa: E402
 from kernelverify.schemas.quant_contract import (  # noqa: E402
@@ -65,31 +76,113 @@ from kernelverify.schemas.quant_contract import (  # noqa: E402
 SHAPES = [(2560, 2560), (4096, 4096)]
 VERIFY_M = [1, 4, 5, 6, 8, 11]
 TIMED_M = [1, 2, 4, 5, 6, 7, 8, 10, 11]
-MIN_SAMPLE_MS = 5.0
 ROUNDS = 7
 WORKING_SET_MB = 512
 
-# A round is only trustworthy if the reference arm reads the same each time.
-# Twice now a run has reported a kernel "win" that was the machine's clock
-# moving under it: MLX's own time for one fixed shape moved 2.9x inside a
-# single interleaved round while nothing about MLX changed. Interleaving alone
-# does not catch that, it only makes both arms suffer it together, so the
-# reference arm's own spread is checked and the ratios are withheld when it is
-# too wide to support them.
-MAX_CANARY_SPREAD = 1.5
+# The serving block's E2E coverage (ruling D1): the qmv shapes mlx-lm
+# dispatches when decoding Qwen3-4B, verified at 3 bits only (D4 cut 2-bit
+# from the block) and at exactly the M values the pack routes to each of
+# them - which is not the same list at every shape.
+E2E_BITS = 3
+
+# The pinned artifact lives in the MAIN checkout (bench/.models is gitignored
+# and never propagates to worktrees), so the path is absolute and canonical
+# across lanes, like /Users/vlad/llama.cpp.
+QWEN3_3BIT_ARTIFACT = Path("/Users/vlad/kernelverify/bench/.models/qwen3-4b-3bit-g64")
+
+
+def e2e_config() -> tuple[dict, str]:
+    """The artifact's own config when it has landed, else the pinned
+    Qwen/Qwen3-4B architecture fields, with a provenance string either way."""
+    config_path = QWEN3_3BIT_ARTIFACT / "config.json"
+    if config_path.exists():
+        return json.loads(config_path.read_text()), f"artifact {config_path}"
+    return dict(PINNED_QWEN3_4B), ("pinned Qwen/Qwen3-4B config "
+                                   "(artifact not landed yet)")
+
+
+# Derived once, together, so the recorded provenance always names the config
+# that actually produced the shapes in use.
+E2E_CONFIG, E2E_PROVENANCE = e2e_config()
+E2E_SHAPES = qmv_dispatch_shapes(E2E_CONFIG)
+
+
+def e2e_verify_m(d_out: int, d_in: int) -> list[int]:
+    """Exactly the tile widths should_dispatch routes to this kernel AT THIS
+    SHAPE, over the block's serving range B = 1..16.
+
+    Per-shape because routing is per-shape: five of the six dispatch shapes
+    route M = 5..9 and lm_head routes M = 5..10, so one list applied to every
+    shape would either leave lm_head's widest routed cell unverified or verify
+    five cells the pack never dispatches. Gate coverage follows the routing
+    table cell for cell.
+    """
+    return [m for m in range(1, 17) if should_dispatch(m, E2E_BITS, d_out, d_in)]
+
+
+def weights_for(d_out: int, d_in: int, seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    return (rng.standard_normal((d_out, d_in)).astype(np.float32) * 0.02).astype(np.float16)
 
 
 def artefact_for(d_out: int, d_in: int, seed: int, bits: int = 4):
-    rng = np.random.default_rng(seed)
-    w = (rng.standard_normal((d_out, d_in)).astype(np.float32) * 0.02).astype(np.float16)
+    w = weights_for(d_out, d_in, seed)
     return w, canonical_quantize(w, QuantContract(bits=bits, group_size=64))
+
+
+def artefact_bytes(d_out: int, d_in: int, bits: int) -> float:
+    """Bytes one quantized weight set actually occupies: packed codes plus
+    fp16 scale and bias per 64-wide group."""
+    return d_out * d_in * bits / 8 + 2 * (d_out * d_in / 64) * 2
+
+
+def weight_sets(d_out: int, d_in: int, bits: int) -> list:
+    """Quantized weight sets totalling at least WORKING_SET_MB, to rotate
+    over during timing: a few-MB buffer reused across iterations reports
+    cache bandwidth, not memory bandwidth."""
+    set_bytes = artefact_bytes(d_out, d_in, bits)
+    n_sets = max(2, min(64, int(WORKING_SET_MB * 1e6 // set_bytes) + 1))
+    sets = [mx.quantize(mx.array(weights_for(d_out, d_in, seed=100 + seed)),
+                        group_size=64, bits=bits)
+            for seed in range(n_sets)]
+    mx.eval([a for s in sets for a in s])
+    return sets
+
+
+def interleaved_samples(build_a, build_b, rounds: int = ROUNDS,
+                        guard=None) -> tuple:
+    """Per-round times of two arms, sampled interleaved within every round.
+
+    Interleaving is load-bearing and NOT sufficient (AGENTS.md): it equalizes
+    a clock excursion across the arms but cannot detect one, so the caller
+    must still gate on the reference arm's own spread. Both arms are warmed
+    first; the dispatch batch is calibrated on arm A to MIN_SAMPLE_MS.
+
+    ``guard``, when given, is called once per round with a cell label and may
+    refuse by raising (the pricing probe's memory checks); None leaves the
+    microbenchmark path exactly as it was. The seam lives HERE because this
+    loop is shared and a diverged sampler copy is the ADR 0004 two-halves
+    mistake.
+    """
+    mx.eval(build_a(0), build_b(0))
+    mx.synchronize()
+    copies = calibrate_copies(lambda c: dispatch(build_a, c))
+    a_samples, b_samples = [], []
+    for i in range(rounds):
+        if guard is not None:
+            guard(f"round {i + 1}/{rounds}")
+        a_samples.append(dispatch(build_a, copies) / copies)
+        b_samples.append(dispatch(build_b, copies) / copies)
+    return a_samples, b_samples
 
 
 # --------------------------------------------------------------------------
 # verification
 # --------------------------------------------------------------------------
 GATE_POLICY = (
-    "pack-gate fixed-case sweep: 2 matrix shapes x {unit, corpus} input "
+    "pack-gate fixed-case sweep: 2 microbenchmark matrix shapes at every "
+    "supported bit width, plus the six Qwen3-4B E2E decode dispatch shapes "
+    "at 3 bits over each shape's OWN routed M values, x {unit, corpus} input "
     "scales per (BITS, M) specialization, judged against the shipped "
     "NATIVE_OPS['quantized_matmul'] reference and tolerance; artefact bytes "
     "checked identical to mx.quantize per (shape, bits). This is NOT the "
@@ -102,11 +195,40 @@ SEED_PROTOCOL = (
 )
 
 
-def verify(runner: MetalRunner) -> GateEvidence:
+def verify(runner: MetalRunner, e2e_m: list | None = None, *,
+           guard=None, retain_inputs: bool = False) -> GateEvidence:
+    """The correctness gate. By default each E2E shape is covered at exactly
+    the tile widths the pack routes to it, which differ by shape. `e2e_m`
+    overrides that with one explicit list for every E2E shape: the pricing
+    probe passes its full sweep so that nothing it times is unverified, and a
+    caller pricing a shape that has no routing table entry yet passes the
+    widths it means to cover.
+
+    ``guard`` is called with a cell label before each tile width and after
+    each coverage group is judged, and may refuse by raising - the pricing
+    probe's memory checks enter through this seam because the tile-width
+    loop is shared with the microbenchmark gate (a diverged sampler copy is
+    the ADR 0004 two-halves mistake). None means no checks.
+
+    Evidence retention follows ruling D2: every case records a sha256 per
+    input, and a judged passing case's arrays are dropped after its coverage
+    group, so the evidence never holds more than one group's arrays. The
+    certificate emitter passes `retain_inputs=True` because its extraction
+    capture re-dispatches the gate's own calls."""
     evidence = GateEvidence(gate="pack_wide_qmv", policy=GATE_POLICY,
                             seed_protocol=SEED_PROTOCOL)
+    if E2E_SHAPES:
+        evidence.checks.append(CaseEvidence(
+            label=f"E2E dispatch shapes derived from {E2E_PROVENANCE}",
+            passed=True))
     template = kernel_spec()
-    for (d_out, d_in), bits in [(s, b) for s in SHAPES for b in SUPPORTED_BITS]:
+    coverage = [(d_out, d_in, bits, list(VERIFY_M), "")
+                for (d_out, d_in) in SHAPES for bits in SUPPORTED_BITS]
+    for s in E2E_SHAPES:
+        widths = e2e_verify_m(s.d_out, s.d_in) if e2e_m is None else list(e2e_m)
+        coverage.append((s.d_out, s.d_in, E2E_BITS, widths, s.name))
+    for d_out, d_in, bits, verify_m, site in coverage:
+        site_tag = f" ({site})" if site else ""
         w, art = artefact_for(d_out, d_in, seed=7, bits=bits)
         packed = pack_codes(art.q, bits)
 
@@ -117,14 +239,17 @@ def verify(runner: MetalRunner) -> GateEvidence:
                      and np.array_equal(art.scales, np.array(mx_sc))
                      and np.array_equal(art.biases, np.array(mx_bi)))
         evidence.checks.append(CaseEvidence(
-            label=f"{d_out}x{d_in} {bits}-bit artefact identical to mx.quantize",
+            label=(f"{d_out}x{d_in}{site_tag} {bits}-bit artefact identical "
+                   f"to mx.quantize"),
             passed=identical))
 
         # One spec per tile width M (M and R are compile-time constants in the
         # raw door), all sharing one worker session as one candidate.
         rng = np.random.default_rng(11)
         spec_batches, case_refs = [], []
-        for m in VERIFY_M:
+        for m in verify_m:
+            if guard is not None:
+                guard(f"verify {d_out}x{d_in}{site_tag} {bits}-bit M={m}")
             grid, threadgroup, r = launch_config(d_out, m)
             raw_template = {"T": "half", "BITS": bits, "M": m, "R": r}
             spec = specialize(template, raw_template)
@@ -136,36 +261,33 @@ def verify(runner: MetalRunner) -> GateEvidence:
                      * scale).astype(np.float16)
                 ref, tol = reference_and_tolerance(
                     "quantized_matmul", qmv_inputs(x, w, bits))
-                label = f"{bits}-bit M={m} {tag} {d_out}x{d_in}"
+                label = f"{bits}-bit M={m} {tag} {d_out}x{d_in}{site_tag}"
+                case_inputs = {"x": x, "w_q": packed,
+                               "scales": art.scales, "biases": art.biases}
                 cases.append(RunCase(
-                    inputs={"x": x, "w_q": packed,
-                            "scales": art.scales, "biases": art.biases},
+                    inputs=case_inputs,
                     params={"d_in_arg": d_in, "d_out_arg": d_out,
                             "row_blocks": grid[1]},
                     output_shapes=[((m, d_out), "float16")],
                     label=label))
                 spec_ev.calls.append(LiveCall(
-                    inputs={"x": x, "w_q": packed,
-                            "scales": art.scales, "biases": art.biases},
+                    inputs=case_inputs,
                     output_shapes=[((m, d_out), "float16")],
                     grid=grid, threadgroup=threadgroup,
                     template=(("T", "float16"), ("BITS", bits),
                               ("M", m), ("R", r)),
                     label=label))
-                case_refs.append((spec_ev, label, ref, tol))
+                case_refs.append((spec_ev, label, ref, tol,
+                                  input_fingerprints(case_inputs)))
             spec_batches.append((spec, cases))
 
         results = [r for batch in runner.run_candidate(spec_batches) for r in batch]
-        for result, (spec_ev, label, ref, tol) in zip(results, case_refs):
-            if not result.ok:
-                spec_ev.cases.append(CaseEvidence(
-                    label=label, passed=False, tol=tol,
-                    detail=f"runner {result.status.value}: {result.detail}"))
-                continue
-            v = judge(result.outputs[0], ref, tol)
-            spec_ev.cases.append(CaseEvidence(
-                label=label, passed=v.ok, err=v.err, tol=v.tol,
-                output_sha256=output_fingerprint(result.outputs[0])))
+        for result, (spec_ev, label, ref, tol, in_sha) in zip(results, case_refs):
+            judge_case(spec_ev, result, label, ref, tol, input_sha256=in_sha)
+        if not retain_inputs:
+            evidence.drop_verified_inputs()
+        if guard is not None:
+            guard(f"verified {d_out}x{d_in}{site_tag} {bits}-bit")
 
     render_banner(evidence, "correctness (runner-isolated, Phase 0 contract, "
                             f"K = {K_QUANT:g}):")
@@ -173,26 +295,8 @@ def verify(runner: MetalRunner) -> GateEvidence:
 
 
 # --------------------------------------------------------------------------
-# timing
+# timing (engine shared with the other gates: bench/interleave.py)
 # --------------------------------------------------------------------------
-def calibrate_copies(sample) -> int:
-    """Fewest copies per dispatch that still reach MIN_SAMPLE_MS."""
-    copies = 8
-    while copies < 4096:
-        if sample(copies) * 1e3 >= MIN_SAMPLE_MS:
-            return copies
-        copies *= 2
-    return copies
-
-
-def dispatch(build_one, copies: int) -> float:
-    outs = [build_one(i) for i in range(copies)]
-    t0 = time.perf_counter()
-    mx.eval(outs)
-    mx.synchronize()
-    return time.perf_counter() - t0
-
-
 def bench() -> bool:
     kernel = build(mx)
     any_unstable = False
@@ -200,15 +304,11 @@ def bench() -> bool:
           f">= {MIN_SAMPLE_MS} ms, weights rotated over {WORKING_SET_MB} MB")
 
     for (d_out, d_in), bits in [(s, b) for s in SHAPES for b in SUPPORTED_BITS]:
-        weight_bytes = d_out * d_in * bits / 8 + 2 * (d_out * d_in / 64) * 2
-        n_sets = max(2, min(64, int(WORKING_SET_MB * 1e6 // weight_bytes) + 1))
-        sets = []
-        for seed in range(n_sets):
-            w, _ = artefact_for(d_out, d_in, seed=100 + seed)
-            sets.append(mx.quantize(mx.array(w), group_size=64, bits=bits))
-        mx.eval([a for s in sets for a in s])
+        weight_bytes = artefact_bytes(d_out, d_in, bits)
+        sets = weight_sets(d_out, d_in, bits)
 
-        print(f"\n  {d_out} x {d_in}, {bits}-bit group 64, {n_sets} weight sets")
+        print(f"\n  {d_out} x {d_in}, {bits}-bit group 64, "
+              f"{len(sets)} weight sets")
         print(f"  {'M':>3} {'R':>3} {'ours us':>9} {'mlx us':>9} {'ratio':>7} "
               f"{'ours GB/s':>10} {'mlx passes':>11}")
         unstable = False
@@ -218,7 +318,7 @@ def bench() -> bool:
             grid, threadgroup, r = launch_config(d_out, m)
 
             def ours(i):
-                wq, sc, bi = sets[i % n_sets]
+                wq, sc, bi = sets[i % len(sets)]
                 return kernel(inputs=[x, wq, sc, bi],
                               output_shapes=[(m, d_out)], output_dtypes=[mx.float16],
                               grid=grid, threadgroup=threadgroup,
@@ -226,18 +326,11 @@ def bench() -> bool:
                                         ("BITS", bits)])[0]
 
             def theirs(i):
-                wq, sc, bi = sets[i % n_sets]
+                wq, sc, bi = sets[i % len(sets)]
                 return mx.quantized_matmul(x, wq, sc, bi, transpose=True,
                                            group_size=64, bits=bits)
 
-            mx.eval(ours(0), theirs(0))          # JIT and warm both arms
-            mx.synchronize()
-            copies = calibrate_copies(lambda c: dispatch(ours, c))
-
-            a_samples, b_samples = [], []
-            for _ in range(ROUNDS):
-                a_samples.append(dispatch(ours, copies) / copies)
-                b_samples.append(dispatch(theirs, copies) / copies)
+            a_samples, b_samples = interleaved_samples(ours, theirs)
             t_ours = statistics.median(a_samples)
             t_mlx = statistics.median(b_samples)
             spread = max(b_samples) / min(b_samples)

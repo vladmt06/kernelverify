@@ -25,7 +25,7 @@ because leaving them in would deflate every policy equally and hide the signal.
 from __future__ import annotations
 
 import functools
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from kernelverify.reference.kernels import KERNELS
 
@@ -211,10 +211,3 @@ KERNEL_TO_NATIVE_OP = {
 # The single mapping every consumer should use: kernel name -> operator key,
 # valid for both families.
 KERNEL_TO_OP = {**KERNEL_TO_CORPUS_OP, **KERNEL_TO_NATIVE_OP}
-
-
-def by_kernel() -> dict[str, list[Mutation]]:
-    grouped: dict[str, list[Mutation]] = {}
-    for mutation in CATALOGUE:
-        grouped.setdefault(mutation.kernel, []).append(mutation)
-    return grouped

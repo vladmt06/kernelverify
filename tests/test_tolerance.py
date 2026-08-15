@@ -9,6 +9,7 @@ covers it without absolving the fp16-score precision canary.
 import numpy as np
 import pytest
 
+from conftest import unit_inputs as shared_unit_inputs
 from measure_escape import load_meta, max_abs_error, reference
 from score_oracles import SWEEP_SEED, make_mode_inputs
 from kernelverify.reference.kernels import attention, flash_attention
@@ -23,12 +24,7 @@ RNG = np.random.default_rng(7)
 
 
 def unit_inputs(op):
-    spec = load_meta(op)["op_schema"]["inputs"]
-    dims = {"B": 2, "S": 3, "H": 16, "M": 5, "N": 96, "K": 32, "D": 16}
-    return {
-        s["name"]: RNG.standard_normal([dims[d] for d in s["dims"]]).astype(np.float32)
-        for s in spec
-    }
+    return shared_unit_inputs(op, RNG)
 
 
 @pytest.mark.parametrize("op", sorted(ENSEMBLES))

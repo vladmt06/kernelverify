@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from measure_escape import load_meta, make_inputs
-from score_oracles import CORPUS_MODE, IID_MODES, INPUT_MODES, UNIT_MODE, make_mode_inputs
+from score_oracles import CORPUS_MODE, IID_MODES, INPUT_MODES, make_mode_inputs
 
 ATTENTION = load_meta("attention_triton")
 SOFTMAX = load_meta("softmax_triton")

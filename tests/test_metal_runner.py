@@ -14,6 +14,7 @@ the machine has no Metal device.
 import numpy as np
 import pytest
 
+from conftest import METAL_DEVICE as DEVICE, requires_metal
 from kernelverify.runners import (
     Binding,
     BindingKind,
@@ -29,8 +30,6 @@ from kernelverify.runners import (
 from kernelverify.runners.spec import resolve_extent
 
 RUNNER = MetalRunner()
-DEVICE = RUNNER.probe()
-requires_metal = pytest.mark.skipif(DEVICE is None, reason="no Metal device on this machine")
 
 RNG = np.random.default_rng(11)
 

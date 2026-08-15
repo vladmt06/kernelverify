@@ -18,10 +18,24 @@ not a result, and it is the reason every arm below is sampled in the same
 round.
 """
 import sys, statistics, time
-sys.path.insert(0, "/Users/vlad/kv-kernels")
+from pathlib import Path
+
+# Pinned to the kv-kernels lane checkout, NOT the repo this file lives in:
+# the finding was measured against that lane's kernel source and must keep
+# importing it. Loud on purpose - a silent fallback to another checkout would
+# time a different kernel under the same headline.
+KV_KERNELS = Path("/Users/vlad/kv-kernels")
+if not KV_KERNELS.is_dir():
+    raise SystemExit(f"pinned checkout missing: {KV_KERNELS} - this probe "
+                     "imports kernelverify from the kv-kernels lane; restore "
+                     "that checkout or repin deliberately")
+sys.path.insert(0, str(KV_KERNELS))
 import numpy as np, mlx.core as mx
+import kernelverify
 from kernelverify.schemas.quant_contract import QuantContract, canonical_quantize, r_contract
 from kernelverify.pack.wide_qmv import pack_nibbles, WIDE_QMV_MSL
+
+print(f"kernelverify imported from {Path(kernelverify.__file__).resolve().parent}")
 
 V3 = """
     threadgroup half4 xt[M * TW * 2];

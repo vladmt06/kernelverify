@@ -16,6 +16,8 @@ mx = pytest.importorskip("mlx.core")
 if not mx.metal.is_available():
     pytest.skip("Metal unavailable", allow_module_level=True)
 
+from pack_moe_dispatch import make_case, quantize_experts
+
 from kernelverify.pack.moe_dispatch import (
     build_dispatch,
     build_routing,
@@ -23,41 +25,12 @@ from kernelverify.pack.moe_dispatch import (
     routing_launch,
 )
 from kernelverify.pack.verify import moe_inputs, verify_output
-from kernelverify.pack.wide_qmv import pack_nibbles
 from kernelverify.reference.native_kernels import _topk_by_prob
-from kernelverify.schemas.quant_contract import QuantContract, canonical_quantize
-
-CONTRACT = QuantContract(bits=4, group_size=64)
 
 
 @pytest.fixture(scope="module")
 def kernels():
     return build_routing(mx), build_dispatch(mx)
-
-
-def _quantize(experts):
-    """The packed artefact for the kernel, plus the per-expert artefacts the
-    shared gate dequantizes into the contract's dense experts."""
-    arts = [canonical_quantize(e, CONTRACT) for e in experts]
-    packed = np.stack([pack_nibbles(a.q) for a in arts])
-    scales = np.stack([a.scales for a in arts])
-    biases = np.stack([a.biases for a in arts])
-    return packed, scales, biases, arts
-
-
-def _inputs(n_tokens, d_model, n_experts, d_ffn, seed=2, constant=False):
-    rng = np.random.default_rng(seed)
-    if constant:
-        x = np.repeat(rng.standard_normal((n_tokens, 1)).astype(np.float32),
-                      d_model, axis=1).astype(np.float16)
-        router = np.repeat(rng.standard_normal((1, d_model)).astype(np.float32) * 0.05,
-                           n_experts, axis=0).astype(np.float16)
-    else:
-        x = (rng.standard_normal((n_tokens, d_model)).astype(np.float32) * 0.5).astype(np.float16)
-        router = (rng.standard_normal((n_experts, d_model)).astype(np.float32) * 0.05).astype(np.float16)
-    experts = (rng.standard_normal((n_experts, d_ffn, d_model)).astype(np.float32)
-               * 0.02).astype(np.float16)
-    return x, router, experts
 
 
 def _route(kernels, x, router, n_experts):
@@ -80,7 +53,7 @@ def _contract_routing(x, router):
 
 
 def test_routing_matches_the_contract(kernels):
-    x, router, _ = _inputs(8, 512, 16, 256)
+    x, router, _ = make_case(8, 512, 16, 256, seed=2)
     idx, _ = _route(kernels, x, router, 16)
     want, _ = _contract_routing(x, router)
     assert np.array_equal(np.array(idx).astype(int), want)
@@ -88,14 +61,14 @@ def test_routing_matches_the_contract(kernels):
 
 def test_ties_go_to_the_lower_index(kernels):
     """Constant rows tie every logit, which is the only input that shows it."""
-    x, router, _ = _inputs(4, 256, 8, 128, constant=True)
+    x, router, _ = make_case(4, 256, 8, 128, seed=2, mode="constant_rows")
     idx, _ = _route(kernels, x, router, 8)
     got = np.array(idx).astype(int)
     assert np.array_equal(got, np.tile([0, 1], (4, 1)))
 
 
 def test_gates_are_renormalized(kernels):
-    x, router, _ = _inputs(8, 512, 16, 256)
+    x, router, _ = make_case(8, 512, 16, 256, seed=2)
     _, gate = _route(kernels, x, router, 16)
     sums = np.array(gate).sum(axis=-1)
     assert np.allclose(sums, 1.0, atol=1e-6)
@@ -109,8 +82,8 @@ def test_gates_are_renormalized(kernels):
 def test_dispatch_agrees_with_the_shipped_reference(kernels, n_tokens):
     _, dispatch = kernels
     d_model, n_experts, d_ffn = 512, 16, 256
-    x, router, experts = _inputs(n_tokens, d_model, n_experts, d_ffn, seed=n_tokens)
-    packed, scales, biases, arts = _quantize(experts)
+    x, router, experts = make_case(n_tokens, d_model, n_experts, d_ffn, seed=n_tokens)
+    packed, scales, biases, arts = quantize_experts(experts)
 
     idx, gate = _route(kernels, x, router, n_experts)
     grid, threadgroup, r = dispatch_launch(d_ffn, n_tokens)
@@ -127,8 +100,8 @@ def test_dispatch_agrees_with_the_shipped_reference(kernels, n_tokens):
 def test_handles_d_ffn_not_divisible_by_r(kernels):
     _, dispatch = kernels
     d_model, n_experts, d_ffn = 256, 8, 130   # 130 % 4 == 2
-    x, router, experts = _inputs(4, d_model, n_experts, d_ffn, seed=6)
-    packed, scales, biases, arts = _quantize(experts)
+    x, router, experts = make_case(4, d_model, n_experts, d_ffn, seed=6)
+    packed, scales, biases, arts = quantize_experts(experts)
     idx, gate = _route(kernels, x, router, n_experts)
     grid, threadgroup, r = dispatch_launch(d_ffn, 4)
     out = dispatch(inputs=[mx.array(x), idx, gate, mx.array(packed),

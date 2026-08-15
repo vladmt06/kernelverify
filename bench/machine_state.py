@@ -1,4 +1,4 @@
-"""Machine state, and the two rules that decide whether a number may bind.
+"""Machine state, and the rules that decide whether a number may bind.
 
 A baseline is only worth what its measurement conditions are worth, so both
 conditions this project has been burned by are checked here rather than
@@ -19,13 +19,28 @@ remembered:
 
 Neither rule blocks a run. Both refuse to let the result be called binding,
 which is the distinction the per-chip matrix needs.
+
+The third rule DOES block, and lives here for the same reason: it is a
+property of the machine, not of any one harness.
+
+  measurement lock   one heavy measurement at a time on this machine. On
+                     2026-08-15 at 03:29 the serving calibration (39.5 GB
+                     phys_footprint) and the pricing probe (27.9 GB) ran
+                     together on a 36 GB machine and Jetsam killed the pair.
+                     Each harness locking its own file would have permitted
+                     exactly that, so there is ONE lock and every heavy
+                     harness takes it.
 """
 
 from __future__ import annotations
 
+import fcntl
+import os
 import platform
 import re
+import statistics
 import subprocess
+from pathlib import Path
 
 # Load average is per-runnable-thread, so the threshold scales with cores. An
 # idle 12-core Mac sits near 1.5 to 2.5 with background daemons; a quarter of
@@ -42,6 +57,74 @@ TIMING_FLOOR_MS = 1.0
 # about a transient that lands inside one sample. The samples are the direct
 # evidence and they were being ignored.
 MAX_SPREAD_PCT = 10.0
+
+
+# One lock, one machine, every heavy measurement harness. /tmp is shared
+# across worktrees and cleared at boot, which is exactly the scope a lock
+# wants; the file is never deleted, because unlinking it would let a second
+# process create a fresh inode and lock that instead of this one.
+MEASUREMENT_LOCK_PATH = Path("/tmp/kernelverify.measurement.lock")
+
+
+class MeasurementLock:
+    """The machine-wide measurement lock, held for the life of one run.
+
+    fcntl.flock on a fixed path, deliberately, rather than a pid file. The
+    kernel owns the lock: it releases on process death however the process
+    died, which is the case that matters here - the harnesses this guards
+    were killed by Jetsam, not shut down. That deletes the two defects a pid
+    file has, both of which shipped in the first version of this lock:
+
+    - staleness has to be JUDGED (read the pid, ask whether it is alive), and
+      a pid that cannot be signalled, was recycled, or was never written
+      reads as dead;
+    - creating the file and writing the pid into it are two steps, so a
+      reader landing between them sees an empty file, fails to parse it,
+      concludes the holder is stale, and steals the lock from a LIVE run.
+
+    The file's contents are diagnostics only - who holds it, for a refusal
+    message a human can act on. Nothing decides anything by reading them.
+    """
+
+    def __init__(self, owner: str, path: Path = MEASUREMENT_LOCK_PATH):
+        self.owner = owner
+        self.path = Path(path)
+        self._fd: int | None = None
+
+    def acquire(self) -> tuple[bool, str]:
+        """``(acquired, detail)``. A refusal names the holder when it can and
+        modifies nothing either way."""
+        if self._fd is not None:
+            return True, f"already held by pid {os.getpid()} ({self.owner})"
+        fd = os.open(str(self.path), os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            holder = self._holder_note()
+            os.close(fd)
+            return False, holder
+        os.ftruncate(fd, 0)
+        os.write(fd, f"pid {os.getpid()} ({self.owner})".encode())
+        os.fsync(fd)
+        self._fd = fd
+        return True, f"acquired by pid {os.getpid()} ({self.owner})"
+
+    def release(self) -> None:
+        """Release what this object holds, and nothing else: an object that
+        never acquired cannot free another process's lock."""
+        if self._fd is None:
+            return
+        os.ftruncate(self._fd, 0)
+        fcntl.flock(self._fd, fcntl.LOCK_UN)
+        os.close(self._fd)
+        self._fd = None
+
+    def _holder_note(self) -> str:
+        try:
+            note = self.path.read_text().strip()
+        except OSError:
+            note = ""
+        return f"held by {note}" if note else "held by another process"
 
 
 def _sysctl(key: str) -> str:
@@ -183,6 +266,12 @@ def timing_verdict(min_sample_ms: float) -> dict:
         "floor_ms": TIMING_FLOOR_MS,
         "below_timing_floor": below,
     }
+
+
+def spread_pct(vals) -> float:
+    """Repeat disagreement as (max - min) / median, in percent: the exact
+    quantity MAX_SPREAD_PCT bounds, computed in one place."""
+    return (max(vals) - min(vals)) / statistics.median(vals) * 100
 
 
 def dispersion_verdict(spread_pct: float | None) -> dict:

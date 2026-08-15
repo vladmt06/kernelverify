@@ -7,7 +7,11 @@ docs/research/2026-08-15-sub4bit-serve-findings.md section 4:
   oracle calls (direct mx.quantized_matmul) and a second model instance must
   never route through the kernel under test;
 - routing is delegated entirely to kernelverify.pack.wide_qmv.should_dispatch,
-  so the harness inherits the pack's boundary rather than encoding one;
+  so the harness inherits the pack's boundary rather than encoding one, and
+  since ADR 0015 that boundary is per shape, so the harness has to ask with
+  the whole cell and count dispatches per site rather than per model;
+- the registered win zone is a claim ABOUT the pack, so it is checked against
+  the pack's own table here rather than derived from it;
 - the forced-stock mode (arm 4) evaluates eligibility identically and then
   takes the stock path, bit-identically to an unpatched model;
 - pin verification refuses a corrupted artifact;
@@ -27,11 +31,20 @@ import pytest
 mx = pytest.importorskip("mlx.core")
 nn = pytest.importorskip("mlx.nn")
 
+from kernelverify.pack import routed_windows  # noqa: E402
 from kernelverify.pack.wide_qmv import should_dispatch  # noqa: E402
 
 import serve_sub4bit  # noqa: E402
 
-D_IN, D_OUT = 256, 64
+# k_proj/v_proj's real decode shape, the smallest of the five the harness
+# intercepts. It has to be a real one: routing is keyed by (bits, d_out,
+# d_in) since ADR 0015, so a made-up shape routes nowhere and every routing
+# assertion below would pass vacuously.
+D_IN, D_OUT = 2560, 1024
+# A shape the pricing run never priced, which is therefore routed nowhere at
+# any tile width; the per-site accounting is what it exists to expose.
+UNPRICED_D_IN, UNPRICED_D_OUT = 512, 128
+BITS = 3
 B_GRID = [1, 4, 5, 6, 8, 11, 12, 16]
 PINNED_MODEL = "qwen3-4b-3bit-g64"
 
@@ -39,25 +52,27 @@ PINNED_MODEL = "qwen3-4b-3bit-g64"
 class Holder(nn.Module):
     """The smallest tree with a QuantizedLinear leaf one level down."""
 
-    def __init__(self, bits: int = 3, group_size: int = 64):
+    def __init__(self, bits: int = BITS, group_size: int = 64,
+                 d_in: int = D_IN, d_out: int = D_OUT):
         super().__init__()
-        self.proj = nn.QuantizedLinear(D_IN, D_OUT, bits=bits,
+        self.proj = nn.QuantizedLinear(d_in, d_out, bits=bits,
                                        group_size=group_size, bias=False)
 
     def __call__(self, x):
         return self.proj(x)
 
 
-def make_holder(bits: int = 3, group_size: int = 64) -> Holder:
-    h = Holder(bits=bits, group_size=group_size)
+def make_holder(bits: int = BITS, group_size: int = 64,
+                d_in: int = D_IN, d_out: int = D_OUT) -> Holder:
+    h = Holder(bits=bits, group_size=group_size, d_in=d_in, d_out=d_out)
     h.set_dtype(mx.float16)
     mx.eval(h.parameters())
     return h
 
 
-def x_rows(m: int, seed: int = 3) -> mx.array:
+def x_rows(m: int, seed: int = 3, d_in: int = D_IN) -> mx.array:
     rng = np.random.default_rng(seed)
-    return mx.array(rng.standard_normal((m, D_IN)).astype(np.float16))
+    return mx.array(rng.standard_normal((m, d_in)).astype(np.float16))
 
 
 def fp64_reference(holder: Holder, x: mx.array) -> np.ndarray:
@@ -70,9 +85,10 @@ def fp64_reference(holder: Holder, x: mx.array) -> np.ndarray:
 
 
 def dispatched_m() -> int:
-    """An M the pack currently routes to the kernel; the tests derive it
-    from should_dispatch so they keep passing when the boundary moves."""
-    return next(m for m in B_GRID if should_dispatch(m))
+    """An M the pack currently routes at the holder's shape; the tests
+    derive it from should_dispatch so they keep passing when the boundary
+    moves."""
+    return next(m for m in B_GRID if should_dispatch(m, BITS, D_OUT, D_IN))
 
 
 @contextmanager
@@ -135,11 +151,99 @@ def test_routing_follows_should_dispatch_across_the_grid():
         for m in B_GRID:
             patch.reset()
             mx.eval(a(x_rows(m)))
-            if should_dispatch(m):
+            if should_dispatch(m, BITS, D_OUT, D_IN):
                 assert patch.calls == 1, f"M={m} should have dispatched"
             else:
                 assert patch.calls == 0, f"M={m} should have fallen back"
                 assert any(k.startswith("m-") for k in patch.fallbacks)
+
+
+def test_an_unpriced_shape_routes_nowhere_on_the_whole_grid():
+    """Routing is keyed by shape, so a shape the pricing run never priced
+    falls back at every tile width, including the widths that win at the
+    real projections."""
+    a = make_holder(d_in=UNPRICED_D_IN, d_out=UNPRICED_D_OUT)
+    with patched(a) as patch:
+        for m in B_GRID:
+            patch.reset()
+            mx.eval(a(x_rows(m, d_in=UNPRICED_D_IN)))
+            assert patch.calls == 0, f"M={m} routed an unpriced shape"
+            assert any(k.startswith("m-") for k in patch.fallbacks)
+
+
+class TwoShapes(nn.Module):
+    """One routed projection and one unpriced one in the same tree, which
+    is the case a whole-model dispatch count cannot describe."""
+
+    def __init__(self):
+        super().__init__()
+        self.routed = nn.QuantizedLinear(D_IN, D_OUT, bits=BITS,
+                                         group_size=64, bias=False)
+        self.unpriced = nn.QuantizedLinear(UNPRICED_D_IN, UNPRICED_D_OUT,
+                                           bits=BITS, group_size=64,
+                                           bias=False)
+
+    def __call__(self, x, y):
+        return self.routed(x), self.unpriced(y)
+
+
+def test_expected_calls_counts_routed_sites_not_wrapped_sites():
+    model = TwoShapes()
+    model.set_dtype(mx.float16)
+    mx.eval(model.parameters())
+    m, steps = dispatched_m(), 7
+    with patched(model) as patch:
+        assert patch.n_wrapped == 2
+        # One of the two sites routes at this width, so the expectation is
+        # steps, not 2 x steps; n_wrapped x steps would be the old answer.
+        assert serve_sub4bit.expected_calls(patch, m, steps) == steps
+        assert serve_sub4bit.routed_shapes(patch, m) == [f"{D_OUT}x{D_IN}"]
+
+        # And the count the harness asserts is the count the wrapper makes.
+        patch.reset()
+        out = model(x_rows(m), x_rows(m, d_in=UNPRICED_D_IN))
+        mx.eval(out)
+        assert patch.calls == serve_sub4bit.expected_calls(patch, m, 1)
+
+
+def test_site_cell_reads_d_out_and_d_in_in_should_dispatch_order():
+    """scales is (d_out, d_in // group_size); reading the pair the other way
+    round routes nowhere and looks like a boundary rather than a bug."""
+    a = make_holder()
+    assert serve_sub4bit.site_cell(a.proj) == (BITS, D_OUT, D_IN)
+
+
+# ---------------------------------------------------------------------------
+# the registered zone: a claim about the pack, checked against the pack
+# ---------------------------------------------------------------------------
+def test_registered_zone_is_what_the_recording_routes_on_the_grid():
+    for (d_out, d_in), pinned in serve_sub4bit.PINNED_ZONE.items():
+        window = routed_windows.window_for(BITS, d_out, d_in)
+        assert pinned == window & frozenset(B_GRID), f"{d_out}x{d_in}"
+    serve_sub4bit.require_pinned_zone()          # must not raise today
+
+
+def test_registered_zone_excludes_the_never_intercepted_lm_head():
+    """lm_head is priced and wins at M = 5..10, but it is tied embeddings
+    and not an nn.QuantizedLinear leaf, so the patch never wraps it and a
+    zone entry for it would register a claim nothing here enforces."""
+    lm_head = (151936, 2560)
+    assert routed_windows.window_for(BITS, *lm_head)
+    assert lm_head not in serve_sub4bit.PINNED_ZONE
+    assert len(serve_sub4bit.PINNED_ZONE) == 5
+
+
+def test_registered_zone_refuses_a_boundary_that_moved_at_one_shape(
+        monkeypatch, capsys):
+    moved = dict(serve_sub4bit.PINNED_ZONE)
+    shape = (2560, 4096)
+    moved[shape] = moved[shape] | frozenset({11})
+    monkeypatch.setattr(serve_sub4bit, "PINNED_ZONE", moved)
+    with pytest.raises(SystemExit) as exc:
+        serve_sub4bit.require_pinned_zone()
+    assert exc.value.code == 2
+    out = capsys.readouterr().out
+    assert "1 of 5" in out and "2560x4096" in out
 
 
 def test_prefill_shaped_input_falls_back_and_matches_stock():

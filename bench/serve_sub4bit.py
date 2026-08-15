@@ -25,14 +25,18 @@ Arms (D3.2, D3.6):
              cost going unmeasured; this arm exists so it never can again.
 
 Routing is delegated entirely to should_dispatch, so the harness inherits
-the pack's two-sided boundary (ticket T1) the moment it lands and never
-encodes a boundary of its own. Prefill-shaped calls (L > 1) fall back to
+the pack's boundary and never encodes one of its own. Since 2026-08-15 that
+boundary is per shape and per bit width (kernelverify/pack/routed_windows.py,
+ADR 0015), so every routing question here is asked with the whole cell -
+tile width, bits, d_out, d_in - and the answer can differ between two
+projections in the same layer. Prefill-shaped calls (L > 1) fall back to
 stock by design and are whitelisted by reason.
 
 Modes:
   --smoke   wiring correctness, no timing: pins verified, dispatch counts
-            exact (n_wrapped x steps inside the zone, 0 outside), zero
-            hard fallbacks, forced-stock arm bit-identical.
+            exact (the per-shape sum over the wrapped sites, which is 0 at
+            every B the table routes nowhere), zero hard fallbacks,
+            forced-stock arm bit-identical.
   --mde     the pre-registered arithmetic: interception cost via arm 4 at
             B=1, per-op times at the true projection shapes, arm-2
             per-token times and noise floors. Quiet window only.
@@ -78,11 +82,37 @@ GROUP_SIZE = 64
 PROMPT_T = 512
 GEN_TOKENS = 128
 B_GRID = [1, 4, 5, 6, 8, 11, 12, 16]
-# The pre-registered win zone. Routing still delegates to should_dispatch;
-# this set exists so the timing modes REFUSE to run when the pack's boundary
-# disagrees with what was registered, instead of silently rescoping the
-# claim (findings doc, section 3).
-PINNED_ZONE = (5, 6, 8, 11)
+# The bit width of both pinned artifacts' projections, and the only width the
+# pack's routing table was priced at (ADR 0015, ruling D1: 4-bit is unpriced
+# and routes nowhere until its own pricing run lands).
+PINNED_BITS = 3
+# The pre-registered win zone, per intercepted dispatch shape (d_out, d_in).
+# Routing still delegates to should_dispatch; this map exists so the timing
+# modes REFUSE to run when the pack's boundary disagrees with what was
+# registered, instead of silently rescoping the claim (findings doc,
+# section 3, and its 2026-08-15 amendment).
+#
+# The entries are literals deliberately. Derived from routed_windows at
+# import they could never disagree with the pack, and a check that cannot
+# fail registers nothing. Each one is window_for(3, d_out, d_in) = {5..9}
+# intersected with B_GRID, read off the 2026-08-15 boundary pricing run
+# (bench/results/qmv-boundary-pricing-2026-08-15.json, ADR 0015). B = 11 sat
+# in the zone under the uniform 5..11 default and is out of it at all five
+# now, though not for one reason: it is a measured LOSS at three of them
+# (q_proj, o_proj, down_proj) and REFUSED, meaning undecided, at the other
+# two. It is a WIN at none, and only a WIN routes a cell.
+#
+# lm_head (151936x2560) is absent on purpose, not by oversight. The patch
+# wraps nn.QuantizedLinear leaves only, and Qwen3-4B's lm_head is tied
+# embeddings, so it is never intercepted; a zone entry for a shape this
+# harness cannot route would register a claim nothing here enforces.
+PINNED_ZONE = {
+    (4096, 2560): frozenset({5, 6, 8}),    # q_proj
+    (1024, 2560): frozenset({5, 6, 8}),    # k_proj, v_proj
+    (2560, 4096): frozenset({5, 6, 8}),    # o_proj
+    (9728, 2560): frozenset({5, 6, 8}),    # gate_proj, up_proj
+    (2560, 9728): frozenset({5, 6, 8}),    # down_proj
+}
 ROUNDS = 5
 PPL_WINDOW = 1024
 PPL_WINDOWS = 96
@@ -112,6 +142,21 @@ _KERNEL = build(mx)
 # ---------------------------------------------------------------------------
 # the interception layer
 # ---------------------------------------------------------------------------
+def site_cell(inner: nn.QuantizedLinear) -> tuple[int, int, int]:
+    """One layer's routing cell as (bits, d_out, d_in).
+
+    The order is should_dispatch's, and it is worth reading twice: MLX
+    stores scales as (d_out, d_in // group_size), so the rows are the OUTPUT
+    dimension and the columns have to be scaled back up by the group size to
+    recover d_in. Reading the pair the other way round would silently ask
+    the routing table about a shape the model does not have, and the table
+    answers an unknown shape with "no evidence", so the mistake would look
+    like a boundary that simply never routes.
+    """
+    return (inner.bits, inner.scales.shape[0],
+            inner.scales.shape[1] * inner.group_size)
+
+
 class _RoutedLinear:
     """One wrapped QuantizedLinear. A plain object, deliberately not a
     Module: it exists only inside the installed model tree, so removing
@@ -144,8 +189,12 @@ class _RoutedLinear:
         if d_in % 64:
             return f"din-{d_in}"
         m = x.size // d_in
-        if not should_dispatch(m):
-            return f"m-{m}-outside-dispatch"
+        # The whole routing cell, never just the tile width: since ADR 0015
+        # two projections in one layer can answer this differently. The
+        # reason carries the shape for the same reason.
+        d_out = inner.scales.shape[0]
+        if not should_dispatch(m, inner.bits, d_out, d_in):
+            return f"m-{m}-outside-dispatch-{d_out}x{d_in}"
         return None
 
     def _fused(self, x):
@@ -193,6 +242,11 @@ class Patch:
         self._wrap(model)
         model._serve_sub4bit_patch = self
         self.n_wrapped = len(self._sites)
+        # One routing cell per wrapped site, in the order should_dispatch
+        # takes them. Recorded at install and kept after uninstall, like
+        # n_wrapped, because the A/B builds its row for a cell after the
+        # last arm has already removed the patch.
+        self.site_cells = [site_cell(o) for _, _, o in self._sites]
 
     def _wrap(self, node):
         if isinstance(node, (nn.Module, dict)):
@@ -371,12 +425,31 @@ def require_idle(label: str) -> dict:
     return state
 
 
+def pack_zone(d_out: int, d_in: int) -> frozenset[int]:
+    """The grid cells the pack routes at one intercepted shape."""
+    return frozenset(b for b in B_GRID
+                     if should_dispatch(b, PINNED_BITS, d_out, d_in))
+
+
 def require_pinned_zone():
-    zone = tuple(b for b in B_GRID if should_dispatch(b))
-    if zone != PINNED_ZONE:
-        print(f"REFUSED: the pack's dispatch zone over the grid is {zone}, "
-              f"but the pre-registered zone is {PINNED_ZONE}; timing on a "
-              "moved boundary needs a re-registration, not a run")
+    """Refuse unless the pack agrees with the registration at every shape.
+
+    Per shape, because the boundary is per shape: a table that moved at one
+    projection and not at the others would pass any check that collapsed the
+    grid to a single set.
+    """
+    disagreements = [
+        f"{d_out}x{d_in}: pack routes {sorted(pack_zone(d_out, d_in))}, "
+        f"registered {sorted(pinned)}"
+        for (d_out, d_in), pinned in PINNED_ZONE.items()
+        if pack_zone(d_out, d_in) != pinned]
+    if disagreements:
+        print(f"REFUSED: the pack's dispatch zone disagrees with the "
+              f"pre-registered zone at {len(disagreements)} of "
+              f"{len(PINNED_ZONE)} intercepted shapes; timing on a moved "
+              "boundary needs a re-registration, not a run")
+        for line in disagreements:
+            print(f"  {line}")
         raise SystemExit(2)
 
 
@@ -394,7 +467,21 @@ def spread_pct(vals: list[float]) -> float:
 
 
 def expected_calls(patch: Patch, b: int, steps: int) -> int:
-    return patch.n_wrapped * steps if should_dispatch(b) else 0
+    """The exact fused-call count for a decode window at batch size b.
+
+    Summed per wrapped site rather than multiplied by n_wrapped: the routing
+    table can route one projection shape and not another at the same b, and
+    a whole-model multiply would then be wrong in both directions at once.
+    """
+    return steps * sum(1 for cell in patch.site_cells
+                       if should_dispatch(b, *cell))
+
+
+def routed_shapes(patch: Patch, b: int) -> list[str]:
+    """The distinct intercepted shapes the pack routes at this batch size."""
+    return sorted({f"{d_out}x{d_in}"
+                   for bits, d_out, d_in in patch.site_cells
+                   if should_dispatch(b, bits, d_out, d_in)})
 
 
 # ---------------------------------------------------------------------------
@@ -407,11 +494,12 @@ def smoke() -> int:
     model4, _ = load_model(MODEL_4BIT)
     n_layers = len(model3.layers)
     t, g = 64, 9
-    # The numerics check and arm 4 need a B that is both routed by the pack
-    # and inside the registered zone: smoke must never dispatch a shape the
-    # certificates do not cover.
+    # The numerics check and arm 4 need a B the pack routes at every
+    # intercepted shape AND that every shape's registration holds: smoke
+    # must never dispatch a shape the certificates do not cover.
     b_zone = next(b for b in B_GRID
-                  if should_dispatch(b) and b in PINNED_ZONE)
+                  if all(b in pack_zone(d_out, d_in) and b in pinned
+                         for (d_out, d_in), pinned in PINNED_ZONE.items()))
     skipped = []
     ok = True
 
@@ -420,12 +508,25 @@ def smoke() -> int:
         print(f"FAIL: wrapped {patch.n_wrapped} leaves, expected "
               f"{PROJS_PER_LAYER} x {n_layers}")
         ok = False
+    # The registration covers the intercepted shapes and only those. If the
+    # patch ever wrapped a sixth shape (an untied lm_head, say) it would
+    # route on a cell nothing here registered, so the mismatch is a failure
+    # rather than a note.
+    wrapped_shapes = sorted({(d_out, d_in)
+                             for _, d_out, d_in in patch.site_cells})
+    if wrapped_shapes != sorted(PINNED_ZONE):
+        print(f"FAIL: wrapped shapes {wrapped_shapes} are not the registered "
+              f"shapes {sorted(PINNED_ZONE)}")
+        ok = False
     for b in B_GRID:
-        if should_dispatch(b) != (b in PINNED_ZONE):
+        disagreeing = [f"{d_out}x{d_in}"
+                       for (d_out, d_in), pinned in PINNED_ZONE.items()
+                       if (b in pack_zone(d_out, d_in)) != (b in pinned)]
+        if disagreeing:
             # Running this cell fused would dispatch an uncertified M (or
             # mask a cell the registration says must dispatch nothing).
             print(f"B={b:>2} SKIPPED: pack boundary disagrees with the "
-                  f"registered zone here (T1 pending)")
+                  f"registered zone at {', '.join(disagreeing)}")
             skipped.append(b)
             continue
         patch.reset()
@@ -435,7 +536,8 @@ def smoke() -> int:
         hard = patch.hard_fallbacks()
         line_ok = patch.calls == want and not hard
         ok = ok and line_ok
-        print(f"B={b:>2} fused: calls {patch.calls} (want {want}), "
+        print(f"B={b:>2} fused: calls {patch.calls} (want {want}), routed "
+              f"shapes {len(routed_shapes(patch, b))}/{len(PINNED_ZONE)}, "
               f"hard fallbacks {hard or 'none'}"
               + ("" if line_ok else "  <-- FAIL"))
 
@@ -481,8 +583,8 @@ def smoke() -> int:
     ok = (ok and patch.calls == before_calls
           and patch.fallbacks == before_fb)
     if skipped:
-        print(f"NOTE: cells {skipped} were skipped; rerun smoke once the "
-              "pack's two-sided boundary (T1) lands")
+        print(f"NOTE: cells {skipped} were skipped; the pack's routing table "
+              "and the registered zone must be reconciled, then rerun smoke")
     print("SMOKE " + ("PASS" if ok else "FAIL"))
     return 0 if ok else 1
 
@@ -546,7 +648,8 @@ def mde(manifest: dict) -> int:
     print(json.dumps(provenance(manifest)))
     model3, tok = load_model(MODEL_3BIT)
     n_layers = len(model3.layers)
-    zone = [b for b in B_GRID if should_dispatch(b)]
+    zone = [b for b in B_GRID
+            if any(b in pack_zone(d_out, d_in) for d_out, d_in in PINNED_ZONE)]
 
     # Interception cost: arm 4 vs arm 2 at B=1, interleaved rounds.
     prompts = make_prompts(tok, PROMPT_T, 1)
@@ -571,9 +674,16 @@ def mde(manifest: dict) -> int:
         saving_us = 0.0
         rows = []
         for d_in, d_out, count in PROJ_SHAPES:
-            p = _op_probe(3, d_in, d_out, b)
+            # A shape the table does not route at this b contributes no
+            # saving, because at that cell the model runs stock there.
+            if b not in pack_zone(d_out, d_in):
+                rows.append({"shape": f"{d_in}x{d_out}", "count": count,
+                             "routed": False})
+                continue
+            p = _op_probe(PINNED_BITS, d_in, d_out, b)
             saving_us += count * (p["stock_us"] - p["fused_us"])
-            rows.append({"shape": f"{d_in}x{d_out}", "count": count, **p})
+            rows.append({"shape": f"{d_in}x{d_out}", "count": count,
+                         "routed": True, **p})
         dts = []
         for _ in range(ROUNDS):
             dt, steps = decode_window(model3,
@@ -664,8 +774,9 @@ def ab(manifest: dict) -> int:
             patch.uninstall()
 
         med = {k: statistics.median(v) for k, v in arms.items()}
+        routed = routed_shapes(patch, b)
         row = {"B": b, "gen": GEN_TOKENS, "rounds": ROUNDS,
-               "in_zone": should_dispatch(b),
+               "routed_shapes": routed, "in_zone": bool(routed),
                "fused_calls": calls_got, "fused_calls_want": calls_want,
                "hard_fallbacks": hard}
         sp = spread_pct(arms["2"])

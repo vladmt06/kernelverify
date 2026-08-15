@@ -66,6 +66,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import machine_state  # noqa: E402
 import mlx.core as mx  # noqa: E402
 
+from interleave import calibrate_copies, dispatch  # noqa: E402
+from machine_state import spread_pct  # noqa: E402
 from kernelverify.pack.kv_attention import (  # noqa: E402
     SUPPORTED_BITS,
     SUPPORTED_DH,
@@ -277,10 +279,6 @@ def decode_tps(model, prompt_ids, gen_tokens: int, kv_bits: int | None,
     return n / dt
 
 
-def spread_pct(vals: list[float]) -> float:
-    return (max(vals) - min(vals)) / statistics.median(vals) * 100
-
-
 def require_idle(label: str) -> dict:
     state = machine_state.idle_check()
     if not state["idle"]:
@@ -384,20 +382,11 @@ def attention_op_probe(model, bits: int, t: int) -> dict:
             output_dtypes=[mx.float16], grid=grid, threadgroup=tg,
             template=[("T", mx.float16), ("BITS", bits), ("DH", dh)])[0]
 
-    def sample(fn, copies):
-        outs = [fn(i) for i in range(copies)]
-        t0 = time.perf_counter()
-        mx.eval(outs)
-        mx.synchronize()
-        return time.perf_counter() - t0
-
-    copies = 8
-    while copies < 4096 and sample(stock, copies) * 1e3 < 5.0:
-        copies *= 2
+    copies = calibrate_copies(lambda c: dispatch(stock, c))
     a_s, b_s = [], []
     for _ in range(7):
-        a_s.append(sample(fused, copies) / copies)
-        b_s.append(sample(stock, copies) / copies)
+        a_s.append(dispatch(fused, copies) / copies)
+        b_s.append(dispatch(stock, copies) / copies)
     return {"bits": bits, "t": t, "n_layers": n_layers,
             "stock_us": statistics.median(b_s) * 1e6,
             "fused_us": statistics.median(a_s) * 1e6,
@@ -408,7 +397,7 @@ def attention_op_probe(model, bits: int, t: int) -> dict:
 def mde(model, tokenizer) -> int:
     """The numbers the findings doc's MDE section is written from: per-op
     attention times, arm-B decode tps and its round-to-round noise floor."""
-    before = require_idle("before")
+    require_idle("before")
     print(json.dumps(provenance(model)))
     for bits, t in CONFIGS:
         probe = attention_op_probe(model, bits, t)
@@ -434,14 +423,13 @@ def mde(model, tokenizer) -> int:
         print("WARNING: machine went non-idle during the probe: "
               + "; ".join(after["blockers"]))
         return 1
-    del before
     return 0
 
 
 def ab(model, tokenizer) -> int:
     """The pre-registered probe. Interleaved [A, B, C] per round; arm B is
     the canary; rows over the spread limit are withheld, not published."""
-    before = require_idle("before")
+    require_idle("before")
     print(json.dumps(provenance(model)))
     exit_code = 0
     for bits, t in CONFIGS:
@@ -480,7 +468,6 @@ def ab(model, tokenizer) -> int:
         print("WARNING: machine went non-idle during the probe: "
               + "; ".join(after["blockers"]))
         exit_code = 1
-    del before
     return exit_code
 
 

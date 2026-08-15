@@ -38,16 +38,44 @@ Both quantized 3-bit arms and the control share one pinned 3-bit artifact; arm 3
 - Generation length: G = 128 tokens per stream; the timed decode window is the 127 steps after the first token, prefill and first token excluded, matching the spike's convention.
 - Metrics, BOTH pre-registered: aggregate batch throughput = B x 127 / window seconds, and per-stream throughput = 127 / window seconds.
 - B grid: {1, 4, 5, 6, 8, 11, 12, 16} (edge cells per D3.1).
-  Cell roles: B = 1 is the interception-cost cell (arm 4 vs arm 2 feeds the MDE); B = 4 and B = 12 are the just-outside edge cells where the patch must dispatch nothing; B = 5 and B = 11 are the boundary cells of the win zone; B = 6 and B = 8 are interior win-zone cells; B = 16 documents the above-zone regime where MLX's own routing has no re-read defect.
-- The win zone is pinned here, now: exactly {5, 6, 8, 11}, the grid cells inside the pack's two-sided dispatch boundary [5, 11] (ticket T1).
-  Routing itself still delegates to `kernelverify.pack.wide_qmv.should_dispatch`, but the timing modes refuse to run if the boundary at measurement time disagrees with this pinned set anywhere on the grid, so a later boundary change forces a re-registration instead of silently rescoping the claim.
+  Cell roles, as amended on 2026-08-15 by the amendment at the end of this section: B = 1 is the interception-cost cell (arm 4 vs arm 2 feeds the MDE); B = 4, B = 11 and B = 12 are the just-outside edge cells where the patch must dispatch nothing; B = 5 is the lower boundary cell of the win zone and B = 8 is the upper one; B = 6 is the interior win-zone cell; B = 16 documents the above-zone regime where MLX's own routing has no re-read defect.
+  B = 11 was registered as the upper boundary cell and is now an edge cell, and that is the only role the amendment moves.
+- The win zone was pinned here as exactly {5, 6, 8, 11}, the grid cells inside the pack's two-sided dispatch boundary [5, 11] (ticket T1).
+  That set is superseded by the amendment at the end of this section and is left standing above because it is what this pre-registration actually claimed.
+  Routing itself still delegates to `kernelverify.pack.wide_qmv.should_dispatch`, but the timing modes refuse to run if the boundary at measurement time disagrees with the pinned zone anywhere on the grid, so a later boundary change forces a re-registration instead of silently rescoping the claim.
   At the time of writing `should_dispatch` is still one-sided (the upper bound is T1's ticket, not yet landed), which is one of the two reasons T8 is blocked; the refusal above makes that blocking mechanical.
 - Rounds: 5 per B cell, arms interleaved [1, 2, 3, 4] inside every round; separate passes measure the clock, not the kernels (AGENTS.md).
 - Canary and withholding: arm 2 is the round canary; any cell whose arm-2 spread exceeds `machine_state.MAX_SPREAD_PCT` (10%) is withheld, not published.
 - Quiet window: timing modes refuse to run unless `machine_state.idle_check` is clean before and after, and T8 rules that no timing is recorded outside a coordinated quiet window.
 - Artifact integrity: every non-hidden file in each model directory must appear in `PINNED-HASHES.txt` and hash-match before any mode runs; a mismatch or an unlisted file is a refusal, not a warning, because an unlisted tokenizer or config would load unverified while the numbers claim to bind to the manifest.
-- Smoke never dispatches a shape outside the registered zone: any grid cell where the pack's boundary disagrees with the pinned zone is skipped loudly until the two agree (T1), and smoke is rerun after T1 lands.
+- Smoke never dispatches a shape outside the registered zone: any grid cell where the pack's boundary disagrees with the pinned zone at any intercepted shape is skipped loudly until the two agree, and smoke is rerun after any change that moves either side.
 - Sampling is argmax; all streams share one prompt, so decode cost is shape-determined and identical streams change nothing the clock can see.
+
+### Amendment, 2026-08-15: the win zone is re-registered per shape as {5, 6, 8}
+
+This is a re-registration forced by a measurement, and it is made before any A/B timing has been recorded, under this section's own clause that a later boundary change forces a re-registration instead of a silent rescoping.
+No number from this harness exists under either the old registration or the new one, so nothing is being reinterpreted after the fact.
+
+What forced it: `bench/price_qmv_boundary.py` priced the six Qwen3-4B decode dispatch shapes at M = 1..16 and 3 bits, and its run is committed at `bench/results/qmv-boundary-pricing-2026-08-15.json` (sha256 `4a7c500f...`), read in ADR 0015.
+The uniform 5..11 window the original pin sat inside was a stated default (ruling D3.1), not a measurement.
+The recording routes M = 5..9 at all five intercepted shapes, which meets this grid at {5, 6, 8}.
+
+B = 11 is out of the zone at all five, but the reason differs by shape and is worth stating exactly, because "measured loss" and "undecided" are not the same evidence.
+It is a measured LOSS at three of them (q_proj 0.958-0.997, o_proj 0.876-0.935, down_proj 0.757-0.773) and REFUSED at two (k_proj/v_proj 0.987-1.018, gate_proj/up_proj 0.925-1.008), where REFUSED means the ratio interval straddles 1.0 and the cell claims no direction.
+It is a WIN at none of them, and the probe's pre-registered rule routes a cell only on a WIN, so an undecided cell leaves the zone exactly as a losing one does.
+
+What changes:
+
+- The pinned zone stops being one set over the grid and becomes one set per intercepted shape, keyed (d_out, d_in), because the routing table it is a claim about is keyed that way and no single pair of bounds can express a table that differs between shapes.
+- All five intercepted shapes register {5, 6, 8}: q_proj 4096x2560, k_proj/v_proj 1024x2560, o_proj 2560x4096, gate_proj/up_proj 9728x2560, down_proj 2560x9728.
+- lm_head 151936x2560 is priced and wins one width further (M = 5..10), and it is deliberately absent from the registration: it is tied embeddings rather than an `nn.QuantizedLinear` leaf, so the patch never wraps it and this harness cannot route it at any B.
+- B = 4 stays outside the zone and now has evidence under it rather than a default: a measured LOSS at q_proj (0.966-0.994) and REFUSED at the other four.
+
+What does not change: the arms, both metrics, the grid itself, the rounds, the canary rule, the withholding rule and the quiet-window rule are all untouched.
+
+Section 4's dispatch count is unchanged in value and changes in derivation only.
+The five intercepted shapes share one window, so a grid cell still dispatches either 36 x 7 = 252 fused calls per decode step or none at all.
+It is now summed per wrapped site instead of multiplied out as one whole-model number, so a future table that routes one projection and not another would be counted correctly rather than rounded to all-or-nothing.
 
 ## 4. The interception, and what keeps it honest
 

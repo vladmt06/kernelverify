@@ -145,9 +145,6 @@ class MetalRunner:
         finally:
             self._terminate(process)
 
-    def available(self) -> bool:
-        return self.probe() is not None
-
     # -- running -----------------------------------------------------------
     def run_one(self, spec: KernelSpec, case: RunCase, **kwargs) -> RunResult:
         return self.run(spec, [case], **kwargs).results[0]
@@ -558,9 +555,8 @@ def _stream(pipe, sink: list, keep: int = STDERR_LINES) -> threading.Thread:
 
 
 def _wait_briefly(process: subprocess.Popen, seconds: float) -> bool:
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            return True
-        time.sleep(0.01)
-    return False
+    try:
+        process.wait(timeout=seconds)
+        return True
+    except subprocess.TimeoutExpired:
+        return False

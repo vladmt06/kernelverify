@@ -24,7 +24,7 @@ from typing import Callable
 
 import numpy as np
 
-from kernelverify.reference.native_kernels import _topk_by_prob, TOP_K
+from kernelverify.reference.native_kernels import _topk_by_prob, moe_dispatch, TOP_K
 from kernelverify.schemas.quant_contract import (
     ENSEMBLE as QUANT_ENSEMBLE,
     QuantContract,
@@ -87,9 +87,32 @@ QUANTIZED_MATMUL_META = {
 }
 
 
+# One-slot artefact memo. Reference and tolerance each derive the artefact
+# from the RAW weights (the anchoring property: a surface cannot hand the
+# oracle an artefact that disagrees with the weights it passed), and a gate
+# judges up to 32 cases per (shape, bits) against the same matrix - without
+# reuse that is 64 canonical quantizations of a 389M-element matrix per
+# lm_head group, whose transients the 2026-08-15 pricing instrumentation
+# measured at 14-22 GB of ratcheted footprint.
+#
+# Keyed by IDENTITY, not by a content hash. The memo's strong reference keeps
+# the array alive, so no later array can occupy its address and a hit can only
+# ever be the same object - the anchoring property survives exactly as a hash
+# would preserve it. Hashing would additionally cost a full copy of the weight
+# bytes per case (`tobytes` always copies; 778 MB at lm_head in fp16), which is
+# the transient this memo exists to avoid. Every caller holds one weight matrix
+# across its case group and passes that same object in, so identity hits.
+_qmm_memo: tuple | None = None
+
+
 def _qmm_artefact(inputs):
-    bits = int(inputs["bits"][0])
-    return canonical_quantize(inputs["w"], QuantContract(bits=bits, group_size=64))
+    global _qmm_memo
+    w, bits = inputs["w"], int(inputs["bits"][0])
+    if _qmm_memo is not None and _qmm_memo[0] is w and _qmm_memo[1] == bits:
+        return _qmm_memo[2]
+    artefact = canonical_quantize(w, QuantContract(bits=bits, group_size=64))
+    _qmm_memo = (w, bits, artefact)
+    return artefact
 
 
 def qmm_reference(inputs) -> np.ndarray:
@@ -106,6 +129,13 @@ def qmm_tolerance(case, inputs, ref) -> float:
 WEIGHT_SCALE = 0.05
 
 
+def _rescaled(arr: np.ndarray, target_peak: float) -> np.ndarray:
+    peak = float(np.max(np.abs(arr.astype(np.float32)))) if arr.size else 0.0
+    if peak == 0.0:
+        return arr
+    return (arr.astype(np.float32) * (target_peak / peak)).astype(arr.dtype)
+
+
 def _as_weights(arr: np.ndarray) -> np.ndarray:
     """Rescale a generated tensor to a realistic weight magnitude.
 
@@ -116,10 +146,7 @@ def _as_weights(arr: np.ndarray) -> np.ndarray:
     (constant rows, opposed signs, near zero) is preserved by scaling; only the
     magnitude is made realistic. An all-zero tensor is left alone.
     """
-    peak = float(np.max(np.abs(arr.astype(np.float32)))) if arr.size else 0.0
-    if peak == 0.0:
-        return arr
-    return (arr.astype(np.float32) * (WEIGHT_SCALE / peak)).astype(arr.dtype)
+    return _rescaled(arr, WEIGHT_SCALE)
 
 
 def qmm_augment(case, inputs):
@@ -197,10 +224,16 @@ def _moe_member_reversed(inputs) -> np.ndarray:
     return out.astype(inputs["x"].dtype)
 
 
+# Label -> member, mirroring KV_MEMBERS below; the labels feed the
+# verdict-cache fingerprint, so they are part of the shipped identity.
+MOE_MEMBERS = {
+    "moe:default": moe_dispatch,
+    "moe:reversed-slots": _moe_member_reversed,
+}
+
+
 def moe_tolerance(case, inputs, ref) -> float:
-    from kernelverify.reference.native_kernels import moe_dispatch
-    members = (moe_dispatch(inputs), _moe_member_reversed(inputs))
-    floor = max(_max_err(m, ref) for m in members)
+    floor = max(_max_err(fn(inputs), ref) for fn in MOE_MEMBERS.values())
     return max(_base_tol(case.dtype, ref), K_NATIVE * floor)
 
 
@@ -235,13 +268,6 @@ QUERY_SCALE = 0.6  # peak for q/new_k: puts score rms near 2, so softmax is
                    # neither uniform nor saturated at corpus input magnitudes
 
 
-def _rescaled(arr: np.ndarray, target_peak: float) -> np.ndarray:
-    peak = float(np.max(np.abs(arr.astype(np.float32)))) if arr.size else 0.0
-    if peak == 0.0:
-        return arr
-    return (arr.astype(np.float32) * (target_peak / peak)).astype(arr.dtype)
-
-
 def kv_augment(case, inputs):
     inputs["bits"] = np.array([case.dim_map["BITS"]], dtype=np.int32)
     inputs["q"] = _rescaled(inputs["q"], QUERY_SCALE)
@@ -249,9 +275,25 @@ def kv_augment(case, inputs):
     return inputs
 
 
+# Two-slot memo, one per cache tensor of the case in hand (k and v): the
+# reference and all four tolerance members dequantize the same two caches, so
+# each is dequantized once per case instead of five times. Keyed by identity,
+# with the strong reference keeping the keyed array alive, because the dequant
+# is deterministic given (cache, bits).
+_kv_dequant_memo: dict = {}
+
+
 def _kv_dequant64(cache, bits):
     from kernelverify.reference.native_kernels import _cache_dequant
-    return _cache_dequant(cache, bits).astype(np.float64)
+    key = (id(cache), int(bits))
+    hit = _kv_dequant_memo.get(key)
+    if hit is not None and hit[0] is cache:
+        return hit[1]
+    if len(_kv_dequant_memo) >= 2:  # a new case: the old case's caches are done
+        _kv_dequant_memo.clear()
+    value = _cache_dequant(cache, bits).astype(np.float64)
+    _kv_dequant_memo[key] = (cache, value)
+    return value
 
 
 def kv_reference(inputs) -> np.ndarray:

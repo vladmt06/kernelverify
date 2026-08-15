@@ -52,7 +52,12 @@ from kernelverify.extraction import (  # noqa: E402
     run_live,
     validate_extraction,
 )
-from kernelverify.pack import kv_attention, moe_dispatch, wide_qmv  # noqa: E402
+from kernelverify.pack import (  # noqa: E402
+    kv_attention,
+    moe_dispatch,
+    routed_windows,
+    wide_qmv,
+)
 from kernelverify.pack.evidence import (  # noqa: E402
     GateEvidence,
     SpecializationEvidence,
@@ -257,10 +262,12 @@ def domain_for(family: str, spec: SpecializationEvidence) -> dict:
             "d_in": "any multiple of 64 (gate evidence at 2560 and 4096)",
             "d_out": "any positive count (out-of-range rows clamp-read, "
                      "stores guarded; gate evidence at 2560 and 4096)",
-            "dispatch_boundary": "should_dispatch: M >= 5; below it MLX "
-                                 "already reads the weights once and 2-bit "
-                                 "measures a loss - a routing boundary, not "
-                                 "a correctness bound",
+            # Generated from the routing table, never written here: the
+            # hardcoded prose this replaces claimed an open-ended "M >= 5"
+            # that predated even the old upper bound, so a certificate could
+            # assert a boundary the pack had not enforced for two rulings.
+            "dispatch_boundary": routed_windows.dispatch_boundary_prose(
+                template["BITS"], template["M"]),
         }
     if family == kv_attention.KERNEL_NAME:
         return {
@@ -451,7 +458,10 @@ def gate_evidence(runner: MetalRunner) -> list:
     import pack_moe_dispatch
     import pack_wide_qmv
 
-    return [pack_wide_qmv.verify(runner),
+    # retain_inputs: the extraction capture re-dispatches the gate's own
+    # calls, so this evidence must keep its arrays (the D2 default drops a
+    # passing case's inputs, keeping only their sha256 audit trail).
+    return [pack_wide_qmv.verify(runner, retain_inputs=True),
             pack_moe_dispatch.verify(runner),
             pack_kv_attention.verify(runner)]
 
@@ -480,9 +490,9 @@ def certify(evidences: list, runner: MetalRunner, directory) -> EmitReport:
     report = emit(certificates, directory)
     for family, reasons in refusals.items():
         report.refused.setdefault(family, []).extend(reasons)
+    written_names = {p.name for p in report.written}
     write_manifest([c for c in certificates
-                    if any(p.name == f"{c.kernel_name}.certificate.json"
-                           for p in report.written)],
+                    if f"{c.kernel_name}.certificate.json" in written_names],
                    report.refused, directory, commit)
     return report
 

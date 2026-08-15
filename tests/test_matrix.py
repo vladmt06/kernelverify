@@ -13,49 +13,14 @@ from pathlib import Path
 
 import pytest
 
+from conftest import schema_row as row
 from kernelverify.report.matrix import (
-    Claim,
     classify,
     comparable,
     load_rows,
     render,
     utilisation,
 )
-
-
-def row(**over):
-    base = {
-        "schema_version": 2,
-        "run_id": "20260814T120000Z-abcdef12",
-        "row_id": "20260814T120000Z-abcdef12/decode-llamacpp",
-        "measured_at": "2026-08-14T12:00:00Z",
-        "provenance_tier": "owner-run",
-        "binding": True,
-        "binding_blockers": [],
-        "machine": {"chip": "Apple M3 Pro", "hw_model": "Mac15,6", "os": "macOS",
-                    "os_build": "26.5.2"},
-        "stack": {"name": "llama.cpp", "version": "a94d563"},
-        "model": {"name": "Qwen3-4B", "quant": "Q4_K_M"},
-        "measurement": {"kind": "decode", "matmul_width": 1,
-                        "width_mechanism": "prompt-width"},
-        "result": {"metric": "tok/s", "median": 45.67, "spread_pct": 1.2,
-                   "reps": 3, "samples": [45.6, 45.67, 45.8],
-                   "min_sample_ms": 21.9, "floor_ms": 1.0,
-                   "below_timing_floor": False},
-        "sampling": {"interleaved": True, "rotation": "round-robin", "rounds": 5,
-                     "group": "qwen3-4b-decode", "group_members": 2},
-        "roofline": {"bytes_per_pass": 2491000000, "byte_model": "tensor-table",
-                     "denominator_name": "bandwidth_read", "denominator_gbs": 135.5,
-                     "achieved_gbs": 114.2, "bandwidth_utilisation_pct": 84.3,
-                     "binding_resource": "memory",
-                     "roofline_utilisation_pct": None},
-    }
-    for key, value in over.items():
-        if isinstance(value, dict) and isinstance(base.get(key), dict):
-            base[key] = {**base[key], **value}
-        else:
-            base[key] = value
-    return base
 
 
 # ---------------------------------------------------------------------------
@@ -473,3 +438,42 @@ def test_the_real_v2_record_keeps_its_comparison_content():
     assert len(v2_cells) == 4, "the v2 record's four cells must survive"
     assert all(chunk.count("| mlx-lm 0.31.3 |") == 1 for chunk in v2_cells), \
         "every v2 cell must still pair both stacks"
+
+
+def test_the_real_v3_record_keeps_its_comparison_content():
+    """D3.7 at the renderer: the v3 cells of the 00:05 binding run must render
+    identically after the batch_decode cells were added to the producer. The
+    2.46x and 1.13x cells are width-mechanism cells (batch-size on mlx), and
+    per D3.8 they are never cited as a serving comparison; here they are
+    protected as cells, by identity, whatever their kind label says."""
+    rows = [json.loads(line)
+            for line in RECORD_2026_08_14.read_text().splitlines() if line.strip()]
+    text = render(rows)
+    comparisons = text.split("## Comparisons", 1)[1].split("\n## ", 1)[0]
+    v3_cells = [chunk for chunk in comparisons.split("### ")
+                if chunk and "20260814T230251Z-b50ff2a8" in chunk.splitlines()[0]]
+    assert len(v3_cells) == 4, "the v3 record's four two-arm cells must survive"
+    for cell in ("### decode at width 1, group `20260814T230251Z-b50ff2a8/decode-w1`",
+                 "### matmul_width at width 1, group `20260814T230251Z-b50ff2a8/matmul_width-w1`",
+                 "### matmul_width at width 8, group `20260814T230251Z-b50ff2a8/matmul_width-w8`",
+                 "### matmul_width at width 16, group `20260814T230251Z-b50ff2a8/matmul_width-w16`"):
+        assert cell in comparisons, f"the {cell!r} cell vanished from the render"
+    for ratio in ("1.10x", "1.14x", "2.46x", "1.13x"):
+        assert ratio in comparisons, f"the v3 record's {ratio} ratio vanished"
+    assert all(chunk.count("| mlx-lm 0.31.3 |") == 1 for chunk in v3_cells), \
+        "every v3 two-arm cell must still pair both stacks"
+
+
+# ---------------------------------------------------------------------------
+# mlx-only serving cells (D6): the label must reach the reader
+# ---------------------------------------------------------------------------
+def test_a_batch_decode_row_renders_its_mlx_only_scope():
+    """The serving cells exist on one stack only this block, so the rendered
+    kind must carry the scope: a bare 'batch_decode' line invites setting the
+    aggregate against the other stack's single-stream decode row."""
+    r = row(stack={"name": "mlx-lm", "version": "0.31.3"},
+            measurement={"kind": "batch_decode", "matmul_width": 8,
+                         "width_mechanism": "batch-size", "n_parallel": 8,
+                         "stack_scope": "mlx-only"})
+    table = render([r]).split("## Measurements", 1)[1].split("\n## ", 1)[0]
+    assert "batch_decode (mlx-only)" in table
