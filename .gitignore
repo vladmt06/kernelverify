@@ -9,3 +9,4 @@ bench/.baselines/detached_status.json
 
 # Spartan AI config (contains API keys)
 .spartan/ai.env
+bench/.models/
