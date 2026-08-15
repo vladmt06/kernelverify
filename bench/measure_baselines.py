@@ -706,10 +706,18 @@ def render(rows: list[dict]) -> str:
         # bandwidth percentage for those, so it keeps doing that; formatting
         # the renderer's None straight into the cell printed a literal "None%"
         # at the operator.
+        # A fallback percentage is a BANDWIDTH reading printed under the
+        # "% of that ceiling" column while "binds on" says unknown, and an
+        # unlabelled percentage against an unnamed ceiling is the mixed
+        # reading matrix.py's utilisation() exists to refuse. Name the axis
+        # in the cell so the two readers cannot disagree silently.
         _, pct_value = _renderer_utilisation(r)
         if pct_value is None:
             pct_value = roof.get("bandwidth_utilisation_pct")
-        pct = "n/a" if pct_value is None else f"{pct_value}%"
+            suffix = "% (bandwidth)"
+        else:
+            suffix = "%"
+        pct = "n/a" if pct_value is None else f"{pct_value}{suffix}"
         # The scope travels with the kind here too: the operator reading a
         # run's summary is a reader like any other (SCHEMA.md renderer notes).
         kind = m["kind"]

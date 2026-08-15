@@ -27,6 +27,7 @@ Vlad's global instructions still apply; this file adds the project's layout, how
 - `bench/cpu_ports.py` - corpus kernel name to parameterisation mapping, plus each buggy kernel's correct control.
 - `bench/measure_escape.py` - escape-rate measurement against the vendored corpus.
   Frozen: reruns must reproduce the ADR 0001 tables exactly.
+  It also owns the fp64 reference cache every other consumer shares; `drop_references(op)` is the public seam for releasing one operator's entries, so nothing reaches into the private global.
 - `bench/score_oracles.py` - mutation scoring of test policies at equal budget B.
 - `bench/probe_bottleneck.py` - one-off probe of where a given fault is detectable; rerun it whenever the catalogue grows.
 - `bench/calibrate_quant_bits.py` - per-bits ensemble adequacy for the quantization contract, with its pre-registered rule in the module docstring.

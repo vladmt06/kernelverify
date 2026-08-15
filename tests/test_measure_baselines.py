@@ -591,7 +591,11 @@ def test_an_unknown_binding_resource_row_prints_its_bandwidth_percentage():
     """
     table = measure_baselines.render([unknown_resource_row()])
     assert "None%" not in table
-    assert "| unknown | 9.1% |" in table
+    # The axis is named in the cell: a bare percentage under "% of that
+    # ceiling" beside a "binds on" of unknown is the mixed reading
+    # matrix.utilisation() refuses to publish, and two readers of the same
+    # run must not disagree about which ceiling a number is measured against.
+    assert "| unknown | 9.1% (bandwidth) |" in table
 
 
 def test_a_cell_with_no_percentage_at_all_says_so_rather_than_printing_None():
