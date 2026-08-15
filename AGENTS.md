@@ -110,8 +110,8 @@ bench/start_binding_run.sh     # arms a launchd job, then quit Terminal
 - Test policies must never reference a known fault; they may only use the operator schema, dtypes, and input modes.
 - Never add AI co-author attribution to commits.
 - Every worker-lane task is planned through the gstack head-engineering review (/plan-eng-review) before dispatch, Vlad's standing rule from 2026-08-14.
-  Amended 2026-08-15: two personal skills run with every review at plan time - /grill-me on the way in (the intent interview shapes the design doc's decision space before the review walks it, skipping branches prior rulings settled) and /to-tickets on the way out (each ruled decision is sliced into lane-mapped vertical tickets with a blocking table before dispatch, and an option that cannot be sliced is not ready to rule on).
-  /tdd triggers at execution, binding on every implementation ticket in every lane brief.
+  Amended 2026-08-15 (final form): at plan time, two skills run with every review - /brainstorming (obra/superpowers: classify the request, widen the option space before converging, hard approval gate) and /grill-me (mattpocock: walk the design tree dependency-first until understanding is shared).
+  /to-tickets slices each ruled plan into tracer-bullet tickets with blocking edges before lane dispatch; /tdd runs at every task start, binding on every implementation ticket in every lane brief.
   The coordinator writes the lane plans into a design doc under ~/.gstack/projects/kernelverify/, the review rules every open decision with Vlad, and a lane brief must trace to a ruled plan with no unresolved decisions, the way W1-W8 traced to the runner-consolidation review.
 
 ## Mistakes already encountered
