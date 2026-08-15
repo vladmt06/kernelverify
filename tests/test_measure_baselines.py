@@ -7,6 +7,7 @@ Neither rule is allowed to be a comment.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -348,3 +349,237 @@ def test_a_sampling_group_is_one_workload_cell_not_the_run():
         ("prefill-w1024", ["llamacpp/prefill"]),
         ("matmul_width-w8", ["llamacpp/width8", "mlx/width8"]),
     ]
+
+
+# --- the D3.7 regression rule: the shipped v3 record is protected ---------
+#
+# Ruled in the 2026-08-15 pivot review: every EXISTING v3 cell of the
+# 2026-08-14 record must reproduce within the producer's repeat-disagreement
+# limit, and new cells only add, never replace. The rule protects cells by
+# IDENTITY, not by kind label: the mlx width-8/16 rows are batch-mechanism
+# cells and are protected exactly like every other cell.
+
+RECORD = Path(__file__).resolve().parents[1] / "bench" / ".baselines" / "2026-08-14.jsonl"
+PROTECTED_RUN = "20260814T230251Z-b50ff2a8"
+
+
+def rows_in(path):
+    """Every row of one baseline file; a blank line is not a row."""
+    return [json.loads(line)
+            for line in path.read_text().splitlines() if line.strip()]
+
+
+def protected_rows():
+    """The v3 measurement rows of the binding 00:05 run: the protected cells."""
+    return [r for r in rows_in(RECORD)
+            if r["schema_version"] == 3 and r["run_id"] == PROTECTED_RUN
+            and r["measurement"]["kind"] != "ceiling"]
+
+
+@pytest.fixture
+def specs(monkeypatch):
+    # resolve_hf_model walks the HF cache on disk; the specs' workload identity
+    # must not depend on what this machine happens to have downloaded.
+    monkeypatch.setattr(measure_baselines.mlx_info, "resolve_hf_model",
+                        lambda repo: Path("/mlx-model"))
+    return measure_baselines.build_specs(None)
+
+
+def test_every_protected_cell_is_still_produced_with_its_recorded_workload(specs):
+    """A rerun can only reproduce a cell if the producer still measures the
+    same workload under the same spec id; a silently changed n_prompt or depth
+    would make 'reproduces' vacuous."""
+    by_id = {s["id"]: s for s in specs}
+    for row in protected_rows():
+        spec_id = row["row_id"].split("/", 1)[1]
+        assert spec_id in by_id, f"protected arm {spec_id} vanished from the producer"
+        assert measure_baselines.measurement_fields(by_id[spec_id]) == row["measurement"], \
+            f"protected arm {spec_id} no longer measures its recorded workload"
+
+
+def test_protected_cells_keep_their_exact_arms(specs):
+    """Adding an arm into an existing cell changes what that cell's A/B is,
+    which is a replacement in disguise; the recorded membership is the cell."""
+    recorded = {row["sampling"]["group"].split("/", 1)[1]:
+                row["sampling"]["group_members"] for row in protected_rows()}
+    current = {label: [m["id"] for m in members]
+               for label, members in measure_baselines.group_cells(specs)}
+    for label, members in recorded.items():
+        assert current.get(label) == members, \
+            f"protected cell {label} changed its arms: {current.get(label)}"
+
+
+def test_new_cells_only_add_never_replace(specs):
+    recorded = {row["sampling"]["group"].split("/", 1)[1]
+                for row in protected_rows()}
+    current = {label for label, _ in measure_baselines.group_cells(specs)}
+    assert recorded <= current, f"protected cells vanished: {recorded - current}"
+    assert current - recorded == {
+        "batch_decode-w4", "batch_decode-w8", "batch_decode-w16",
+    }, "this block adds exactly the three mlx-only serving cells (D6)"
+
+
+def rerun_row(row, median):
+    rerun = json.loads(json.dumps(row))
+    rerun["run_id"] = "20260816T000000Z-00000000"
+    rerun["row_id"] = f"{rerun['run_id']}/{row['row_id'].split('/', 1)[1]}"
+    rerun["result"]["median"] = median
+    return rerun
+
+
+def test_a_rerun_within_the_repeat_disagreement_limit_reproduces():
+    row = protected_rows()[0]  # llamacpp/decode, median 43.05
+    ok, why = measure_baselines.reproduces(row, rerun_row(row, 46.92))  # +9.0%
+    assert ok, why
+
+
+def test_a_rerun_drifted_past_the_limit_is_a_regression_not_noise():
+    """The limit is the producer's own repeat-disagreement limit: a drift the
+    producer would refuse inside one run cannot be waved through between runs."""
+    row = protected_rows()[0]
+    ok, why = measure_baselines.reproduces(row, rerun_row(row, 48.22))  # +12.0%
+    assert not ok
+    assert str(machine_state.MAX_SPREAD_PCT) in why
+
+
+def test_a_row_with_a_different_workload_is_not_a_rerun_at_all():
+    """Equal medians on different workloads prove nothing; identity first."""
+    row = protected_rows()[0]
+    other = rerun_row(row, row["result"]["median"])
+    other["measurement"] = {**other["measurement"], "n_gen": 999}
+    ok, why = measure_baselines.reproduces(row, other)
+    assert not ok
+    assert "workload" in why
+
+
+def test_every_later_binding_rerun_of_a_protected_cell_reproduces_the_record():
+    """The standing D3.7 rule, live against the record itself.
+
+    Vacuously true today, because no later v3 run exists; the moment the next
+    binding run lands in bench/.baselines/, this test IS the regression gate.
+    Non-binding rerun rows are skipped: a median that failed its own
+    dispersion gate is not a claim and cannot fail a reproduction either.
+    """
+    protected = {row["row_id"].split("/", 1)[1]: row for row in protected_rows()}
+    for path in sorted(RECORD.parent.glob("*.jsonl")):
+        for r in rows_in(path):
+            if (r.get("schema_version", 0) < 3 or r.get("run_id") == PROTECTED_RUN
+                    or (r.get("measurement") or {}).get("kind") == "ceiling"
+                    or not r.get("binding")):
+                continue
+            old = protected.get(r["row_id"].split("/", 1)[1])
+            if old is None or old["measurement"] != r["measurement"]:
+                continue  # a new cell: allowed to add, checked elsewhere
+            ok, why = measure_baselines.reproduces(old, r)
+            assert ok, f"{r['row_id']} fails to reproduce its protected cell: {why}"
+
+
+# --- the D6 contract: serving cells are mlx-only this block ---------------
+#
+# The llama.cpp batched-serving baseline is DEFERRED (llama-bench has no
+# parallel mode; TODOS.md carries the scoping). The producer therefore ships
+# n_parallel decode cells for mlx-lm only, labeled so no cross-stack serving
+# comparison can be misread from them.
+
+
+def test_the_producer_ships_mlx_batch_decode_cells_at_the_ruled_points(specs):
+    cells = [s for s in specs if s["kind"] == "batch_decode"]
+    assert sorted(s["batch"] for s in cells) == [4, 8, 16]
+    assert all(s["stack"] == "mlx-lm" for s in cells)
+    # The per-stream shape mirrors the existing mlx/decode cell, so the B=1
+    # anchor of the n_parallel series is the already-protected decode cell.
+    assert all(s["n_prompt"] == measure_baselines.PREFILL_TOKENS for s in cells)
+    assert all(s["n_gen"] == measure_baselines.DECODE_TOKENS for s in cells)
+
+
+def test_no_llamacpp_batch_decode_spec_exists_this_block(specs):
+    assert not [s for s in specs
+                if s["stack"] == "llama.cpp" and s["kind"] == "batch_decode"]
+
+
+def test_each_batch_decode_cell_is_its_own_single_arm_group(specs):
+    """Per-cell groups with one arm each: with no second arm in any group, the
+    renderer structurally cannot form a serving comparison from these rows."""
+    labels = {label: members for label, members in measure_baselines.group_cells(specs)}
+    for n in (4, 8, 16):
+        members = labels[f"batch_decode-w{n}"]
+        assert [m["id"] for m in members] == [f"mlx/batch_decode{n}"]
+
+
+def test_a_batch_decode_row_carries_its_parallelism_and_its_scope(specs):
+    spec = next(s for s in specs if s["kind"] == "batch_decode" and s["batch"] == 8)
+    m = measure_baselines.measurement_fields(spec)
+    assert m["n_parallel"] == 8
+    assert m["matmul_width"] == 8
+    assert m["stack_scope"] == "mlx-only"
+    assert m["width_mechanism"] == "batch-size"
+
+
+def test_batch_decode_bytes_charge_kv_per_stream_and_weights_once(monkeypatch):
+    """n_parallel streams share one weight read per forward pass but each
+    carries its own KV cache; charging KV once would overstate utilisation by
+    nearly the stream count at serving depth."""
+    monkeypatch.setattr(measure_baselines.mlx_info, "cost_model", lambda path: {})
+    monkeypatch.setattr(measure_baselines.mlx_info, "gen_bytes",
+                        lambda cost: 1_000_000_000)
+    monkeypatch.setattr(measure_baselines.mlx_info, "kv_bytes",
+                        lambda cost, ctx: int(ctx * 1_000_000))
+    spec = {"id": "mlx/batch_decode4", "stack": "mlx-lm", "kind": "batch_decode",
+            "batch": 4, "n_prompt": 1024, "n_gen": 128, "model_path": Path("/m")}
+    out = measure_baselines.utilisation(spec, 200.0, {"read_gbs": 100.0,
+                                                      "fp16_gflops": 1000.0})
+    # per-stream average context 1024 + 128/2; weights once, KV four times
+    assert out["bytes_per_pass"] == 1_000_000_000 + 4 * 1_088_000_000
+    # 200 aggregate tokens/s across 4 streams is 50 forward passes/s
+    assert out["achieved_gbs"] == round(5_352_000_000 * 50 / 1e9, 1)
+    assert out["binding_resource"] == "memory"
+
+
+def batch_decode_row(**over):
+    row = valid_row()
+    row["stack"] = {"name": "mlx-lm"}
+    row["measurement"] = {"kind": "batch_decode", "matmul_width": 8,
+                          "n_parallel": 8, "stack_scope": "mlx-only"} | over
+    return row
+
+
+def test_a_well_formed_batch_decode_row_validates():
+    assert measure_baselines.validate_row(batch_decode_row())
+
+
+def test_a_batch_decode_row_missing_its_mlx_only_scope_is_rejected():
+    """The label is the D6 deliverable, not decoration: an unlabeled serving
+    row is exactly the row a reader would set beside the other stack."""
+    with pytest.raises(ValueError, match="mlx-only"):
+        measure_baselines.validate_row(batch_decode_row(stack_scope=None))
+
+
+def test_a_batch_decode_row_without_n_parallel_is_rejected():
+    with pytest.raises(ValueError, match="n_parallel"):
+        measure_baselines.validate_row(batch_decode_row(n_parallel=None))
+
+
+def test_a_llamacpp_batch_decode_row_is_refused_this_block():
+    """D6 made executable: the deferred llama.cpp serving arm cannot be
+    written by this producer, only by the block that builds it honestly."""
+    row = batch_decode_row()
+    row["stack"] = {"name": "llama.cpp"}
+    with pytest.raises(ValueError, match="deferred"):
+        measure_baselines.validate_row(row)
+
+
+def test_the_producer_console_table_carries_the_scope_too():
+    """The scope renders wherever the kind appears (SCHEMA.md), and the
+    operator reading a run's console summary is a reader too."""
+    row = batch_decode_row()
+    row["result"] |= {"spread_pct": 0.5}
+    row["roofline"] |= {"achieved_gbs": 50.0}
+    assert "batch_decode (mlx-only)" in measure_baselines.render([row])
+
+
+def test_the_shipped_v3_record_still_validates_under_todays_producer():
+    """The other half of only-add: tightening the contract for new cells must
+    not retroactively reject the rows already in the record."""
+    for row in rows_in(RECORD):
+        if row["schema_version"] == 3:
+            assert measure_baselines.validate_row(row)
