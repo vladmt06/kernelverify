@@ -34,7 +34,8 @@ Vlad's global instructions still apply; this file adds the project's layout, how
 - `bench/calibrate_quant_device.py` - the device-arithmetic membership calibration: trigger, membership-before-K repair order, K re-derivation, with its pre-registered rule in the module docstring.
   ADR 0012 is the reading of its run; reruns must reproduce its tables.
 - `bench/calibrate_quant_serving.py` - 3-bit adequacy at the Qwen3-4B E2E serving shapes, with its pre-registered rule in the module docstring: continuity anchor against the ADR 0012 cache, per-shape G0, the batch-regime probe with direct-match coverage, per-cell K demand against the shipped K = 4, and gates under width-pooled fault equivalence.
-  ADR 0013 is the reading of its run; reruns must reproduce its tables.
+  ADR 0013 is the reading of its run; reruns must reproduce its measured records bit-identically, and their interpretation follows ADR 0014 (the exit-1 refusal ADR 0013 recorded was the pre-ruling reading).
+  Amended 2026-08-15 (fourth, ADR 0014): STEP 4/5 read under per-cell held-out eligibility from `kernelverify/schemas/heldout_eligibility.py` - out-of-contract cells are labelled with their numbers, never a DEMAND MISS; the miss branch fires on the admissible-only demand; the shipped-tolerance overshoot is printed beside `k_demand`, both-readings style.
   Amended 2026-08-15 after three SIGKILLs in step 2: per-shape and per-implementation progress lines carrying an RSS self-report, a per-step checkpoint at `bench/.cache/quant_serving_partial.json` (atomic write, `--resume` at step granularity only), and row-chunked dequantization so the lm_head weights stop paying a 3x whole-matrix transient.
   The amendment and its bit-equality proof are in the module docstring.
   Amended again the same night (memory-truthfulness): a phys_footprint budget with a distinct refusal exit (never a shrunk grid), a machine-global single-instance lock plus an available-memory gate, and child-process isolation per measurement iteration; the root leak was per-case Metal buffer allocation, fixed by the buffer pool in `kernelverify/runners/device.py`.
@@ -57,7 +58,9 @@ Vlad's global instructions still apply; this file adds the project's layout, how
 - `bench/OPERATOR-CARD.md` - the one-card instruction for starting a binding run and reading its outcome.
 - `bench/mlx_info.py` - the MLX safetensors equivalent of `gguf_info`, so both stacks get modelled bytes rather than file size.
 - `bench/.baselines/SCHEMA.md` - the row contract the per-chip matrix renderer consumes. The producer validates against it on every write.
-- `bench/results/` - the recorded baselines, committed. ADR 0007 is the reading of them.
+- `bench/reinterpret_serving_adequacy.py` - the ADR 0014 reading of the committed ADR 0013 evidence: a pure CPU re-read (sha256-checked) that writes a separate derived artifact and refuses to write if any in-contract quantity drifts from the recorded tables.
+- `kernelverify/schemas/heldout_eligibility.py` - which held-out implementations are admissible in which (batch, dtype) cells: versioned contract data, each exclusion hash-guarded against the MLX kernel source it was ruled on, failing loudly on mismatch so an MLX fix is never waved through on a stale label.
+- `bench/results/` - the recorded baselines and the committed serving-adequacy evidence plus its derived reinterpretation. ADR 0007 is the reading of the baselines, ADR 0013/0014 of the serving records.
 - `docs/adr/` - decisions with the measurements that forced them.
   Read these before changing any method.
 - `vendor/gpuemu-corpus/` - vendored unmodified at the commit pinned in `vendor/PINNED.txt`.
@@ -82,7 +85,7 @@ cd /Users/vlad/kernelverify
 - The environment needs `torch`, which only `gelu[variant=erf]` uses; a worktree venv created without it fails part-way through a verdict build.
 - It also needs `mlx==0.32.0` and `mlx-lm==0.31.3`, pinned across worktrees so binding comparisons stay on one toolchain.
   Without mlx, the mlx-dependent test modules are skipped whole or fail to collect, so the suite under-reports badly.
-  Skipped modules hide their contents rather than their count, so quote test counts from an mlx-equipped venv only; the mlx-equipped suite passes 621 as of 2026-08-15.
+  Skipped modules hide their contents rather than their count, so quote test counts from an mlx-equipped venv only; the mlx-equipped suite passes 684 as of 2026-08-15.
 
 The machine baseline, in this order, because each step writes the denominators the next one divides by:
 
@@ -169,6 +172,9 @@ bench/start_binding_run.sh     # arms a launchd job, then quit Terminal
   Batching dispatches past 5 ms did NOT prevent this; interleaving the arms within each round is independently load-bearing.
   Interleaving is necessary and NOT sufficient: it equalizes a clock excursion across arms but cannot detect one, so the reference arm's own spread is the detector - reject any round whose reference samples exceed the class spread limit (1.5x max-to-min for kernel arms, tighter for steadier quantities).
   Interleave every comparative measurement, always, even when each dispatch is ms-scale.
+- A `k_demand` reading is a K demand, not an error magnitude.
+  At fp16 activations every contract member rounds its output to the storage dtype, so the ensemble floor collapses to the output's own rounding, the shipped tolerance's floor term goes inert (base_tol wins in 768/768 fp16 records), and `e / floor` explodes: a 12.4x overshoot of the actual tolerance was read as a demand of 195 (ADR 0014).
+  Report the shipped-tolerance overshoot beside the demand, always, and treat a floor that all implementations saturate identically as measuring nothing about class spread.
 - Row-partitioning a matmul is NOT bit-exact, however plainly the arithmetic says each output element's dot product is untouched by it.
   Measured on numpy 2.5.2 over Accelerate: cutting the output-row dimension of `x @ w.T` changes dgemm's blocking and moves fp64 results by up to 2e-14, at chunk sizes 1, 7 and 3276 and at shapes from (5, 128, 96) to (16, 2560, 20000).
   Chunk the dequantization instead, which is elementwise per row and therefore exact by construction, and leave every matmul whole.

@@ -146,3 +146,13 @@ The merge review caught this; commit c5b508a added a code-identity component to 
 Under c5b508a, STEP 0 was then re-measured in the foreground twice (once by the lane, once independently by the coordinator): both runs reproduced ADR 0012's 64 cached device records exactly, exit 0.
 The pool therefore did not change device arithmetic, and this ADR's verdict stands on a re-measured anchor rather than a resumed one.
 The pre-pool checkpoint is preserved at `bench/.cache/quant_serving_partial.prepool-backup.json`.
+
+## Amendment (2026-08-15, second): the renegotiation has been ruled, and the freeze line narrows to the measured records
+
+The renegotiation this ADR handed to the coordinator landed as ADR 0014.
+The ruling: the binding held-out `mlx-on-device` was not an admissible implementation in the missing cells - MLX's batch-1 fp16 kernel carries a half-precision activation sub-sum, out of contract by clause C1 - so the miss was the verifier flagging silent precision loss in the stock stack, not a membership gap; the batch-16 fp16 kernel is excluded on the same structural bar.
+K = 4 and the membership stay unchanged, and no number in this ADR's tables changes.
+
+This run's records are now a committed record at `bench/results/quant_serving_adequacy.json` (sha256 `54d0ad5ca4f28f00a401f0481a8b1c69c42cadcc01e3c4a21cca7728ced01833`), and `bench/reinterpret_serving_adequacy.py` derives the ruled reading from them into `bench/results/quant_serving_reinterpretation.json` without touching them.
+The freeze line accordingly narrows by this ADR's own amendment pattern: reruns must reproduce this ADR's MEASURED RECORDS bit-identically, and their interpretation follows ADR 0014 - per-cell held-out eligibility, out-of-contract cells labelled with their numbers, the DEMAND MISS branch judged on the admissible-only demand, and the tolerance overshoot printed beside `k_demand`.
+The exit-1 refusal this ADR recorded was the correct PRE-RULING reading; a rerun today still exits 1, through the same branch, on the four-cell in-contract residual ADR 0014 reports (the admissible-only demand of member `device-factored-simd` at fp32 constant-rows), which remains open coordinator business.

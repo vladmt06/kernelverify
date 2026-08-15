@@ -1,5 +1,24 @@
 # TODOS
 
+## The fp16 ensemble floor is inert: compute it before storage-dtype rounding
+
+- What: at float16 activations every quant contract member returns `.astype(x.dtype)`, so the output's own fp16 rounding dominates every internal difference and all eleven implementations report the identical max error; the floor then measures one common rounding step instead of class spread, `base_tol` wins in 768/768 fp16 serving records, and `k_demand`'s `e / floor` reported 195 where the shipped tolerance was exceeded 12.4x.
+  The repair is to compute the ensemble floor BEFORE the final storage-dtype rounding (members return their pre-rounding fp32 values to the floor computation, the verdict comparison unchanged), so the fp16 floor measures implementation diversity again and the demand metric points at the right cell size immediately.
+- Why: this inert floor is the root cause of the misread ADR 0013 number (a K demand read as an error magnitude), and the both-readings print ADR 0014 shipped is the label on the symptom, not the fix.
+- Pros: makes `k_demand` a real K demand at fp16; would have reported 12.4x instead of 195.2 and pointed at the B1 cell size on the first run; changes no verdict semantics.
+- Cons: redefines the floor half of the shipped tolerance, so the whole K derivation chain (ADR 0005, 0009, 0012) needs re-measurement under the new floor, which is a pre-registered calibration pass, not a patch.
+- Context: mechanism dissected in `bench/.cache/b1-cliff-investigation.md` (hypothesis 2, confirmed one level down) and recorded in ADR 0014's reporting clarification.
+- Depends on / blocked by: coordinator ruling plus a pre-registered rerun of the K calibration; must be planned through /plan-eng-review like every lane task.
+
+## B16 mechanism demonstration (optional corroboration for the ADR 0014 exclusion)
+
+- What: a bit-exact CPU emulation of `affine_qmm_t`'s threadgroup half tile, with the fp32-tile ablation, the way `bench/.cache/b1-cliff/qmv_emulate.py` proved the B1 mechanism; the B16 exclusion stands on the structural bar (verified source reading, D2) and this would add the mechanism proof at its measured strength.
+- Why: B16's numbers (1.9x the floor median, up to 5.3x at fp16, masked under `base_tol` at max 0.34x) are recorded without a mechanism decomposition, and a demonstrated mechanism would make the exclusion's corroboration symmetric with B1's.
+- Pros: CPU-only, no GPU slot, no measurement lock; the emulation harness pattern already exists beside the investigation.
+- Cons: pure corroboration - D2 makes it unnecessary for the exclusion to stand - so it should never displace lane work that moves a gate.
+- Context: ADR 0014 records the B16 exclusion and names this as the optional follow-up; the tile structure is quoted in `bench/.cache/b1-cliff-investigation.md` (loose ends).
+- Depends on / blocked by: nothing.
+
 ## llama.cpp batched-serving baseline (deferred by D6)
 
 - What: add llama.cpp n_parallel decode cells to `bench/measure_baselines.py`, so the serving matrix carries both stacks and the mlx-only `batch_decode` cells gain a cross-stack counterpart.
