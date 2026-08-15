@@ -220,13 +220,15 @@ def build_verdicts() -> dict:
 def _drop_op_references(op: str, ref_cache: dict) -> None:
     """Free `op`'s fp64 references once its last catalogue entry is scored.
 
-    Both caches key by tuples whose first element is the operator, and the
-    references are the bulk of a build's memory; every key that a later
-    catalogue entry can still hit survives untouched.
+    This module's own cache keys by tuples whose first element is the operator;
+    the escape bench releases its share through its own `drop_references`, so
+    the frozen module keeps its cache private. The references are the bulk of a
+    build's memory, and every key a later catalogue entry can still hit
+    survives untouched.
     """
-    for cache in (ref_cache, measure_escape._REFERENCE_CACHE):
-        for key in [k for k in cache if k[0] == op]:
-            del cache[key]
+    for key in [k for k in ref_cache if k[0] == op]:
+        del ref_cache[key]
+    measure_escape.drop_references(op)
 
 
 def _rebuild_verdicts() -> dict:
