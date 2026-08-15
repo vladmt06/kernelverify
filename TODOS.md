@@ -1,5 +1,25 @@
 # TODOS
 
+## The shipped K is not derived over the shapes it must cover
+
+- What: make the quantized K derivation read every harness's records - the device grid's three synthetic shapes AND the serving grid's six Qwen3-4B shapes - and take the maximum demand, instead of each harness deriving a K from its own shapes and printing it as `shipped K`.
+- Why: on 2026-08-15 the device harness printed `shipped K: 3.0` from a peak demand of 2.766 over its three shapes, while the serving grid demanded 3.120 at 2560x9728; adopting the printed line would have shipped a K that the next serving run refuses through its own DEMAND MISS branch (ADR 0016).
+  Nothing in the code connects the two, so the safeguard today is a human noticing.
+- Pros: the number a harness prints becomes the number that ships; a new shape family (a second model, a new serving grid) automatically participates instead of silently sitting outside the derivation.
+- Cons: couples two harnesses that currently run independently; a third small script that reads both committed record sets and derives K once keeps them independent and is probably the better shape.
+- Context: ADR 0016's decision section has both readings and the cell that binds each; `bench/results/quant_device_adequacy.json` and `bench/results/quant_serving_adequacy.json` are both committed, so the inputs already exist.
+- Depends on / blocked by: nothing technical.
+
+## The int-domain class rests on one outlying member
+
+- What: decide whether the quantized contract's int-domain class needs a second member, and if so which real kernel it stands for; then re-derive K over the enlarged membership.
+- Why: the ADR 0016 repair moved `factored-groups` from the most accurate member on constant rows to the least, and its leave-one-out spread against the six-member shipped floor went from 4.076 to 7.561 while the next int-domain member, `factored-serial`, reads 1.692.
+  That is an adequacy statistic and not a live flag - the shipped floor contains the member, so a candidate rounding like it is judged against a floor holding its own error - but it says one member carries a whole class.
+- Pros: the standing repair order (membership before K) says this is the membership question to ask before any K move; a second int-domain member would also make the class's leave-one-class-out diagnostic meaningful.
+- Cons: a companion member was proposed for this class once and withdrawn, because it targeted the statistic while the false positives stayed live; those are now closed, so the same proposal has to be re-argued on its own merits rather than as a fix for something else.
+- Context: ADR 0016, section "The open question the repair exposes"; the numbers are in `tests/test_quant_contract_members.py::test_k_stays_four_and_the_member_now_carries_its_class_alone`.
+- Depends on / blocked by: nothing; it is a contract-population decision for the coordinator and Vlad.
+
 ## The fp16 ensemble floor is inert: compute it before storage-dtype rounding
 
 - What: at float16 activations every quant contract member returns `.astype(x.dtype)`, so the output's own fp16 rounding dominates every internal difference and all eleven implementations report the identical max error; the floor then measures one common rounding step instead of class spread, `base_tol` wins in 768/768 fp16 serving records, and `k_demand`'s `e / floor` reported 195 where the shipped tolerance was exceeded 12.4x.

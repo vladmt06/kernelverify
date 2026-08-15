@@ -223,7 +223,7 @@ def clauses_for(family: str) -> tuple:
 def contract_version_for(family: str) -> str:
     if family == wide_qmv.KERNEL_NAME:
         return (f"MLX-affine quant contract, device-joined ensemble, "
-                f"K_QUANT={K_QUANT:g} (ADR 0009/0012)")
+                f"K_QUANT={K_QUANT:g} (ADR 0009/0012/0016)")
     if family == kv_attention.KERNEL_NAME:
         return "kv_attention contract (frozen at 8ec7eca; NATIVE_OPS['kv_attention'])"
     return ("moe_dispatch contract (NATIVE_OPS['moe_dispatch'], Qwen3-class "

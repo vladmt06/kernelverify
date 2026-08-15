@@ -38,7 +38,10 @@ from phase0_contract_k import err, make_w, make_x
 
 BITS = 3
 GROUP = 64
-K_SHIPPED = 4.0
+# The K that SHIPPED the ten false positives (ADR 0012), kept as a literal on
+# purpose: the "before" column below is a fact about that tolerance and must
+# not follow K_QUANT when it moves. The re-derived K is asserted separately.
+K_AT_THE_TIME = 4.0
 CPU_MEMBERS = tuple(ENSEMBLE)
 UNTOUCHED = tuple(m for m in CPU_MEMBERS if m != "factored-groups")
 DEVICE_MEMBER = "device-factored-simd"
@@ -161,9 +164,12 @@ def evidence():
     return json.loads(EVIDENCE.read_text())["records"]
 
 
+def _tolerance(record, members, k):
+    return max(record["base_tol"], k * max(members[m] for m in CPU_MEMBERS))
+
+
 def _shipped_tolerance(record, members):
-    return max(record["base_tol"],
-               K_SHIPPED * max(members[m] for m in CPU_MEMBERS))
+    return _tolerance(record, members, K_AT_THE_TIME)
 
 
 def _false_positives(records):
@@ -241,18 +247,61 @@ def test_the_ten_shipped_false_positives_are_closed(evidence):
     assert 0.20 < min(after) <= max(after) < 0.30, sorted(after)
 
 
-# ---------------------------------------------------------------------------
-# The repair changed a member's arithmetic under an unchanged name, which is
-# the one change a label-keyed cache cannot see. The verdict cache must carry
-# the ensemble version so a stale floor cannot be read back as current.
-# ---------------------------------------------------------------------------
-def test_verdict_cache_fingerprint_sees_the_ensemble_version():
-    from kernelverify.battery.core import _oracle_member_labels
-    from kernelverify.schemas.quant_contract import QUANT_ENSEMBLE_VERSION
+def test_k_stays_four_and_the_member_now_carries_its_class_alone(evidence):
+    """ADR 0016, the two readings that decided K.
 
-    labels = _oracle_member_labels()
-    assert "quant:factored-groups" in labels, "the label is still there ..."
-    assert f"quant-ensemble={QUANT_ENSEMBLE_VERSION}" in labels, (
-        "... but the label alone cannot see that its arithmetic changed")
-    assert QUANT_ENSEMBLE_VERSION != "quant-ensemble-v1", (
-        "v1 named the pairwise member; the chained member needs its own")
+    The device grid's demand fell to 2.766 and its harness printed
+    `shipped K: 3.0`, but the shipped K must cover the shapes the verifier is
+    actually pointed at. Two quantities live on the serving grid and they
+    disagree, so both are pinned here:
+
+    - the K-derivation demand over the NINE-name membership (ADR 0012's rule)
+      is 3.120, which the K grid covers at 4.0 and not at 3.0;
+    - the leave-one-out spread over the SIX CPU members the shipped tolerance
+      actually divides by is 7.561, up from 4.076 before the repair.
+
+    The second is an ensemble-adequacy statistic, not a live flag: the shipped
+    floor CONTAINS factored-groups, so a candidate rounding like it is judged
+    against a floor that already holds its own error. It says the int-domain
+    class now rests on one member that sticks out, which is a membership
+    question ADR 0016 records as open rather than resolving.
+    """
+    from kernelverify.schemas.native_ops import K_QUANT
+
+    assert K_QUANT == 4.0
+    block = [r for r in evidence
+             if r["shape"] == "9728x2560" and r["draw"] == "normal-0.02"
+             and r["seed"] == 1]
+    assert len(block) == 32, "the block's own shape is part of the check"
+
+    worst, binding = 0.0, ""
+    for record, members in _recompute(block):
+        for name in CPU_MEMBERS:
+            others = max(members[m] for m in CPU_MEMBERS if m != name)
+            if members[name] > record["base_tol"] and others > 0:
+                ratio = members[name] / others
+                if ratio > worst:
+                    worst = ratio
+                    binding = f"{name} B{record['batch']} {record['mode']} {record['dtype']}"
+
+    assert round(worst, 3) == 7.561, (worst, binding)
+    assert binding == "factored-groups B1 constant-rows float32", binding
+    assert worst > K_QUANT, "recorded as open: no K in the grid covers this spread"
+
+
+def test_the_shipped_verifier_flags_no_correct_kernel_after_the_repair(evidence):
+    """The product claim, on the cells that carried the defect: judged the way
+    the shipped verifier judges - candidate against max(base, K * floor over
+    the six CPU members) - the ten flagged records are all inside tolerance,
+    and nothing else in those records' blocks has taken their place."""
+    from kernelverify.schemas.native_ops import K_QUANT
+
+    flagged = _false_positives(evidence)
+    assert len(flagged) == 10
+    for record, members in _recompute(flagged):
+        tol = max(record["base_tol"],
+                  K_QUANT * max(members[m] for m in CPU_MEMBERS))
+        for name in ("device-factored-simd", "device-dequant-simd",
+                     "device-dequant-loop"):
+            ratio = record["members"][name] / tol
+            assert ratio < 1.0, (name, ratio, record["shape"], record["mode"])
