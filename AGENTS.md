@@ -24,6 +24,10 @@ Vlad's global instructions still apply; this file adds the project's layout, how
   Read the module docstring before changing any tolerance; the exclusions are what keep precision faults faults.
 - `kernelverify/tolerance/floor.py` - the shipped conditioning-aware tolerance.
   Its ensemble is a prefix of the contract population, not a hand-written list.
+- `kernelverify/pack/wide_qmv.py` - the wide-tile quantized GEMV kernel and its dispatch decision.
+  `should_dispatch(m, bits, d_out, d_in)` consults the routing table; it never carries a default window of its own.
+- `kernelverify/pack/routed_windows.py` - the routing table, derived at import from the committed pricing recording and pinned to that recording's sha256, the kernel source's sha256 and the launch config it was priced at.
+  Nothing here is hand-written except the exclusions and the pins, so shipped routing and recorded evidence cannot drift apart.
 - `bench/cpu_ports.py` - corpus kernel name to parameterisation mapping, plus each buggy kernel's correct control.
 - `bench/measure_escape.py` - escape-rate measurement against the vendored corpus.
   Frozen: reruns must reproduce the ADR 0001 tables exactly.
@@ -39,10 +43,16 @@ Vlad's global instructions still apply; this file adds the project's layout, how
   Amended 2026-08-15 after three SIGKILLs in step 2: per-shape and per-implementation progress lines carrying an RSS self-report, a per-step checkpoint at `bench/.cache/quant_serving_partial.json` (atomic write, `--resume` at step granularity only), and row-chunked dequantization so the lm_head weights stop paying a 3x whole-matrix transient.
   The amendment and its bit-equality proof are in the module docstring.
   Amended again the same night (memory-truthfulness): a phys_footprint budget with a distinct refusal exit (never a shrunk grid), a machine-global single-instance lock plus an available-memory gate, and child-process isolation per measurement iteration; the root leak was per-case Metal buffer allocation, fixed by the buffer pool in `kernelverify/runners/device.py`.
+  Those guards now live in `bench/memory_guard.py` and are imported here, not owned here, since the pricing probe needs the same ones.
   The three Jetsam kills that forced this (66.7, 69.4, 39.5 GB footprints on the 36 GB machine) are dissected in the module docstring's second amendment; `tests/test_serving_survival.py` is its proof suite.
   Amended a third time (the merge review of that night's work, same docstring): the checkpoint fingerprint now carries a sha256 over the modules a record's value passes through, because the run resumed past STEP 0 - the pipeline's only end-to-end bit-exactness gate - on a checkpoint written by pre-buffer-pool code, and `--continuity-only` runs STEP 0 alone, which is the check to run after any change to the arithmetic path.
   The single-instance lock moved to `machine_state.MeasurementLock`: ONE `fcntl.flock` shared by every heavy harness, since a per-harness lock let the pricing probe run beside the calibration, which is the 03:29 collapse itself, and a pid file cannot be read without a stale-pid judgement that eventually steals a live holder's lock.
   The pinned 3-bit artifact lives at the absolute path `/Users/vlad/kernelverify/bench/.models/qwen3-4b-3bit-g64`; `bench/.models` is gitignored, so it exists in the main worktree only and never arrives via merge.
+- `bench/memory_guard.py` - the footprint budget, the phys_footprint reader, the available-memory gate and the numbered refusal exits, shared by every harness that can be Jetsam-killed.
+  Extracted from `calibrate_quant_serving.py` on 2026-08-15 so the pricing probe enforces the same budget by the same code, not by a second copy with its own numbering.
+- `bench/pack_wide_qmv.py` - the kernel pack's correctness gate: the shared sampler, the E2E dispatch shapes, and per-shape coverage at exactly the tile widths the pack routes to each of them.
+- `bench/price_qmv_boundary.py` - the routing-boundary pricing probe (verify-then-time, interleaved arms, refusal-gated), with its pre-registered rule in the module docstring: what makes a cell WIN, and the only way a routed window may widen.
+  ADR 0015 is the reading of its 2026-08-15 run.
 - `bench/calibrate_k.py` - measures what the admissible-implementation contract demands of K, and how many ensemble members it takes to represent that contract.
   Rerun it whenever the contract, the ensemble or the catalogue changes.
 - `bench/roofline.py` and `bench/metal/roofline_probe.mm` - this machine's measured ceilings, GPU and CPU.
@@ -88,7 +98,8 @@ cd /Users/vlad/kernelverify
 - The environment needs `torch`, which only `gelu[variant=erf]` uses; a worktree venv created without it fails part-way through a verdict build.
 - It also needs `mlx==0.32.0` and `mlx-lm==0.31.3`, pinned across worktrees so binding comparisons stay on one toolchain.
   Without mlx, the mlx-dependent test modules are skipped whole or fail to collect, so the suite under-reports badly.
-  Skipped modules hide their contents rather than their count, so quote test counts from an mlx-equipped venv only; the mlx-equipped suite passes 621 as of 2026-08-15.
+  Skipped modules hide their contents rather than their count, so quote test counts from a fully equipped venv only; the suite passes 716 on main as of 2026-08-15.
+  Fully equipped means `pyobjc` as well as `mlx`: without the Metal bindings the runner-backed pack tests fail rather than skip, so a venv with mlx alone reports 468 passed and 30 skipped and is not a count anyone should quote.
 
 The machine baseline, in this order, because each step writes the denominators the next one divides by:
 

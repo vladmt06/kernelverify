@@ -53,6 +53,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from kernelverify.pack.routed_windows import window_for
+
 SIMD_WIDTH = 32
 SIMDGROUPS_PER_THREADGROUP = 8
 
@@ -135,30 +137,49 @@ WIDE_QMV_MSL = """
 INPUT_NAMES = ["x", "w_q", "scales", "biases"]
 OUTPUT_NAMES = ["out"]
 KERNEL_NAME = "kv_wide_qmv"
+SUPPORTED_BITS = (2, 3, 4)
 
 
-def should_dispatch(m: int) -> bool:
-    """Whether the pack should use this kernel at all, or defer to MLX.
+def should_dispatch(m: int, bits: int, d_out: int, d_in: int) -> bool:
+    """Whether the pack should use this kernel for THIS cell, or defer to MLX.
 
-    Below MIN_PROFITABLE_M, MLX already reads the weights once and this kernel
-    has nothing to win back. At 4 bits that is a wash (1.00-1.02x), but at
-    2 bits it is a measured loss (0.81-0.89x at M = 1 and 2), so the pack
-    routes to MLX there rather than shipping a regression.
+    Every argument is required: routing is a property of the whole
+    (tile width, bit width, shape) cell, and a caller that supplies less than
+    that is asking to be routed on evidence nobody collected.
+
+    Shipped scope, deliberately narrow: the six distinct qmv shapes one model
+    (Qwen3-4B) dispatches at decode, at 3 bits, from one recording
+    (kernelverify/pack/routed_windows.py). Five of them route M = 5..9;
+    lm_head routes M = 5..10, because at 151936 rows MLX's second weight pass
+    still costs more than this kernel's single pass one width further. 2-bit
+    and 4-bit route NOWHERE, not because they lose but because they have no
+    recording: the 4-bit pricing run is queued (ruling D1, TODOS.md), and
+    until it lands MLX serves that width. Any shape outside the six is
+    likewise unrouted.
+
+    Each window is conditional on the launch config it was priced at - the R
+    that rows_per_simdgroup returns - and on the kernel body the recording
+    timed, both pinned by sha in routed_windows. Change either and the windows
+    describe a kernel that no longer exists.
+
+    What is BELOW a window is not uniformly a measured loss, which the old
+    single-boundary docstring got wrong. At four of the six shapes M = 4 came
+    back REFUSED: its ratio interval straddles 1.0, so the point cannot claim
+    a direction either way - undecided, not bad. M = 4 is a measured LOSS at
+    q_proj only, and a measured WIN at lm_head that ruling D2 does not route
+    (routed_windows.EXCLUDED_CELLS has the reason). Two more REFUSED cells sit
+    lower still, at M = 2 (gate/up_proj) and M = 3 (down_proj), so M = 1 is the
+    only width that is a measured loss at every shape it was priced at, and
+    M = 2 and M = 3 lose at five of six. An undecided cell routes to MLX
+    for the same reason a losing one does - no evidence supports taking it -
+    but it is one pricing run away from moving, not a closed question.
     """
-    return m >= MIN_PROFITABLE_M
+    return m in window_for(bits, d_out, d_in)
 
 
 def rows_per_simdgroup(m: int) -> int:
     """R, from the measured register wall: 4 up to M = 10, then 2."""
     return 4 if m <= 10 else 2
-
-
-SUPPORTED_BITS = (2, 3, 4)
-
-# Below this tile width MLX already reads the weights once and is at or ahead
-# of this kernel, decisively so at 2 bits (0.83x at M = 1), so the pack should
-# route there instead of shipping a loss.
-MIN_PROFITABLE_M = 5
 
 
 def pack_codes(q: np.ndarray, bits: int) -> np.ndarray:

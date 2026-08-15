@@ -125,11 +125,36 @@ def member_dequant_pairwise(x: np.ndarray, a: QuantArtefact) -> np.ndarray:
     return (_f32(x) @ w.T).astype(x.dtype)
 
 
+# One serial-member row block's product may hold this many bytes. The whole
+# (m, d_out, d_in) product at the serving shapes is what Jetsam kills on
+# (25 GB per member at lm_head M=16; the 2026-08-15 pricing instrumentation
+# measured its per-tile-width variants ratcheting malloc's dirty pages to
+# 22 GB before its own cap refused), and row chunking is bit-identical at
+# every chunk size: the elementwise product and the accumulation run along
+# d_in, never across rows, and no BLAS is involved. The floor, and every
+# verdict recorded from it, is therefore unchanged.
+SERIAL_CHUNK_BYTES = 1 << 27
+
+
+def _serial_rows(x32: np.ndarray, w32: np.ndarray, reverse: bool) -> np.ndarray:
+    """Strict serial accumulation over d_in, in bounded output-row chunks."""
+    rows = w32.shape[0]
+    m, d_in = x32.shape
+    bytes_per_row = m * d_in * 4   # one output row's fp32 product block
+    chunk = max(1, SERIAL_CHUNK_BYTES // bytes_per_row)
+    out = np.empty((m, rows), dtype=np.float32)
+    for start in range(0, rows, chunk):
+        prod = x32[:, None, :] * w32[start:start + chunk][None, :, :]
+        if reverse:
+            prod = prod[:, :, ::-1]
+        out[:, start:start + chunk] = np.add.accumulate(prod, axis=2)[:, :, -1]
+    return out
+
+
 def member_dequant_serial(x: np.ndarray, a: QuantArtefact) -> np.ndarray:
     """Dequantize to fp32, accumulate strictly left to right (worst legal order)."""
     w = dequantize(a, np.float32)
-    prod = _f32(x)[:, None, :] * w[None, :, :]
-    return np.add.accumulate(prod, axis=2)[:, :, -1].astype(x.dtype)
+    return _serial_rows(_f32(x), w, reverse=False).astype(x.dtype)
 
 
 def member_lut_gather(x: np.ndarray, a: QuantArtefact) -> np.ndarray:
@@ -165,8 +190,7 @@ def member_factored_groups(x: np.ndarray, a: QuantArtefact) -> np.ndarray:
 def member_dequant_reversed(x: np.ndarray, a: QuantArtefact) -> np.ndarray:
     """Serial accumulation in reversed feature order (a second legal order)."""
     w = dequantize(a, np.float32)
-    prod = (_f32(x)[:, None, :] * w[None, :, :])[:, :, ::-1]
-    return np.add.accumulate(prod, axis=2)[:, :, -1].astype(x.dtype)
+    return _serial_rows(_f32(x), w, reverse=True).astype(x.dtype)
 
 
 def member_factored_serial(x: np.ndarray, a: QuantArtefact) -> np.ndarray:

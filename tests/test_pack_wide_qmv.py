@@ -25,7 +25,6 @@ from kernelverify.pack.verify import (
     verify_output,
 )
 from kernelverify.pack.wide_qmv import (
-    MIN_PROFITABLE_M,
     SUPPORTED_BITS,
     build,
     launch_config,
@@ -70,11 +69,45 @@ def test_rows_per_simdgroup_drops_at_the_register_wall():
     assert rows_per_simdgroup(11) == 2
 
 
-def test_defers_to_mlx_below_the_profitable_tile_width():
-    """At 2 bits this kernel measured 0.81-0.89x at M = 1 and 2, so the pack
-    must route those to MLX instead of shipping a regression."""
-    assert not any(should_dispatch(m) for m in range(1, MIN_PROFITABLE_M))
-    assert all(should_dispatch(m) for m in range(MIN_PROFITABLE_M, 12))
+Q_PROJ = (4096, 2560)
+LM_HEAD = (151936, 2560)
+
+
+def test_routes_per_shape_over_the_served_batch_range():
+    """Routing is per-shape and per-width, read off the priced table, not off
+    one pair of bounds. Five shapes route M = 5..9; lm_head routes one width
+    further because at 151936 rows MLX's second weight pass still costs more
+    than our single pass at M = 10. The batch range is the block's own
+    B = 1..16 (ruling D1)."""
+    assert ([m for m in range(1, 17) if should_dispatch(m, 3, *Q_PROJ)]
+            == [5, 6, 7, 8, 9])
+    assert ([m for m in range(1, 17) if should_dispatch(m, 3, *LM_HEAD)]
+            == [5, 6, 7, 8, 9, 10])
+
+
+def test_the_cells_the_old_uniform_window_got_wrong():
+    """The 5..11 default routed two widths that measure LOSS at q_proj, and
+    lm_head M=4 measures WIN but stays unrouted under ruling D2."""
+    assert not should_dispatch(10, 3, *Q_PROJ)   # LOSS, routed by the default
+    assert not should_dispatch(11, 3, *Q_PROJ)   # LOSS, routed by the default
+    assert not should_dispatch(4, 3, *LM_HEAD)   # WIN, refused by D2
+    assert should_dispatch(10, 3, *LM_HEAD)      # WIN only at this shape
+
+
+def test_anything_unpriced_routes_nowhere():
+    """4-bit routes nowhere until its own pricing run lands (ruling D1), and
+    an unrecorded shape has no evidence, so it gets no routing rather than a
+    default."""
+    assert not should_dispatch(7, 4, *Q_PROJ)
+    assert not should_dispatch(7, 2, *Q_PROJ)
+    assert not should_dispatch(7, 3, 4096, 2624)
+
+
+def test_should_dispatch_demands_the_whole_key():
+    """A caller written against the old one-argument boundary must fail loudly
+    rather than route on a shape and width nobody priced."""
+    with pytest.raises(TypeError):
+        should_dispatch(7)
 
 
 def test_handles_d_out_not_divisible_by_r(kernel):
@@ -109,6 +142,210 @@ def test_agrees_with_contract_at_every_bit_width(kernel, bits, m):
     got = _run(kernel, x, art, d_out, bits=bits)
     v = verify_output("quantized_matmul", qmv_inputs(x, w, bits), got)
     assert v.ok, v
+
+
+def test_gate_covers_the_e2e_dispatch_shapes_at_3_bit():
+    """The gate must price coverage where the serving path dispatches
+    (ruling D1): all six distinct Qwen3-4B decode shapes, 3-bit only (D4 cut
+    2-bit), at exactly the M values should_dispatch routes to EACH of them."""
+    import pack_wide_qmv as gate
+
+    assert {(s.d_out, s.d_in) for s in gate.E2E_SHAPES} == {
+        (4096, 2560), (1024, 2560), (2560, 4096),
+        (9728, 2560), (2560, 9728), (151936, 2560),
+    }
+    assert gate.E2E_BITS == 3
+    assert gate.e2e_verify_m(*LM_HEAD) == [5, 6, 7, 8, 9, 10]
+    assert all(gate.e2e_verify_m(s.d_out, s.d_in) == [5, 6, 7, 8, 9]
+               for s in gate.E2E_SHAPES if (s.d_out, s.d_in) != LM_HEAD)
+
+
+def test_gate_coverage_is_exactly_the_routed_cells_per_shape():
+    """One list applied to every shape would leave lm_head's widest routed
+    cell unverified or verify five cells the pack never dispatches, so the
+    coverage is per-shape and must equal the table cell for cell."""
+    import pack_wide_qmv as gate
+
+    from kernelverify.pack.routed_windows import window_for
+
+    for s in gate.E2E_SHAPES:
+        assert (set(gate.e2e_verify_m(s.d_out, s.d_in))
+                == window_for(gate.E2E_BITS, s.d_out, s.d_in))
+
+
+def test_no_routed_shape_is_missing_from_the_gate():
+    """The other direction, and the one that can go wrong silently: the gate's
+    shapes come from the MODEL CONFIG and the routing table comes from the
+    RECORDING, so a recording that prices a shape outside Qwen3-4B's decode set
+    would route it with zero gate coverage and every per-shape check above
+    would still pass, because they only walk the shapes the gate already has."""
+    import pack_wide_qmv as gate
+
+    from kernelverify.pack.routed_windows import ROUTED_WINDOWS
+
+    gated = {(s.d_out, s.d_in) for s in gate.E2E_SHAPES}
+    routed = {(d_out, d_in) for (bits, d_out, d_in) in ROUTED_WINDOWS
+              if bits == gate.E2E_BITS}
+    assert routed <= gated, f"routed but never verified: {sorted(routed - gated)}"
+
+
+# ---------------------------------------------------------------------------
+# D2 evidence retention: fingerprints always, full arrays only for failures.
+# The boundary-pricing probe was killed holding every case's input arrays in
+# GateEvidence for a whole 30-minute run; the ruling keeps the audit trail
+# (which exact bytes ran, tamper-evident) as sha256 per input and keeps the
+# arrays themselves only where a failure needs reproducing.
+# ---------------------------------------------------------------------------
+INPUT_NAMES = {"x", "w_q", "scales", "biases"}
+
+
+@pytest.fixture()
+def reduced_gate(monkeypatch):
+    """The real gate, one 256x256 shape at one tile width, so each test pays
+    seconds; nothing on the verify path is stubbed."""
+    import pack_wide_qmv
+
+    monkeypatch.setattr(pack_wide_qmv, "SHAPES", [(256, 256)])
+    monkeypatch.setattr(pack_wide_qmv, "VERIFY_M", [5])
+    monkeypatch.setattr(pack_wide_qmv, "SUPPORTED_BITS", (4,))
+    monkeypatch.setattr(pack_wide_qmv, "E2E_SHAPES", ())
+    return pack_wide_qmv
+
+
+def test_passing_evidence_keeps_fingerprints_not_arrays(reduced_gate):
+    from kernelverify.runners import MetalRunner
+
+    evidence = reduced_gate.verify(MetalRunner())
+    assert evidence.ok
+    [spec] = evidence.specializations
+    assert len(spec.calls) == len(spec.cases) == 2
+    for case, call in zip(spec.cases, spec.calls):
+        assert set(case.input_sha256) == INPUT_NAMES
+        assert all(len(h) == 64 for h in case.input_sha256.values())
+        assert call.inputs == {}, "a judged passing case must not retain arrays"
+
+
+def test_failing_evidence_keeps_the_arrays(reduced_gate, monkeypatch):
+    """One case passes, one fails: only the failing case's LiveCall keeps its
+    input arrays, and both keep their fingerprints."""
+    from types import SimpleNamespace
+
+    from kernelverify.pack import verify as pack_verify
+    from kernelverify.runners import MetalRunner
+
+    # Patched where the verdict is actually reached: the gate hands its
+    # results to the shared judge_case seam, which calls judge() there.
+    real = pack_verify.judge
+    verdicts = iter([True, False])  # unit passes, corpus fails
+
+    def selective(out, ref, tol):
+        v = real(out, ref, tol)
+        if next(verdicts, True):
+            return v
+        return SimpleNamespace(ok=False, err=v.err, tol=v.tol)
+
+    monkeypatch.setattr(pack_verify, "judge", selective)
+    evidence = reduced_gate.verify(MetalRunner())
+    assert not evidence.ok
+    [spec] = evidence.specializations
+    passing, failing = spec.cases
+    assert passing.passed and not failing.passed
+    passing_call, failing_call = spec.calls
+    assert passing_call.inputs == {}
+    assert set(failing_call.inputs) == INPUT_NAMES, (
+        "a failing case must keep the exact bytes that failed")
+    assert set(failing.input_sha256) == INPUT_NAMES
+
+
+def test_the_extraction_pipeline_may_retain_inputs(reduced_gate):
+    """The certificate emitter re-dispatches the gate's own calls through the
+    extraction capture, so its evidence keeps the arrays on request."""
+    from kernelverify.runners import MetalRunner
+
+    evidence = reduced_gate.verify(MetalRunner(), retain_inputs=True)
+    assert evidence.ok
+    [spec] = evidence.specializations
+    for case, call in zip(spec.cases, spec.calls):
+        assert set(call.inputs) == INPUT_NAMES
+        assert set(case.input_sha256) == INPUT_NAMES
+
+
+# ---------------------------------------------------------------------------
+# The guard-callback seam. The pricing probe's memory checks run between
+# verification tile-widths and between timing rounds, and both loops live in
+# THIS shared module (the probe's docstring forbids a diverged sampler copy,
+# the ADR 0004 two-halves mistake), so the checks enter through a callback:
+# `guard(cell)` may refuse by raising, and None means no checks - the
+# microbenchmark gate is unchanged.
+# ---------------------------------------------------------------------------
+def test_verify_calls_the_guard_between_tile_widths(reduced_gate, monkeypatch):
+    from kernelverify.runners import MetalRunner
+
+    monkeypatch.setattr(reduced_gate, "VERIFY_M", [5, 6])
+    seen = []
+    evidence = reduced_gate.verify(MetalRunner(), guard=seen.append)
+    assert evidence.ok
+    assert sum("M=5" in cell for cell in seen) == 1
+    assert sum("M=6" in cell for cell in seen) == 1
+
+
+def test_a_refusing_guard_stops_verification(reduced_gate):
+    from kernelverify.runners import MetalRunner
+
+    class Refused(RuntimeError):
+        pass
+
+    def guard(cell):
+        raise Refused(cell)
+
+    with pytest.raises(Refused):
+        reduced_gate.verify(MetalRunner(), guard=guard)
+
+
+def test_interleaved_samples_calls_the_guard_between_rounds():
+    import pack_wide_qmv
+
+    a = mx.array([1.0])
+    b = mx.array([2.0])
+    seen = []
+    ours, theirs = pack_wide_qmv.interleaved_samples(
+        lambda i: a + i, lambda i: b + i, rounds=3, guard=seen.append)
+    assert len(ours) == len(theirs) == 3
+    assert len(seen) == 3
+
+
+def test_a_refusing_guard_stops_the_rounds():
+    import pack_wide_qmv
+
+    class Refused(RuntimeError):
+        pass
+
+    def guard(cell):
+        raise Refused(cell)
+
+    with pytest.raises(Refused):
+        pack_wide_qmv.interleaved_samples(
+            lambda i: mx.array([1.0]), lambda i: mx.array([2.0]),
+            rounds=3, guard=guard)
+
+
+def test_gate_evidence_carries_e2e_cases_with_projection_names(monkeypatch):
+    """A reduced gate run over one E2E shape must produce specialization
+    evidence labelled with the projection name, so a certificate reader can
+    see WHICH dispatch site a case priced."""
+    import pack_wide_qmv as gate
+
+    from kernelverify.pack.dispatch_shapes import DispatchShape
+    from kernelverify.runners import MetalRunner
+
+    monkeypatch.setattr(gate, "SHAPES", [])
+    monkeypatch.setattr(gate, "E2E_SHAPES", (DispatchShape("q_proj", 256, 256),))
+    evidence = gate.verify(MetalRunner(), e2e_m=[5])
+    assert evidence.ok
+    templates = [s.template for s in evidence.specializations]
+    assert templates == [{"T": "half", "BITS": 3, "M": 5, "R": 4}]
+    labels = [c.label for c in evidence.specializations[0].cases]
+    assert labels and all("q_proj" in label for label in labels)
 
 
 def test_matches_mlx_quantized_matmul_within_contract(kernel):

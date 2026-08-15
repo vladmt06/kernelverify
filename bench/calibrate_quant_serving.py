@@ -265,10 +265,8 @@ smoke dispatches. Reruns must reproduce ADR 0013's tables.
 from __future__ import annotations
 
 import argparse
-import ctypes
 import hashlib
 import json
-import math
 import os
 import resource
 import signal
@@ -706,101 +704,33 @@ def read_checkpoint(path: Path, fingerprint: dict) -> dict:
 # a 36 GB machine) - the harness now refuses over a footprint budget instead
 # of letting Jetsam collapse the machine. All sizes are decimal GB (1e9),
 # matching rss_gb above.
-# ---------------------------------------------------------------------------
-
-# Exit codes. 0 = attested, 1 = measured-and-stopped. Everything else is a
-# gate with its own number, so the coordinator can tell a protective refusal
-# from a measurement verdict without parsing stdout.
 #
-# 2 is NOT one of them, and used to be: it meant "no usable Metal device"
-# while argparse also exits 2 on any bad argument, and the Python interpreter
-# exits 2 on a failed import at startup. A child dying either of those ways
-# was therefore reported as a missing GPU - the coordinator sent to look at
-# the hardware for a typo. The device gate now has EXIT_NO_DEVICE and goes
-# through the normal refusal path (checkpoint written, cell marked), leaving
-# 2 to mean what the interpreter already makes it mean.
-EXIT_BUDGET_REFUSAL = 3   # this process's phys_footprint crossed the budget
-EXIT_LOCK_HELD = 4        # another heavy measurement holds the machine lock
-EXIT_LOW_MEMORY = 5       # machine-wide available memory too low for a cell
-EXIT_CHILD_DEATH = 6      # a measurement child died; its cell is named
-EXIT_NO_DEVICE = 7        # no usable Metal device: nothing can be measured
+# The vocabulary itself - exit codes, the ctypes footprint reader, the budget
+# and low-memory guards - is single-sourced from bench/memory_guard.py
+# (ruling D1: every heavy harness imports it, none copies it), the same way
+# the machine-wide lock is single-sourced from bench/machine_state.py.
+# ---------------------------------------------------------------------------
+from memory_guard import (  # noqa: E402
+    EXIT_BUDGET_REFUSAL,
+    EXIT_CHILD_DEATH,
+    EXIT_LOCK_HELD,
+    EXIT_LOW_MEMORY,
+    EXIT_NO_DEVICE,
+    BudgetExceeded,
+    BudgetGuard,
+    LowMemoryRefusal,
+    available_memory_gb,
+    budget_gb_arg,
+    machine_ram_gb,
+    phys_footprint_gb,
+    positive_float_arg,
+    require_available_memory,
+)
 
 # Well under the machine's 38.7 decimal-GB (36 GiB) of unified memory: the
 # probes ruled 20-24 GB, and the default leaves the OS and the coordinator's
 # other lanes ~15 GB of headroom.
 DEFAULT_BUDGET_GB = 24.0
-
-
-def machine_ram_gb() -> float:
-    """Total unified memory in decimal GB, from sysctl hw.memsize."""
-    out = subprocess.run(["sysctl", "-n", "hw.memsize"],
-                         capture_output=True, text=True)
-    return int(out.stdout.strip()) / 1e9
-
-
-_RUSAGE_INFO_V4 = 4
-_RUSAGE_V4_WORDS = 40   # 16-byte uuid + 35 uint64 fields, rounded up
-_PHYS_FOOTPRINT_WORD = 9        # ri_phys_footprint: uuid is words 0-1
-_LIFETIME_FOOTPRINT_WORD = 30   # ri_lifetime_max_phys_footprint
-_libproc = None
-
-
-def phys_footprint_gb() -> tuple[float, float]:
-    """(current, lifetime peak) phys_footprint of THIS process, decimal GB.
-
-    phys_footprint is the number Jetsam kills on. RSS is not it: the 03:29
-    run self-reported 2.4 GB RSS while dying at a 39.5 GB footprint, because
-    compressed pages and IOKit/Metal memory charge the footprint without
-    being resident. So the budget reads the footprint via proc_pid_rusage
-    (one ctypes call - cheap enough to check between every record, no
-    per-check subprocess), and rss_line stays a secondary print only.
-
-    Word offsets follow rusage_info_v4 in <libproc.h> (ri_uuid occupies
-    words 0-1, ri_phys_footprint is word 9, ri_lifetime_max_phys_footprint
-    word 30); test_footprint_reader_reports_this_process_truthfully pins
-    them against a live allocation.
-    """
-    global _libproc
-    if _libproc is None:
-        _libproc = ctypes.CDLL("/usr/lib/libSystem.dylib", use_errno=True)
-    words = (ctypes.c_uint64 * _RUSAGE_V4_WORDS)()
-    ret = _libproc.proc_pid_rusage(os.getpid(), _RUSAGE_INFO_V4,
-                                   ctypes.byref(words))
-    if ret != 0:
-        raise RuntimeError(
-            f"proc_pid_rusage failed with {ret} (errno {ctypes.get_errno()}); "
-            f"a budget that cannot read the footprint must stop, not guess")
-    return (words[_PHYS_FOOTPRINT_WORD] / 1e9,
-            words[_LIFETIME_FOOTPRINT_WORD] / 1e9)
-
-
-class BudgetExceeded(RuntimeError):
-    """The footprint crossed the budget: the run refuses - checkpoint kept,
-    live cell named, distinct exit code. Never a silently shrunk grid."""
-
-    def __init__(self, cell: str, footprint_gb: float, budget_gb: float):
-        super().__init__(
-            f"footprint {footprint_gb:.2f} GB over budget "
-            f"{budget_gb:.2f} GB at cell {cell}")
-        self.cell = cell
-        self.footprint_gb = footprint_gb
-        self.budget_gb = budget_gb
-
-
-class BudgetGuard:
-    """The footprint cutoff, checked between cells and (per child) between
-    records. ``reader`` is injectable so the refusal path is testable without
-    allocating tens of GB."""
-
-    def __init__(self, budget_gb: float, reader=None):
-        self.budget_gb = budget_gb
-        self._reader = phys_footprint_gb if reader is None else reader
-
-    def check(self, cell: str) -> float:
-        current, _peak = self._reader()
-        if current > self.budget_gb:
-            raise BudgetExceeded(cell, current, self.budget_gb)
-        return current
 
 
 def refuse(code: int, reason: str, fingerprint: dict, steps: dict) -> int:
@@ -820,25 +750,8 @@ def refuse(code: int, reason: str, fingerprint: dict, steps: dict) -> int:
     return code
 
 
-def _positive_float_arg(text: str, what: str, unit: str) -> float:
-    """A CLI number a gate depends on: infinities, NaN and non-positives are
-    rejected at parse time, never becoming a budget that cannot bite."""
-    try:
-        value = float(text)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"{what} {text!r} is not a number")
-    if not math.isfinite(value) or value <= 0.0:
-        raise argparse.ArgumentTypeError(
-            f"{what} must be positive finite {unit}, got {text!r}")
-    return value
-
-
-def _budget_gb_arg(text: str) -> float:
-    return _positive_float_arg(text, "budget", "decimal GB")
-
-
 def _wall_cap_arg(text: str) -> float:
-    return _positive_float_arg(text, "wall cap", "seconds")
+    return positive_float_arg(text, "wall cap", "seconds")
 
 
 # The machine-wide measurement lock, shared with every other heavy harness
@@ -850,40 +763,6 @@ from machine_state import (  # noqa: E402
     MEASUREMENT_LOCK_PATH,
     MeasurementLock,
 )
-
-
-class LowMemoryRefusal(RuntimeError):
-    """The machine cannot offer the budget right now: refuse before the cell,
-    never push a doomed allocation into compression and Jetsam."""
-
-    def __init__(self, cell: str, available_gb: float, needed_gb: float):
-        super().__init__(
-            f"machine has {available_gb:.2f} GB available, cell needs room "
-            f"for the {needed_gb:.2f} GB budget at cell {cell}")
-        self.cell = cell
-        self.available_gb = available_gb
-        self.needed_gb = needed_gb
-
-
-def available_memory_gb() -> float:
-    """Machine-wide available memory in decimal GB.
-
-    kern.memorystatus_level is the memorystatus (Jetsam) subsystem's own
-    percentage of available memory - the same authority that killed the three
-    runs - so the refusal reads the exact meter the killer reads. Same
-    refusal-gate idiom as bench/machine_state.py: sample, refuse, name why.
-    """
-    out = subprocess.run(["sysctl", "-n", "kern.memorystatus_level"],
-                         capture_output=True, text=True)
-    return int(out.stdout.strip()) / 100.0 * machine_ram_gb()
-
-
-def require_available_memory(needed_gb: float, cell: str,
-                             reader=None) -> float:
-    available = (available_memory_gb if reader is None else reader)()
-    if available < needed_gb:
-        raise LowMemoryRefusal(cell, available, needed_gb)
-    return available
 
 
 # ---------------------------------------------------------------------------
@@ -1713,7 +1592,7 @@ def build_parser() -> argparse.ArgumentParser:
                              "by an earlier run of the SAME shapes and "
                              "artifact; step granularity only, and every "
                              "reused step is named in the output JSON")
-    parser.add_argument("--budget-gb", type=_budget_gb_arg,
+    parser.add_argument("--budget-gb", type=budget_gb_arg,
                         default=DEFAULT_BUDGET_GB,
                         help="phys_footprint budget in decimal GB; crossing "
                              "it writes the checkpoint, names the live cell "

@@ -87,10 +87,21 @@ QUANTIZED_MATMUL_META = {
 }
 
 
-# One-slot memo: reference and tolerance run back to back on the same case,
-# and quantizing the weight is the expensive half of both. Keyed by identity
-# (the memo's strong reference keeps the array alive, so a hit can only be the
-# same object) because the artefact is deterministic given (w, bits).
+# One-slot artefact memo. Reference and tolerance each derive the artefact
+# from the RAW weights (the anchoring property: a surface cannot hand the
+# oracle an artefact that disagrees with the weights it passed), and a gate
+# judges up to 32 cases per (shape, bits) against the same matrix - without
+# reuse that is 64 canonical quantizations of a 389M-element matrix per
+# lm_head group, whose transients the 2026-08-15 pricing instrumentation
+# measured at 14-22 GB of ratcheted footprint.
+#
+# Keyed by IDENTITY, not by a content hash. The memo's strong reference keeps
+# the array alive, so no later array can occupy its address and a hit can only
+# ever be the same object - the anchoring property survives exactly as a hash
+# would preserve it. Hashing would additionally cost a full copy of the weight
+# bytes per case (`tobytes` always copies; 778 MB at lm_head in fp16), which is
+# the transient this memo exists to avoid. Every caller holds one weight matrix
+# across its case group and passes that same object in, so identity hits.
 _qmm_memo: tuple | None = None
 
 
