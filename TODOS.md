@@ -76,3 +76,23 @@
 - Cons: each pack operator needs keyword seams in a reference implementation plus catalogue entries (the wide_qmv striding and kv_attention new-entry seams are the obvious first faults); real work, on the order of the ADR 0008 artefact-axis effort.
 - Context: bench/emit_pack_certificates.py is the consumer - once the battery covers a pack operator, its certificate's policy block, budget, and catalogue_fingerprint upgrade in place, and the C4 softmax clause on kv_attention/routing can move from source-attestation to numeric once overflow-provoking structured modes exist for those operators.
 - Depends on / blocked by: nothing external; the pack contracts are frozen in NATIVE_OPS and the certificate schema already separates the policy tiers.
+
+## 4-bit pricing run for the wide-qmv routed windows
+
+- What: run `bench/price_qmv_boundary.py` with `BITS = 4` over the same six Qwen3-4B decode dispatch shapes and the same M = 1..16 sweep, then derive its 4-bit windows into `kernelverify/pack/routed_windows.py` beside the 3-bit ones.
+  The run needs a coordinated quiet slot like every other heavy harness, and it is queued for the next free measurement window rather than jumping the current one.
+- Why: `should_dispatch` is bit-keyed as of the per-shape routing change, and 4-bit has no recording, so it routes NOWHERE and MLX serves every 4-bit shape (ruled D1, 2026-08-15).
+  That is the honest reading of no evidence, but it also means the pack sits idle at the width most quantized models actually ship at.
+- Pros: the probe, the guard vocabulary, the per-shape derivation and the gate coverage all exist already, so the run is a parameter change plus a second recording; the widening rule it will be read under is pre-registered in the probe's docstring, dated before the run.
+- Cons: it is another ~30-minute exclusive slot on the one machine, and 4-bit is the width where the old microbenchmarks measured the kernel closest to a wash below the window (1.00-1.02x), so the run may well justify no routing at all - which is a real outcome, not a wasted slot.
+- Context: the 3-bit recording is `bench/results/qmv-boundary-pricing-2026-08-15.json`, committed, and its derivation is pinned by `tests/test_pack_routed_windows.py`; 2-bit is cut from the block entirely (D4) and is not part of this item.
+- Depends on / blocked by: a free coordinated measurement window; nothing technical.
+
+## An R sweep re-prices every routed window, not just the cells it moves
+
+- What: whenever `rows_per_simdgroup` is re-measured and its register-wall thresholds move, re-run the boundary pricing and re-derive every window in `kernelverify/pack/routed_windows.py`, rather than editing the R function alone.
+- Why: a routed window is a claim about one kernel body at one launch config, so a cell priced at R = 4 says nothing about the same cell launched at R = 2; the module pins the per-M R for exactly this reason and refuses to derive a table whose recording disagrees with the pinned launch config.
+- Pros: the refusal is already wired, so a bare R change fails loudly at import instead of shipping windows that describe a kernel nobody ran; the re-derivation itself is mechanical once the new recording exists.
+- Cons: it makes any R experiment cost a full pricing slot before it can ship, which is the intended price and not a defect.
+- Context: the current pins are R = 4 up to M = 10 and R = 2 above it, matching every point of the 2026-08-15 recording; `KERNEL_SOURCE_SHA256` carries the same discipline for the kernel body itself, so editing the MSL has the same consequence.
+- Depends on / blocked by: nothing; it is a standing rule that applies to whoever next moves R.
