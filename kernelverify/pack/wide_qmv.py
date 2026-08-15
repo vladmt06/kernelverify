@@ -140,12 +140,15 @@ KERNEL_NAME = "kv_wide_qmv"
 def should_dispatch(m: int) -> bool:
     """Whether the pack should use this kernel at all, or defer to MLX.
 
-    Below MIN_PROFITABLE_M, MLX already reads the weights once and this kernel
-    has nothing to win back. At 4 bits that is a wash (1.00-1.02x), but at
-    2 bits it is a measured loss (0.81-0.89x at M = 1 and 2), so the pack
-    routes to MLX there rather than shipping a regression.
+    The win zone is two-sided. Below MIN_PROFITABLE_M, MLX already reads the
+    weights once and this kernel has nothing to win back: at 4 bits that is a
+    wash (1.00-1.02x), at 2 bits a measured loss (0.81-0.89x at M = 1 and 2).
+    Above MAX_PROFITABLE_M, MLX abandons qmv_wide's ceil(M / 5) tiling for a
+    different kernel entirely, so the extra weight pass this kernel wins back
+    is no longer being paid. The pack routes both sides to MLX rather than
+    shipping a regression.
     """
-    return m >= MIN_PROFITABLE_M
+    return MIN_PROFITABLE_M <= m <= MAX_PROFITABLE_M
 
 
 def rows_per_simdgroup(m: int) -> int:
@@ -159,6 +162,12 @@ SUPPORTED_BITS = (2, 3, 4)
 # of this kernel, decisively so at 2 bits (0.83x at M = 1), so the pack should
 # route there instead of shipping a loss.
 MIN_PROFITABLE_M = 5
+
+# Above this tile width MLX stops routing to qmv_wide and switches kernels,
+# so the extra-pass defect this kernel fixes no longer exists and the measured
+# win zone closes. Both bounds are defaults until priced at the E2E dispatch
+# shapes (ruling D3.1: 5..11 default).
+MAX_PROFITABLE_M = 11
 
 
 def pack_codes(q: np.ndarray, bits: int) -> np.ndarray:

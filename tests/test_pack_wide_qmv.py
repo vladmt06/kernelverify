@@ -23,6 +23,7 @@ from kernelverify.pack.verify import (
     verify_output,
 )
 from kernelverify.pack.wide_qmv import (
+    MAX_PROFITABLE_M,
     MIN_PROFITABLE_M,
     SUPPORTED_BITS,
     build,
@@ -75,11 +76,21 @@ def test_rows_per_simdgroup_drops_at_the_register_wall():
     assert rows_per_simdgroup(11) == 2
 
 
-def test_defers_to_mlx_below_the_profitable_tile_width():
-    """At 2 bits this kernel measured 0.81-0.89x at M = 1 and 2, so the pack
-    must route those to MLX instead of shipping a regression."""
-    assert not any(should_dispatch(m) for m in range(1, MIN_PROFITABLE_M))
-    assert all(should_dispatch(m) for m in range(MIN_PROFITABLE_M, 12))
+def test_routes_to_mlx_outside_the_measured_win_zone():
+    """The win zone is two-sided. Below M = 5 MLX already reads the weights
+    once and this kernel measured a loss at 2 bits (0.81-0.89x at M = 1, 2).
+    At M >= 12 MLX stops tiling by fives and switches kernels entirely, so the
+    extra-pass defect this kernel fixes no longer exists there. The bounds are
+    pinned as literals because the values ARE the ruled decision (D3.1: 5..11
+    default until priced at the E2E shapes); repricing moves them on purpose,
+    through this test."""
+    assert (MIN_PROFITABLE_M, MAX_PROFITABLE_M) == (5, 11)
+    assert not should_dispatch(4)    # below: MLX already reads weights once
+    assert should_dispatch(5)        # first tile width with a second pass to win
+    assert should_dispatch(11)       # last width MLX routes to qmv_wide
+    assert not should_dispatch(12)   # MLX switches kernels here
+    # The whole batch range the block serves (B = 1..16, ruling D1).
+    assert [m for m in range(1, 17) if should_dispatch(m)] == list(range(5, 12))
 
 
 def test_handles_d_out_not_divisible_by_r(kernel):
