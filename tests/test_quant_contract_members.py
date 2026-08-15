@@ -239,3 +239,20 @@ def test_the_ten_shipped_false_positives_are_closed(evidence):
     assert len(after) == 10
     assert max(after) < 1.0, sorted(after)
     assert 0.20 < min(after) <= max(after) < 0.30, sorted(after)
+
+
+# ---------------------------------------------------------------------------
+# The repair changed a member's arithmetic under an unchanged name, which is
+# the one change a label-keyed cache cannot see. The verdict cache must carry
+# the ensemble version so a stale floor cannot be read back as current.
+# ---------------------------------------------------------------------------
+def test_verdict_cache_fingerprint_sees_the_ensemble_version():
+    from kernelverify.battery.core import _oracle_member_labels
+    from kernelverify.schemas.quant_contract import QUANT_ENSEMBLE_VERSION
+
+    labels = _oracle_member_labels()
+    assert "quant:factored-groups" in labels, "the label is still there ..."
+    assert f"quant-ensemble={QUANT_ENSEMBLE_VERSION}" in labels, (
+        "... but the label alone cannot see that its arithmetic changed")
+    assert QUANT_ENSEMBLE_VERSION != "quant-ensemble-v1", (
+        "v1 named the pairwise member; the chained member needs its own")

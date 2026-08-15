@@ -25,6 +25,15 @@ from dataclasses import dataclass
 
 import numpy as np
 
+# Bumped whenever a member's ARITHMETIC changes under an unchanged name. The
+# verdict cache fingerprints the ensemble by member label, and a label cannot
+# see that `factored-groups` now sums each group as a chain where it used to
+# reduce pairwise (2026-08-15): same name, different floor, so every cached
+# verdict computed against the old floor would be read back as if it were
+# current. This is the quantized counterpart of tolerance.contract's
+# CONTRACT_VERSION, which exists for exactly the same reason.
+QUANT_ENSEMBLE_VERSION = "quant-ensemble-v2"
+
 
 @dataclass(frozen=True)
 class QuantContract:
