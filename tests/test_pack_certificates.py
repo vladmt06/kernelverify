@@ -110,7 +110,13 @@ def test_emission_happy_path_from_real_gate_evidence(qmv_evidence, tmp_path):
     # The validity domain travels with the certificate (D9).
     domain = doc["validity"]["domain"]
     assert domain["BITS"] == 4 and domain["M"] == 5
-    assert "should_dispatch" in domain["dispatch_boundary"]
+    # Scope prose is GENERATED from the routing table, never hardcoded: the
+    # old template asserted an open-ended "M >= 5" that predated even the
+    # upper bound. This certificate is 4-bit, a width nothing prices yet.
+    boundary = domain["dispatch_boundary"]
+    assert "should_dispatch" in boundary
+    assert "4-bit is unpriced" in boundary and "routes nowhere" in boundary
+    assert "M >= 5" not in boundary
 
     # Advisory block: fingerprints and margins, labeled not reproducible (D8).
     assert "NOT reproducible" in doc["advisory"]["_meaning"]
