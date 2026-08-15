@@ -27,26 +27,21 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 from pathlib import Path
 
 import gguf_info
+from external import (
+    CMAKE_FLAGS,
+    GGUF_DIR as MODEL_DIR,
+    LLAMA_BENCH,
+    LLAMA_CPP,
+    run_llama_bench,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
-LLAMA_CPP = Path("/Users/vlad/llama.cpp")
-LLAMA_BENCH = LLAMA_CPP / "build" / "bin" / "llama-bench"
-MODEL_DIR = Path("/Users/vlad/models/gguf")
 ROOFLINE = ROOT / "bench" / "results" / "roofline.json"
 OUT = ROOT / "bench" / "results" / "llamacpp_baseline.json"
-
-# How the pinned checkout was configured. Recorded with the results because a
-# baseline that cannot be rebuilt is not a baseline.
-CMAKE_FLAGS = [
-    "-DCMAKE_BUILD_TYPE=Release",
-    "-DGGML_METAL=ON",
-    "-DGGML_METAL_EMBED_LIBRARY=ON",
-]
 
 # (label, filename). Chosen to span the regimes: a model small enough to be
 # compute-bound at modest batch, and one large enough that generation is
@@ -69,11 +64,7 @@ CPU_MODELS = ["qwen2.5-0.5b-instruct-q4_k_m.gguf", "Llama-3.2-1B-Instruct-Q4_K_M
 
 
 def run_bench(model: Path, extra: list[str], reps: int) -> list[dict]:
-    cmd = [str(LLAMA_BENCH), "-m", str(model), "-r", str(reps), "-o", "json"] + extra
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise RuntimeError(f"llama-bench failed: {' '.join(cmd)}\n{proc.stderr[-2000:]}")
-    return json.loads(proc.stdout)
+    return run_llama_bench(model, ["-r", str(reps)] + extra)
 
 
 def derive(row: dict, cost: dict, roof: dict, backend: str = "metal") -> dict:

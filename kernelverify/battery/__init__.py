@@ -17,10 +17,6 @@ from kernelverify.battery.core import (
 )
 from kernelverify.battery.policies import (
     POLICIES,
-    _boundary_features,
-    _dim_bounds,
-    _is_pow2,
-    _tie_break,
     policy_boundary_hybrid,
     policy_boundary_pairwise,
     policy_random_all_modes,

@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import statistics
 import sys
-import time
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +28,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import mlx.core as mx  # noqa: E402
 
+from interleave import (  # noqa: E402
+    MAX_CANARY_SPREAD,
+    arms_agree,
+    calibrate_copies,
+    dispatch as dispatch_once,
+)
 from kernelverify.extraction.surface import LiveCall  # noqa: E402
 from kernelverify.pack.evidence import (  # noqa: E402
     CaseEvidence,
@@ -47,7 +52,7 @@ from kernelverify.pack.moe_dispatch import (  # noqa: E402
     routing_spec,
 )
 from kernelverify.pack.verify import (  # noqa: E402
-    judge,
+    judge_case,
     moe_inputs,
     reference_and_tolerance,
 )
@@ -64,14 +69,8 @@ CONTRACT = QuantContract(bits=4, group_size=64)
 VERIFY_SHAPES = [(1, 512, 16, 256), (8, 512, 16, 256), (4, 256, 8, 128)]
 TIMED_SHAPE = (2048, 64, 768)          # Qwen3-30B-A3B class: d, experts, ffn
 TIMED_TOKENS = [1, 2, 4, 8, 16]
-MIN_SAMPLE_MS = 5.0
 ROUNDS = 7
 WORKING_SET_MB = 512
-
-# See bench/pack_wide_qmv.py: interleaving makes both arms suffer a clock
-# excursion together, it does not detect one. The reference arm's own spread
-# is the detector, and rows that fail it are withheld rather than published.
-MAX_CANARY_SPREAD = 1.5
 
 
 def quantize_experts(experts: np.ndarray):
@@ -225,17 +224,9 @@ def verify(runner: MetalRunner) -> GateEvidence:
         spec = specialize(dispatch_spec(), {"T": "half", "R": spec_r})
         for i, result in zip(dispatch_idx, runner.run(spec, dispatch_cases)):
             m = metas[i]
-            label = f"dispatch {m['label']}"
-            if not result.ok:
-                dispatch_ev.cases.append(CaseEvidence(
-                    label=label, passed=False, tol=m["tol"],
-                    detail=f"runner {result.status.value}: {result.detail}"))
-                continue
-            v = judge(result.outputs[0], m["ref"], m["tol"])
-            dispatch_ev.cases.append(CaseEvidence(
-                label=label, passed=v.ok, err=v.err, tol=v.tol,
-                output_sha256=output_fingerprint(result.outputs[0]),
-                aux={"routing_exact": m["routing_exact"]}))
+            judge_case(dispatch_ev, result, f"dispatch {m['label']}",
+                       m["ref"], m["tol"],
+                       aux={"routing_exact": m["routing_exact"]})
 
     render_banner(evidence,
                   "correctness (runner-isolated, shipped moe_dispatch contract):")
@@ -243,23 +234,8 @@ def verify(runner: MetalRunner) -> GateEvidence:
 
 
 # --------------------------------------------------------------------------
-# timing
+# timing (engine shared with the other gates: bench/interleave.py)
 # --------------------------------------------------------------------------
-def dispatch_once(build_one, copies: int) -> float:
-    outs = [build_one(i) for i in range(copies)]
-    t0 = time.perf_counter()
-    mx.eval(outs)
-    mx.synchronize()
-    return time.perf_counter() - t0
-
-
-def calibrate(sample) -> int:
-    copies = 4
-    while copies < 2048 and sample(copies) * 1e3 < MIN_SAMPLE_MS:
-        copies *= 2
-    return copies
-
-
 def mlx_gather(x, idx, w, wq, sc, bi):
     """The expert half of MLX's path, given routing."""
     xe = mx.expand_dims(mx.expand_dims(x, -2), -2)          # (M, 1, 1, D)
@@ -333,8 +309,7 @@ def bench() -> bool:
             _, _, _, (wq, sc, bi) = sets[i % n_sets]
             return mlx_moe(x, router, wq, sc, bi)
 
-        a, b = np.array(ours(0)).astype(np.float64), np.array(theirs(0)).astype(np.float64)
-        agree = float(np.max(np.abs(a - b))) <= 5e-3 * max(1.0, float(np.max(np.abs(b))))
+        agree = arms_agree(ours(0), theirs(0))
         ok = ok and agree
 
         # Dispatch-only: identical routing handed to both arms.
@@ -358,7 +333,8 @@ def bench() -> bool:
         def samples_of(fn):
             mx.eval(fn(0))
             mx.synchronize()
-            copies = calibrate(lambda c: dispatch_once(fn, c))
+            copies = calibrate_copies(lambda c: dispatch_once(fn, c),
+                                      start=4, cap=2048)
             return [dispatch_once(fn, copies) / copies for _ in range(ROUNDS)]
 
         s_ours, s_mlx = samples_of(ours), samples_of(theirs)

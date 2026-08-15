@@ -16,34 +16,22 @@ the pack's tolerance both need.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import numpy as np
 import mlx.core as mx
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from phase0_contract_k import unpack_mlx_q  # noqa: E402
 
 BITS, GROUP = 4, 64
 
 
-def unpack(wq: np.ndarray, bits: int, cols: int) -> np.ndarray:
-    """Little-endian contiguous bit stream back to integer codes."""
-    byts = np.ascontiguousarray(wq).view(np.uint8)
-    rows = byts.shape[0]
-    stream = np.zeros((rows, byts.shape[1] // 8 + 2), dtype=np.uint64)
-    packed = byts.view(np.uint8)
-    for b in range(packed.shape[1]):
-        stream[:, b // 8] |= packed[:, b].astype(np.uint64) << np.uint64(8 * (b % 8))
-    out = np.zeros((rows, cols), dtype=np.uint32)
-    mask = (1 << bits) - 1
-    for i in range(cols):
-        word, off = divmod(i * bits, 64)
-        val = stream[:, word] >> np.uint64(off)
-        if off + bits > 64:
-            val = val | (stream[:, word + 1] << np.uint64(64 - off))
-        out[:, i] = (val & np.uint64(mask)).astype(np.uint32)
-    return out
-
-
 def contract_reference(wq, sc, bi, x, out_dim, in_dim):
     """fp64 truth: the intended quantized weights, exactly, times x exactly."""
-    q = unpack(np.array(wq), BITS, in_dim).astype(np.float64)
+    q = unpack_mlx_q(np.array(wq), in_dim, BITS).astype(np.float64)
     s = np.array(sc).astype(np.float64).repeat(GROUP, axis=1)
     b = np.array(bi).astype(np.float64).repeat(GROUP, axis=1)
     w = s * q + b

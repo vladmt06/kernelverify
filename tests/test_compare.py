@@ -8,8 +8,8 @@ samples cannot pass it, which exercises the rejection path deterministically.
 """
 
 import numpy as np
-import pytest
 
+from conftest import requires_metal
 from kernelverify.runners import (
     Binding,
     BindingKind,
@@ -20,10 +20,6 @@ from kernelverify.runners import (
     compare,
     specialize,
 )
-
-RUNNER = MetalRunner()
-DEVICE = RUNNER.probe()
-requires_metal = pytest.mark.skipif(DEVICE is None, reason="no Metal device on this machine")
 
 # The iteration count is baked into the source so the two arms are genuinely
 # different compiled pipelines, the way a real A/B compares two candidates.

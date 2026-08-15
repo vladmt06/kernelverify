@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import statistics
 import sys
-import time
 from pathlib import Path
 
 import numpy as np
@@ -35,15 +34,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import mlx.core as mx  # noqa: E402
 
+from interleave import (  # noqa: E402
+    MAX_CANARY_SPREAD,
+    MIN_SAMPLE_MS,
+    calibrate_copies,
+    dispatch,
+)
 from kernelverify.extraction.surface import LiveCall  # noqa: E402
 from kernelverify.pack.evidence import (  # noqa: E402
     CaseEvidence,
     GateEvidence,
-    output_fingerprint,
     render_banner,
 )
 from kernelverify.pack.verify import (  # noqa: E402
-    judge,
+    judge_case,
     qmv_inputs,
     reference_and_tolerance,
 )
@@ -65,18 +69,8 @@ from kernelverify.schemas.quant_contract import (  # noqa: E402
 SHAPES = [(2560, 2560), (4096, 4096)]
 VERIFY_M = [1, 4, 5, 6, 8, 11]
 TIMED_M = [1, 2, 4, 5, 6, 7, 8, 10, 11]
-MIN_SAMPLE_MS = 5.0
 ROUNDS = 7
 WORKING_SET_MB = 512
-
-# A round is only trustworthy if the reference arm reads the same each time.
-# Twice now a run has reported a kernel "win" that was the machine's clock
-# moving under it: MLX's own time for one fixed shape moved 2.9x inside a
-# single interleaved round while nothing about MLX changed. Interleaving alone
-# does not catch that, it only makes both arms suffer it together, so the
-# reference arm's own spread is checked and the ratios are withheld when it is
-# too wide to support them.
-MAX_CANARY_SPREAD = 1.5
 
 
 def artefact_for(d_out: int, d_in: int, seed: int, bits: int = 4):
@@ -157,15 +151,7 @@ def verify(runner: MetalRunner) -> GateEvidence:
 
         results = [r for batch in runner.run_candidate(spec_batches) for r in batch]
         for result, (spec_ev, label, ref, tol) in zip(results, case_refs):
-            if not result.ok:
-                spec_ev.cases.append(CaseEvidence(
-                    label=label, passed=False, tol=tol,
-                    detail=f"runner {result.status.value}: {result.detail}"))
-                continue
-            v = judge(result.outputs[0], ref, tol)
-            spec_ev.cases.append(CaseEvidence(
-                label=label, passed=v.ok, err=v.err, tol=v.tol,
-                output_sha256=output_fingerprint(result.outputs[0])))
+            judge_case(spec_ev, result, label, ref, tol)
 
     render_banner(evidence, "correctness (runner-isolated, Phase 0 contract, "
                             f"K = {K_QUANT:g}):")
@@ -173,26 +159,8 @@ def verify(runner: MetalRunner) -> GateEvidence:
 
 
 # --------------------------------------------------------------------------
-# timing
+# timing (engine shared with the other gates: bench/interleave.py)
 # --------------------------------------------------------------------------
-def calibrate_copies(sample) -> int:
-    """Fewest copies per dispatch that still reach MIN_SAMPLE_MS."""
-    copies = 8
-    while copies < 4096:
-        if sample(copies) * 1e3 >= MIN_SAMPLE_MS:
-            return copies
-        copies *= 2
-    return copies
-
-
-def dispatch(build_one, copies: int) -> float:
-    outs = [build_one(i) for i in range(copies)]
-    t0 = time.perf_counter()
-    mx.eval(outs)
-    mx.synchronize()
-    return time.perf_counter() - t0
-
-
 def bench() -> bool:
     kernel = build(mx)
     any_unstable = False

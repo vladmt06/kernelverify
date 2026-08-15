@@ -13,49 +13,14 @@ from pathlib import Path
 
 import pytest
 
+from conftest import schema_row as row
 from kernelverify.report.matrix import (
-    Claim,
     classify,
     comparable,
     load_rows,
     render,
     utilisation,
 )
-
-
-def row(**over):
-    base = {
-        "schema_version": 2,
-        "run_id": "20260814T120000Z-abcdef12",
-        "row_id": "20260814T120000Z-abcdef12/decode-llamacpp",
-        "measured_at": "2026-08-14T12:00:00Z",
-        "provenance_tier": "owner-run",
-        "binding": True,
-        "binding_blockers": [],
-        "machine": {"chip": "Apple M3 Pro", "hw_model": "Mac15,6", "os": "macOS",
-                    "os_build": "26.5.2"},
-        "stack": {"name": "llama.cpp", "version": "a94d563"},
-        "model": {"name": "Qwen3-4B", "quant": "Q4_K_M"},
-        "measurement": {"kind": "decode", "matmul_width": 1,
-                        "width_mechanism": "prompt-width"},
-        "result": {"metric": "tok/s", "median": 45.67, "spread_pct": 1.2,
-                   "reps": 3, "samples": [45.6, 45.67, 45.8],
-                   "min_sample_ms": 21.9, "floor_ms": 1.0,
-                   "below_timing_floor": False},
-        "sampling": {"interleaved": True, "rotation": "round-robin", "rounds": 5,
-                     "group": "qwen3-4b-decode", "group_members": 2},
-        "roofline": {"bytes_per_pass": 2491000000, "byte_model": "tensor-table",
-                     "denominator_name": "bandwidth_read", "denominator_gbs": 135.5,
-                     "achieved_gbs": 114.2, "bandwidth_utilisation_pct": 84.3,
-                     "binding_resource": "memory",
-                     "roofline_utilisation_pct": None},
-    }
-    for key, value in over.items():
-        if isinstance(value, dict) and isinstance(base.get(key), dict):
-            base[key] = {**base[key], **value}
-        else:
-            base[key] = value
-    return base
 
 
 # ---------------------------------------------------------------------------

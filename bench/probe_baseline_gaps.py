@@ -34,10 +34,9 @@ from pathlib import Path
 import numpy as np
 
 import gguf_info
+from external import GGUF_DIR as MODEL_DIR, LLAMA_QUANTIZE, run_llama_bench
 
 ROOT = Path(__file__).resolve().parent.parent
-LLAMA_BENCH = Path("/Users/vlad/llama.cpp/build/bin/llama-bench")
-MODEL_DIR = Path("/Users/vlad/models/gguf")
 PURE_DIR = MODEL_DIR / "pure"
 ROOFLINE = ROOT / "bench" / "results" / "roofline.json"
 BASELINE = ROOT / "bench" / "results" / "llamacpp_baseline.json"
@@ -48,8 +47,6 @@ REPS = 5
 # Pure single-type quantizations of one model: same shapes, same layer count,
 # only the mat-vec kernel changes.
 PURE_TYPES = ["Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "Q8_0"]
-
-LLAMA_QUANTIZE = Path("/Users/vlad/llama.cpp/build/bin/llama-quantize")
 
 # The same comparison at a large reduction dimension. These two are built by
 # requantizing an already-quantized file, so they are numerically junk and
@@ -66,11 +63,7 @@ VALLEY_MODELS = [
 
 
 def bench(model: Path, extra: list[str]) -> list[dict]:
-    cmd = [str(LLAMA_BENCH), "-m", str(model), "-r", str(REPS), "-o", "json"] + extra
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise RuntimeError(f"llama-bench failed on {model.name}\n{proc.stderr[-1500:]}")
-    return json.loads(proc.stdout)
+    return run_llama_bench(model, ["-r", str(REPS)] + extra)
 
 
 def probe_quant_kernels(peak_bw_gbs: float) -> list[dict]:

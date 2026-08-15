@@ -530,8 +530,14 @@ needs_metal = pytest.mark.skipif(_DEVICE is None,
 def test_mlx_quantize_hoist_is_bit_identical(dtype):
     w, artefact = _small_artefact(d_out=128, d_in=256)
     x = _xs(256, "unit", dtype)
+    # Two INDEPENDENT quantizations of the same weights, one consumed by the
+    # serving harness's held-out arm and one by the bits harness's. That is
+    # exactly what hoisting claims: mx.quantize is deterministic, so
+    # quantizing once per weight draw is the same as once per record. The
+    # bits harness takes the triplet now rather than quantizing internally,
+    # so the second call is what supplies its "per-record" quantization.
     hoisted = mlx_qmm_heldout(x, *mlx_quantize_hoist(w))
-    verbatim = mlx_on_device(x, w, artefact.contract)
+    verbatim = mlx_on_device(x, mlx_quantize_hoist(w), artefact.contract)
     assert hoisted.dtype == verbatim.dtype
     assert np.array_equal(hoisted, verbatim)
 

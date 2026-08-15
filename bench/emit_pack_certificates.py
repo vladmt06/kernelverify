@@ -480,9 +480,9 @@ def certify(evidences: list, runner: MetalRunner, directory) -> EmitReport:
     report = emit(certificates, directory)
     for family, reasons in refusals.items():
         report.refused.setdefault(family, []).extend(reasons)
+    written_names = {p.name for p in report.written}
     write_manifest([c for c in certificates
-                    if any(p.name == f"{c.kernel_name}.certificate.json"
-                           for p in report.written)],
+                    if f"{c.kernel_name}.certificate.json" in written_names],
                    report.refused, directory, commit)
     return report
 

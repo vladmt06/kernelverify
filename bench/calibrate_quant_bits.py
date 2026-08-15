@@ -191,10 +191,14 @@ def verify_against_mlx(w: np.ndarray, contract: QuantContract):
     return ours, exact
 
 
-def mlx_on_device(x: np.ndarray, w: np.ndarray, contract: QuantContract) -> np.ndarray:
-    """MLX's own quantized_matmul: a correct implementation we did not write."""
-    w_q, scales, biases = mx.quantize(mx.array(w), group_size=contract.group_size,
-                                      bits=contract.bits)
+def mlx_on_device(x: np.ndarray, quantized, contract: QuantContract) -> np.ndarray:
+    """MLX's own quantized_matmul: a correct implementation we did not write.
+
+    `quantized` is the mx.quantize triplet of the case's weight matrix,
+    hoisted to the per-seed loop (mx.quantize is deterministic, so quantizing
+    once per weight draw instead of once per record changes nothing printed).
+    """
+    w_q, scales, biases = quantized
     out = mx.quantized_matmul(mx.array(x), w_q, scales, biases, transpose=True,
                               group_size=contract.group_size, bits=contract.bits)
     mx.eval(out)
@@ -212,6 +216,8 @@ def measure(bits: int, shapes: list, verbose: bool) -> dict:
                 w = make_w(d_out, d_in, draw, rng)
                 artefact, exact = verify_against_mlx(w, contract)
                 exactness.append(exact)
+                quantized = mx.quantize(mx.array(w), group_size=contract.group_size,
+                                        bits=contract.bits)
                 for mode in MODES:
                     for dtype in ("float32", "float16"):
                         npdt = np.float32 if dtype == "float32" else np.float16
@@ -232,7 +238,7 @@ def measure(bits: int, shapes: list, verbose: bool) -> dict:
                                         for n, f in ENSEMBLE.items()},
                             "heldout": {
                                 "block-tiled": err(heldout_block_tiled(x, artefact), ref),
-                                "mlx-on-device": err(mlx_on_device(x, w, contract), ref),
+                                "mlx-on-device": err(mlx_on_device(x, quantized, contract), ref),
                             },
                             "faults": {n: err(ENSEMBLE["dequant-pairwise"](x, f(artefact)), ref)
                                        for n, f in FAULTS.items()},

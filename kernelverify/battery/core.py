@@ -17,15 +17,12 @@ import numpy as np
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT / "bench"))
 
-from kernelverify.mutation.catalogue import (  # noqa: E402
-    CATALOGUE,
-    KERNEL_TO_CORPUS_OP,
-    KERNEL_TO_OP,
-)
+from kernelverify.mutation.catalogue import CATALOGUE, KERNEL_TO_OP  # noqa: E402
 from kernelverify.reference.kernels import KERNELS  # noqa: E402
 from kernelverify.schemas.native_ops import K_NATIVE, K_QUANT, NATIVE_OPS  # noqa: E402
 from kernelverify.tolerance.contract import CONTRACT_VERSION  # noqa: E402
 from kernelverify.tolerance.floor import K_ENSEMBLE, conditioned_tolerance  # noqa: E402
+import measure_escape  # noqa: E402
 from measure_escape import (  # noqa: E402
     DISTRIBUTIONS,
     all_dims,
@@ -43,19 +40,14 @@ CACHE_PATH = _REPO_ROOT / "bench" / ".cache" / "verdicts.pkl"
 
 def _oracle_member_labels() -> list:
     """Every ensemble member's identity, for the verdict-cache fingerprint."""
+    from kernelverify.schemas.native_ops import KV_MEMBERS, MOE_MEMBERS
     from kernelverify.schemas.quant_contract import ENSEMBLE as QUANT_ENSEMBLE
-    from kernelverify.tolerance.floor import ENSEMBLES
+    from kernelverify.tolerance.floor import ENSEMBLES, ensemble_labels
 
-    labels = []
-    for op, members in sorted(ENSEMBLES.items()):
-        for fn in members:
-            name = getattr(fn, "__name__", None)
-            if name is None:  # functools.partial: name the base and the pin
-                name = f"{fn.func.__name__}#{sorted(fn.keywords.items())}"
-            labels.append(f"floor:{op}:{name}")
+    labels = [f"floor:{op}:{name}"
+              for op in sorted(ENSEMBLES) for name in ensemble_labels(op)]
     labels += [f"quant:{name}" for name in sorted(QUANT_ENSEMBLE)]
-    labels += ["moe:default", "moe:reversed-slots"]
-    from kernelverify.schemas.native_ops import KV_MEMBERS
+    labels += sorted(MOE_MEMBERS)
     labels += sorted(KV_MEMBERS)
     return labels
 
@@ -152,6 +144,31 @@ def case_space(meta: dict) -> list[Case]:
 # ---------------------------------------------------------------------------
 # Verdict table
 # ---------------------------------------------------------------------------
+def fingerprinted_pickle_cache(path: Path, fingerprint, *, thaw, rebuild, freeze,
+                               hit_message: str, stale_message: str):
+    """The load/compare/rebuild/write choreography every fingerprinted cache
+    in this project shares. Returns `thaw(cached)` when the stored fingerprint
+    matches, else calls `rebuild()`, writes `freeze(value)` - which must embed
+    `fingerprint` under the "fingerprint" key - and returns the fresh value.
+
+    bench/calibrate_k.py hand-rolls the same choreography over
+    bench/.cache/contract_k.pkl and can adopt this helper.
+    """
+    if path.exists():
+        try:
+            cached = pickle.loads(path.read_bytes())
+        except Exception:
+            cached = {}
+        if cached.get("fingerprint") == fingerprint:
+            print(hit_message)
+            return thaw(cached)
+        print(stale_message)
+    value = rebuild()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(pickle.dumps(freeze(value)))
+    return value
+
+
 def build_verdicts() -> dict:
     """verdicts[mutation_name][case] = True if the case detects the fault.
 
@@ -183,33 +200,56 @@ def build_verdicts() -> dict:
                  for name, verdicts in stored["table"].items()}
         return {"table": table, "spaces": spaces}
 
-    def freeze(table: dict, spaces: dict) -> dict:
+    def freeze(result: dict) -> dict:
         as_tuple = lambda c: (c.dims, c.dtype, c.distribution, c.seed)
         return {
             "fingerprint": fingerprint,
-            "spaces": {op: [as_tuple(c) for c in cases] for op, cases in spaces.items()},
+            "spaces": {op: [as_tuple(c) for c in cases]
+                       for op, cases in result["spaces"].items()},
             "table": {name: {as_tuple(c): hit for c, hit in verdicts.items()}
-                      for name, verdicts in table.items()},
+                      for name, verdicts in result["table"].items()},
         }
 
-    if CACHE_PATH.exists():
-        try:
-            cached = pickle.loads(CACHE_PATH.read_bytes())
-        except Exception:
-            cached = {}
-        if cached.get("fingerprint") == fingerprint:
-            print(f"loading cached verdicts from {CACHE_PATH}")
-            return thaw(cached)
-        print("catalogue changed since the cache was built; rebuilding verdicts")
+    return fingerprinted_pickle_cache(
+        CACHE_PATH, fingerprint, thaw=thaw, rebuild=_rebuild_verdicts, freeze=freeze,
+        hit_message=f"loading cached verdicts from {CACHE_PATH}",
+        stale_message="catalogue changed since the cache was built; rebuilding verdicts",
+    )
 
+
+def _drop_op_references(op: str, ref_cache: dict) -> None:
+    """Free `op`'s fp64 references once its last catalogue entry is scored.
+
+    This module's own cache keys by tuples whose first element is the operator;
+    the escape bench releases its share through its own `drop_references`, so
+    the frozen module keeps its cache private. The references are the bulk of a
+    build's memory, and every key a later catalogue entry can still hit
+    survives untouched.
+    """
+    for key in [k for k in ref_cache if k[0] == op]:
+        del ref_cache[key]
+    measure_escape.drop_references(op)
+
+
+def _rebuild_verdicts() -> dict:
     table: dict = {}
     spaces: dict = {}
+    metas: dict = {}  # op -> schema meta, loaded once per op
     tol_cache: dict = {}  # (op, case) -> the shipped per-case tolerance
     ref_cache: dict = {}  # (op, case) -> fp64 reference, native ops only
+    controls_cleared: set = set()  # (kernel, case) pairs the control passed
+    # The catalogue interleaves operators (the corpus-fault block revisits
+    # them), so "this op is finished" is its LAST position, not its first
+    # change of neighbour.
+    last_visit = {KERNEL_TO_OP[m.kernel]: position
+                  for position, m in enumerate(CATALOGUE, 1)}
+
     for index, mutation in enumerate(CATALOGUE, 1):
         op = KERNEL_TO_OP[mutation.kernel]
         native = NATIVE_OPS.get(op)
-        meta = native.meta if native else load_meta(op)
+        if op not in metas:
+            metas[op] = native.meta if native else load_meta(op)
+        meta = metas[op]
         if op not in spaces:
             spaces[op] = case_space(meta)
         cases = spaces[op]
@@ -247,18 +287,24 @@ def build_verdicts() -> dict:
                 tol_cache[tol_key] = (native.tolerance(case, inputs, ref) if native
                                       else conditioned_tolerance(op, inputs, ref, base_tol))
             tol = tol_cache[tol_key]
-            if not corpus_oracle_passes(correct(inputs), ref, tol):
-                raise AssertionError(
-                    f"the correct {mutation.kernel} fails the shipped tolerance "
-                    f"at {case.dim_map} {case.dtype} {case.distribution}"
-                )
+            # The control clears once per (kernel, case), not once per
+            # mutation: inputs, reference and tolerance are all deterministic
+            # per case, so a repeat check could never say anything new.
+            control_key = (mutation.kernel, case)
+            if control_key not in controls_cleared:
+                if not corpus_oracle_passes(correct(inputs), ref, tol):
+                    raise AssertionError(
+                        f"the correct {mutation.kernel} fails the shipped tolerance "
+                        f"at {case.dim_map} {case.dtype} {case.distribution}"
+                    )
+                controls_cleared.add(control_key)
             detected[case] = not corpus_oracle_passes(faulty(inputs), ref, tol)
 
         table[mutation.name] = detected
         hits = sum(detected.values())
         print(f"  [{index:>2}/{len(CATALOGUE)}] {mutation.name:<52} "
               f"detectable at {hits}/{len(detected)} cases")
+        if last_visit[op] == index:
+            _drop_op_references(op, ref_cache)
 
-    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CACHE_PATH.write_bytes(pickle.dumps(freeze(table, spaces)))
     return {"table": table, "spaces": spaces}

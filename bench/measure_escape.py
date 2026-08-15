@@ -131,6 +131,24 @@ def reference(meta: dict, inputs: dict[str, np.ndarray], cache_key: tuple) -> np
     return arr
 
 
+def drop_references(op: str) -> None:
+    """Release every cached reference belonging to operator `op`.
+
+    Cache keys are tuples whose first element is the operator. A caller that
+    scores the catalogue operator by operator - the verdict builder in
+    kernelverify/battery/core.py - holds the references as the bulk of its
+    memory and needs a door to release one operator's share; without this it
+    reaches into the module global directly.
+
+    Purely a memory release, not a measurement change: the cache exists to
+    avoid re-running the corpus's own fp64 reference subprocess, and re-running
+    it for a dropped key returns the same array, so nothing this module
+    reports can move.
+    """
+    for key in [k for k in _REFERENCE_CACHE if k[0] == op]:
+        del _REFERENCE_CACHE[key]
+
+
 # ---------------------------------------------------------------------------
 # Oracles
 # ---------------------------------------------------------------------------

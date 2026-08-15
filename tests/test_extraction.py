@@ -13,6 +13,7 @@ import importlib.util
 import numpy as np
 import pytest
 
+from conftest import METAL_DEVICE
 from kernelverify.extraction import (
     ExtractionError,
     LiveCall,
@@ -35,10 +36,9 @@ from kernelverify.runners import (
 )
 
 RUNNER = MetalRunner()
-DEVICE = RUNNER.probe()
 HAS_MLX = importlib.util.find_spec("mlx") is not None
 requires_arms = pytest.mark.skipif(
-    DEVICE is None or not HAS_MLX,
+    METAL_DEVICE is None or not HAS_MLX,
     reason="extraction E2E needs a Metal device and mlx",
 )
 

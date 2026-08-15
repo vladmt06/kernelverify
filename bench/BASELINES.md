@@ -4,7 +4,7 @@ Measured 2026-08-14 on the development machine while a coding session was active
 Treat absolute numbers as first-pass; ratios between same-harness measurements are the stable signal.
 Re-run on an idle machine before any published claim, per the eng-review amendment.
 
-## Roofline (bench/machine_roofline.py)
+## Roofline (measured with an MLX-op probe since deleted; bench/roofline.py supersedes it)
 
 | Metric | Value |
 |---|---|

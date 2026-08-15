@@ -81,6 +81,39 @@ def _tie_break(case: Case, dim_min: dict, dim_max: dict):
     return (-extremes, case.dims, case.dtype, case.distribution)
 
 
+# The features and pairs are pure functions of (pool, bounds), and the scoring
+# harness calls each policy dozens of times per operator over the identical
+# pool; the memo makes that rebuild once per operator instead of once per call.
+_FEATURE_MEMO: dict = {}
+
+
+def _op_feature_sets(pool: list[Case], dim_min: dict, dim_max: dict):
+    """Per-case boundary features and feature pairs, memoized per operator."""
+    key = (tuple(pool),
+           tuple(sorted(dim_min.items())), tuple(sorted(dim_max.items())))
+    hit = _FEATURE_MEMO.get(key)
+    if hit is None:
+        feature_sets = {c: _boundary_features(c, dim_min, dim_max) for c in pool}
+        pair_sets = {c: {frozenset(p) for p in itertools.combinations(sorted(f), 2)}
+                     for c, f in feature_sets.items()}
+        hit = _FEATURE_MEMO[key] = (feature_sets, pair_sets)
+    return hit
+
+
+def _greedy_pick(pool: list[Case], gain_sets: dict, covered: set,
+                 dim_min: dict, dim_max: dict):
+    """One greedy set-cover step: the case adding the most uncovered items,
+    ties broken toward cases touching more extremes; None when nothing gains."""
+    best, best_gain = None, 0
+    for case in pool:
+        gain = len(gain_sets[case] - covered)
+        if gain > best_gain or (gain == best_gain and gain > 0
+                                and _tie_break(case, dim_min, dim_max)
+                                < _tie_break(best, dim_min, dim_max)):
+            best, best_gain = case, gain
+    return best
+
+
 def policy_boundary_hybrid(cases: list[Case], meta: dict, budget: int, rng: random.Random):
     """Deterministic boundary coverage first, random exploration with the rest.
 
@@ -107,21 +140,16 @@ def policy_boundary_hybrid(cases: list[Case], meta: dict, budget: int, rng: rand
     """
     pool = [c for c in cases if c.seed == SWEEP_SEED]
     dim_min, dim_max = _dim_bounds(meta)
+    feature_sets, _ = _op_feature_sets(pool, dim_min, dim_max)
 
     covered: set = set()
     chosen: list[Case] = []
     while len(chosen) < budget:
-        best, best_gain = None, 0
-        for case in pool:
-            gain = len(_boundary_features(case, dim_min, dim_max) - covered)
-            if gain > best_gain or (gain == best_gain and gain > 0
-                                    and _tie_break(case, dim_min, dim_max)
-                                    < _tie_break(best, dim_min, dim_max)):
-                best, best_gain = case, gain
+        best = _greedy_pick(pool, feature_sets, covered, dim_min, dim_max)
         if best is None:  # every feature covered: switch to exploration
             break
         chosen.append(best)
-        covered |= _boundary_features(best, dim_min, dim_max)
+        covered |= feature_sets[best]
 
     while len(chosen) < budget:
         chosen.append(rng.choice(pool))
@@ -152,25 +180,12 @@ def policy_boundary_pairwise(cases: list[Case], meta: dict, budget: int, rng: ra
     """
     pool = [c for c in cases if c.seed == SWEEP_SEED]
     dim_min, dim_max = _dim_bounds(meta)
-
-    feature_sets = {c: _boundary_features(c, dim_min, dim_max) for c in pool}
-    pair_sets = {c: {frozenset(p) for p in itertools.combinations(sorted(f), 2)}
-                 for c, f in feature_sets.items()}
-
-    def greedy_pick(gain_sets: dict, covered: set):
-        best, best_gain = None, 0
-        for case in pool:
-            gain = len(gain_sets[case] - covered)
-            if gain > best_gain or (gain == best_gain and gain > 0
-                                    and _tie_break(case, dim_min, dim_max)
-                                    < _tie_break(best, dim_min, dim_max)):
-                best, best_gain = case, gain
-        return best
+    feature_sets, pair_sets = _op_feature_sets(pool, dim_min, dim_max)
 
     chosen: list[Case] = []
     covered_singles: set = set()
     while len(chosen) < budget:
-        best = greedy_pick(feature_sets, covered_singles)
+        best = _greedy_pick(pool, feature_sets, covered_singles, dim_min, dim_max)
         if best is None:  # every single feature covered: move on to pairs
             break
         chosen.append(best)
@@ -180,7 +195,7 @@ def policy_boundary_pairwise(cases: list[Case], meta: dict, budget: int, rng: ra
     for case in chosen:
         covered_pairs |= pair_sets[case]
     while len(chosen) < budget:
-        best = greedy_pick(pair_sets, covered_pairs)
+        best = _greedy_pick(pool, pair_sets, covered_pairs, dim_min, dim_max)
         if best is None:  # every achievable pair covered: switch to exploration
             break
         chosen.append(best)

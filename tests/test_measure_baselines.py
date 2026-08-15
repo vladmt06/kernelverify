@@ -13,6 +13,7 @@ import pytest
 
 import machine_state
 import measure_baselines
+from conftest import schema_row
 from machine_state import binding_verdict, timing_verdict
 
 
@@ -168,21 +169,7 @@ def test_timing_floor_blocks_binding_on_an_otherwise_perfect_machine():
 
 
 def valid_row():
-    return {
-        "schema_version": 3, "run_id": "r", "row_id": "r/x", "measured_at": "t",
-        "provenance_tier": "owner-run", "machine": {}, "idle_before": state(),
-        "idle_after": state(), "stack": {"name": "llama.cpp"},
-        "model": {"name": "Qwen3-4B-Q4_K_M.gguf", "logical_name": "qwen3-4b"},
-        "measurement": {"kind": "decode"},
-        "result": {"metric": "tokens_per_s", "median": 1.0, "reps": 3,
-                   "samples": [1.0], "min_sample_ms": 50.0, "floor_ms": 1.0,
-                   "below_timing_floor": False},
-        "roofline": {"bandwidth_utilisation_pct": 80.0,
-                     "binding_resource": "memory"},
-        "sampling": {"interleaved": True, "rotation": "arm-alternation",
-                     "rounds": 3, "group": "r/decode-w1", "group_members": ["x"]},
-        "binding": True, "binding_blockers": [],
-    }
+    return schema_row(version=3)
 
 
 def test_a_complete_row_validates_and_round_trips_as_jsonl():
@@ -575,6 +562,46 @@ def test_the_producer_console_table_carries_the_scope_too():
     row["result"] |= {"spread_pct": 0.5}
     row["roofline"] |= {"achieved_gbs": 50.0}
     assert "batch_decode (mlx-only)" in measure_baselines.render([row])
+
+
+# --- the operator console cell for a row no compute column can place --------
+
+
+def unknown_resource_row(**roofline):
+    """An mlx prefill row: the producer stamps binding_resource 'unknown' for
+    every non-llama.cpp prefill, because the MLX checkpoint gives bytes but no
+    unambiguous parameter count to place the row on the compute axis."""
+    row = valid_row()
+    row["stack"] = {"name": "mlx-lm"}
+    row["measurement"] = {"kind": "prefill", "matmul_width": 1024,
+                          "width_mechanism": "prompt-width"}
+    row["result"] |= {"spread_pct": 0.5}
+    row["roofline"] |= {"binding_resource": "unknown", "achieved_gbs": 12.3,
+                        "roofline_utilisation_pct": None,
+                        "bandwidth_utilisation_pct": 9.1, **roofline}
+    return row
+
+
+def test_an_unknown_binding_resource_row_prints_its_bandwidth_percentage():
+    """The renderer returns no percentage for an 'unknown' row on purpose: the
+    published matrix must not read a prefill row as a bandwidth catastrophe.
+    The console summary is the operator card's own table and has always shown
+    the bandwidth number there, so formatting the renderer's None straight into
+    the cell put a literal 'None%' in front of the operator.
+    """
+    table = measure_baselines.render([unknown_resource_row()])
+    assert "None%" not in table
+    # The axis is named in the cell: a bare percentage under "% of that
+    # ceiling" beside a "binds on" of unknown is the mixed reading
+    # matrix.utilisation() refuses to publish, and two readers of the same
+    # run must not disagree about which ceiling a number is measured against.
+    assert "| unknown | 9.1% (bandwidth) |" in table
+
+
+def test_a_cell_with_no_percentage_at_all_says_so_rather_than_printing_None():
+    table = measure_baselines.render(
+        [unknown_resource_row(bandwidth_utilisation_pct=None)])
+    assert "| unknown | n/a |" in table
 
 
 def test_the_shipped_v3_record_still_validates_under_todays_producer():

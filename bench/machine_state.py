@@ -38,6 +38,7 @@ import fcntl
 import os
 import platform
 import re
+import statistics
 import subprocess
 from pathlib import Path
 
@@ -265,6 +266,12 @@ def timing_verdict(min_sample_ms: float) -> dict:
         "floor_ms": TIMING_FLOOR_MS,
         "below_timing_floor": below,
     }
+
+
+def spread_pct(vals) -> float:
+    """Repeat disagreement as (max - min) / median, in percent: the exact
+    quantity MAX_SPREAD_PCT bounds, computed in one place."""
+    return (max(vals) - min(vals)) / statistics.median(vals) * 100
 
 
 def dispersion_verdict(spread_pct: float | None) -> dict:

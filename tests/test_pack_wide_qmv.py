@@ -16,6 +16,8 @@ mx = pytest.importorskip("mlx.core")
 if not mx.metal.is_available():
     pytest.skip("Metal unavailable", allow_module_level=True)
 
+from pack_wide_qmv import artefact_for
+
 from kernelverify.pack.verify import (
     judge,
     qmv_inputs,
@@ -31,18 +33,11 @@ from kernelverify.pack.wide_qmv import (
     rows_per_simdgroup,
     should_dispatch,
 )
-from kernelverify.schemas.quant_contract import QuantContract, canonical_quantize
 
 
 @pytest.fixture(scope="module")
 def kernel():
     return build(mx)
-
-
-def _artefact(d_out, d_in, seed=7, bits=4):
-    rng = np.random.default_rng(seed)
-    w = (rng.standard_normal((d_out, d_in)).astype(np.float32) * 0.02).astype(np.float16)
-    return w, canonical_quantize(w, QuantContract(bits=bits, group_size=64))
 
 
 def _run(kernel, x, art, d_out, bits=4):
@@ -62,7 +57,7 @@ def _run(kernel, x, art, d_out, bits=4):
 def test_agrees_with_contract_at_every_tile_width(kernel, m):
     """One weight pass must give the same answer as the contract at any M."""
     d_out, d_in = 256, 512
-    w, art = _artefact(d_out, d_in)
+    w, art = artefact_for(d_out, d_in, seed=7)
     x = np.random.default_rng(m).standard_normal((m, d_in)).astype(np.float16)
     v = verify_output("quantized_matmul", qmv_inputs(x, w, 4),
                       _run(kernel, x, art, d_out))
@@ -85,7 +80,7 @@ def test_defers_to_mlx_below_the_profitable_tile_width():
 def test_handles_d_out_not_divisible_by_r(kernel):
     """Out-of-range rows read clamped and must never be stored."""
     d_out, d_in = 254, 512  # 254 % 4 == 2
-    w, art = _artefact(d_out, d_in)
+    w, art = artefact_for(d_out, d_in, seed=7)
     x = np.random.default_rng(3).standard_normal((6, d_in)).astype(np.float16)
     got = _run(kernel, x, art, d_out)
     assert got.shape == (6, d_out)
@@ -96,7 +91,7 @@ def test_handles_d_out_not_divisible_by_r(kernel):
 @pytest.mark.parametrize("bits", SUPPORTED_BITS)
 def test_artefact_layout_matches_mlx(kernel, bits):
     """The kernel reads MLX's own packing, so the two artefacts must be equal."""
-    w, art = _artefact(128, 256, bits=bits)
+    w, art = artefact_for(128, 256, seed=7, bits=bits)
     wq, scales, biases = mx.quantize(mx.array(w), group_size=64, bits=bits)
     mx.eval(wq, scales, biases)
     assert np.array_equal(pack_codes(art.q, bits), np.array(wq))
@@ -109,7 +104,7 @@ def test_artefact_layout_matches_mlx(kernel, bits):
 def test_agrees_with_contract_at_every_bit_width(kernel, bits, m):
     """Sub-4-bit codes straddle words; the block striding must still be exact."""
     d_out, d_in = 256, 512
-    w, art = _artefact(d_out, d_in, seed=bits, bits=bits)
+    w, art = artefact_for(d_out, d_in, seed=bits, bits=bits)
     x = np.random.default_rng(m).standard_normal((m, d_in)).astype(np.float16)
     got = _run(kernel, x, art, d_out, bits=bits)
     v = verify_output("quantized_matmul", qmv_inputs(x, w, bits), got)
@@ -119,7 +114,7 @@ def test_agrees_with_contract_at_every_bit_width(kernel, bits, m):
 def test_matches_mlx_quantized_matmul_within_contract(kernel):
     """Both are admissible implementations, so they agree within the floor."""
     d_out, d_in, m = 256, 512, 8
-    w, art = _artefact(d_out, d_in)
+    w, art = artefact_for(d_out, d_in, seed=7)
     x = np.random.default_rng(5).standard_normal((m, d_in)).astype(np.float16)
     ref, tol = reference_and_tolerance("quantized_matmul", qmv_inputs(x, w, 4))
     wq, scales, biases = mx.quantize(mx.array(w), group_size=64, bits=4)

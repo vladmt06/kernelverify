@@ -76,3 +76,21 @@
 - Cons: each pack operator needs keyword seams in a reference implementation plus catalogue entries (the wide_qmv striding and kv_attention new-entry seams are the obvious first faults); real work, on the order of the ADR 0008 artefact-axis effort.
 - Context: bench/emit_pack_certificates.py is the consumer - once the battery covers a pack operator, its certificate's policy block, budget, and catalogue_fingerprint upgrade in place, and the C4 softmax clause on kv_attention/routing can move from source-attestation to numeric once overflow-provoking structured modes exist for those operators.
 - Depends on / blocked by: nothing external; the pack contracts are frozen in NATIVE_OPS and the certificate schema already separates the policy tiers.
+
+## Simplify-pass structural deferrals (2026-08-15 review, four-angle)
+
+- What: move each pack family's verify() and family facts (doors, clauses, contract version, tolerance model, domain) out of `bench/emit_pack_certificates.py`'s seven family-keyed dispatch tables into per-family descriptors in `kernelverify/pack/`, iterated by a registry; and add a packaging seam (pyproject + editable install) so the 21 `sys.path.insert` preambles and the two loudly-guarded kv-kernels checkout pins die.
+- Why: today a fourth pack kernel requires edits in five-plus emitter functions, and the path hacks let a main-repo script import lane-worktree code (now guarded with a provenance print, but the seam is the fix).
+- Pros: the emitter stops knowing everything; adding a kernel becomes one descriptor; imports become boring.
+- Cons: touches the certificate emitter's surroundings, so it wants its own review and a re-emission check.
+- Context: findings 2 and 6 of the altitude review during the 2026-08-15 simplify pass; the corpus-primitives package lift (`kernelverify/corpus/` absorbing the helpers product code path-hacks out of frozen `measure_escape.py`) belongs to the same seam family and was also deferred.
+- Depends on / blocked by: pack lane merge (certificate re-emission machinery must be quiet when this lands).
+
+## Simplify-pass small mop-ups
+
+- What: extract `bench/mlx_probes/_common.py` for the tripled probe helpers; inline `make_run_case`/`result_outputs` pass-throughs in `kernelverify/schemas/quant_device.py` (call sites live in `bench/calibrate_quant_device.py`, wrapper test goes with them); adopt `kernelverify.battery.core.fingerprinted_pickle_cache` in `bench/calibrate_k.py` for `contract_k.pkl`; dedup the verify-then-bench `main()` scaffold tripled across the pack gate scripts (stdout must stay byte-identical).
+- Why: each was verified duplicated or dead by the 2026-08-15 four-angle review but sat across territory or stdout-risk lines that made it not worth forcing that night.
+- Pros: finishes the dedup story; nothing else.
+- Cons: none of substance; four small diffs.
+- Context: reuse findings 8 and 10, simplification finding 11, and the package agent's follow-up note from the simplify pass.
+- Depends on / blocked by: nothing; bundle into any future touch of those files.
