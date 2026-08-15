@@ -249,10 +249,25 @@ def tolerance_model_for(family: str) -> dict:
             "form": "max(base_tol(dtype), K_QUANT * floor)"}
 
 
+# The quant tolerance's own validity domain (ADR 0014): what the K_QUANT
+# floor attests is the ADMISSIBLE class of contract C1-C6, and MLX's stock
+# kernels are not everywhere inside it. Every certificate whose tolerance
+# model divides by that floor carries this wording, so a reader cannot take
+# the attestation as evidence about cells where no admissible device
+# held-out exists.
+TOLERANCE_VALIDITY = (
+    "admissible class only (contract C1-C6): MLX's own batch-1 and batch-16 "
+    "quantized-matmul kernels at fp16 activations are OUT of contract "
+    "(ADR 0014: half-precision intermediates in affine_qmv/affine_qmm_t), "
+    "so those cells carry no admissible device held-out evidence and the "
+    "quant-tolerance attestation there is adequate-by-exclusion")
+
+
 def domain_for(family: str, spec: SpecializationEvidence) -> dict:
     template = spec.template
     if family == wide_qmv.KERNEL_NAME:
         return {
+            "tolerance_validity": TOLERANCE_VALIDITY,
             "BITS": template["BITS"], "M": template["M"], "R": template["R"],
             "d_in": "any multiple of 64 (gate evidence at 2560 and 4096)",
             "d_out": "any positive count (out-of-range rows clamp-read, "
@@ -264,6 +279,7 @@ def domain_for(family: str, spec: SpecializationEvidence) -> dict:
         }
     if family == kv_attention.KERNEL_NAME:
         return {
+            "tolerance_validity": TOLERANCE_VALIDITY,
             "BITS": template["BITS"], "DH": template["DH"],
             "T": "1..1024 inclusive - a CORRECTNESS bound, not "
                  "profitability: the T+1 softmax buffer is compile-time "
@@ -285,6 +301,7 @@ def domain_for(family: str, spec: SpecializationEvidence) -> dict:
                        "evidence at 512 and 256)",
         }
     return {
+        "tolerance_validity": TOLERANCE_VALIDITY,
         "R": template["R"], "BITS": 4,
         "experts": "MLX-affine 4-bit group-64 expert artefacts",
         "d_model": "any multiple of 64 (gate evidence at 512 and 256)",
