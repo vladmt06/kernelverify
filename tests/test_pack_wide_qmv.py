@@ -127,6 +127,39 @@ def test_agrees_with_contract_at_every_bit_width(kernel, bits, m):
     assert v.ok, v
 
 
+def test_gate_covers_the_e2e_dispatch_shapes_at_3_bit():
+    """The gate must price coverage where the serving path dispatches
+    (ruling D1): all six distinct Qwen3-4B decode shapes, 3-bit only (D4 cut
+    2-bit), at exactly the M values should_dispatch routes to this kernel."""
+    import pack_wide_qmv as gate
+
+    assert {(s.d_out, s.d_in) for s in gate.E2E_SHAPES} == {
+        (4096, 2560), (1024, 2560), (2560, 4096),
+        (9728, 2560), (2560, 9728), (151936, 2560),
+    }
+    assert gate.E2E_BITS == 3
+    assert gate.e2e_verify_m() == [5, 6, 7, 8, 9, 10, 11]
+
+
+def test_gate_evidence_carries_e2e_cases_with_projection_names(monkeypatch):
+    """A reduced gate run over one E2E shape must produce specialization
+    evidence labelled with the projection name, so a certificate reader can
+    see WHICH dispatch site a case priced."""
+    import pack_wide_qmv as gate
+
+    from kernelverify.pack.dispatch_shapes import DispatchShape
+    from kernelverify.runners import MetalRunner
+
+    monkeypatch.setattr(gate, "SHAPES", [])
+    monkeypatch.setattr(gate, "E2E_SHAPES", (DispatchShape("q_proj", 256, 256),))
+    evidence = gate.verify(MetalRunner(), e2e_m=[5])
+    assert evidence.ok
+    templates = [s.template for s in evidence.specializations]
+    assert templates == [{"T": "half", "BITS": 3, "M": 5, "R": 4}]
+    labels = [c.label for c in evidence.specializations[0].cases]
+    assert labels and all("q_proj" in label for label in labels)
+
+
 def test_matches_mlx_quantized_matmul_within_contract(kernel):
     """Both are admissible implementations, so they agree within the floor."""
     d_out, d_in, m = 256, 512, 8

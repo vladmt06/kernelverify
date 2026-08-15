@@ -47,6 +47,7 @@ def qmv_evidence():
     patch.setattr(pack_wide_qmv, "SHAPES", [(256, 256)])
     patch.setattr(pack_wide_qmv, "VERIFY_M", [5])
     patch.setattr(pack_wide_qmv, "SUPPORTED_BITS", (4,))
+    patch.setattr(pack_wide_qmv, "E2E_SHAPES", ())
     try:
         yield pack_wide_qmv.verify(RUNNER)
     finally:
