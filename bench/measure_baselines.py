@@ -72,6 +72,13 @@ LOGICAL_MODEL = "qwen3-4b"
 BATCH_POINTS = [1, 8, 16, 512]
 MLX_BATCH_POINTS = [1, 8, 16]
 
+# Serving decode: n_parallel independent streams decoded together. mlx-lm only
+# this block (D6): llama-bench has no parallel mode, and the honest llama.cpp
+# path (llama-batched-bench plus a parser) is deferred - TODOS.md carries the
+# scoping. These cells are labeled mlx-only and grouped one arm per cell, so
+# no cross-stack serving comparison can form from them.
+MLX_PARALLEL_POINTS = [4, 8, 16]
+
 PREFILL_TOKENS = 1024
 DECODE_TOKENS = 128
 
@@ -127,7 +134,48 @@ def validate_row(row: dict) -> dict:
                     f"row {row['row_id']} model.logical_name {logical!r} is not "
                     f"one of {LOGICAL_MODEL_NAMES}; the cross-stack cell "
                     "identity needs one canonical spelling")
+            if row["measurement"]["kind"] == "batch_decode":
+                # D6: the llama.cpp serving arm is deferred to its own block,
+                # so a serving row must both name its scope and stay on the
+                # stack that can be measured honestly today. An unlabeled
+                # serving aggregate is exactly the number a reader would set
+                # beside the other stack's single-stream decode.
+                if row["measurement"].get("stack_scope") != "mlx-only":
+                    raise ValueError(
+                        f"row {row['row_id']} is a batch_decode row without its "
+                        "mlx-only stack_scope; the serving cells have no "
+                        "cross-stack counterpart this block")
+                if row["stack"]["name"] != "mlx-lm":
+                    raise ValueError(
+                        f"row {row['row_id']} claims a batch_decode cell on "
+                        f"{row['stack']['name']}; that baseline is deferred "
+                        "(D6, TODOS.md) and must not be written by this producer")
+                n_parallel = row["measurement"].get("n_parallel")
+                if not isinstance(n_parallel, int) or n_parallel < 2:
+                    raise ValueError(
+                        f"row {row['row_id']} batch_decode needs an integer "
+                        f"n_parallel of at least 2, got {n_parallel!r}")
     return row
+
+
+def reproduces(recorded: dict, rerun: dict) -> tuple[bool, str]:
+    """The D3.7 regression rule: does a rerun row reproduce a recorded cell?
+
+    Identity first, because equal medians on different workloads prove
+    nothing. Then the producer's own repeat-disagreement limit is the bar
+    between runs as well: a drift the dispersion gate would refuse inside one
+    run cannot be waved through because a day passed. New cells only add;
+    a row with a different workload identity is not a rerun of anything.
+    """
+    if (recorded["measurement"] != rerun["measurement"]
+            or recorded["stack"]["name"] != rerun["stack"]["name"]):
+        return False, "not a rerun of this cell: different workload or stack"
+    old, new = recorded["result"]["median"], rerun["result"]["median"]
+    drift = abs(new - old) / old * 100
+    if drift > machine_state.MAX_SPREAD_PCT:
+        return False, (f"median moved {drift:.1f}% ({old} to {new}), over the "
+                       f"{machine_state.MAX_SPREAD_PCT}% repeat-disagreement limit")
+    return True, ""
 
 
 # --------------------------------------------------------------------------
@@ -283,7 +331,37 @@ def build_specs(only: str | None) -> list[dict]:
                 "id": f"mlx/width{b}", "stack": "mlx-lm", "model_path": mlx_path,
                 "kind": "matmul_width", "n_prompt": 32, "n_gen": 64, "batch": b,
             })
+        for n in MLX_PARALLEL_POINTS:
+            # The per-stream shape mirrors mlx/decode (1024-token cache, 128
+            # generated), so the B=1 anchor of the n_parallel series is the
+            # decode cell already in the record rather than a new shape.
+            specs.append({
+                "id": f"mlx/batch_decode{n}", "stack": "mlx-lm", "model_path": mlx_path,
+                "kind": "batch_decode", "n_prompt": PREFILL_TOKENS,
+                "n_gen": DECODE_TOKENS, "batch": n,
+            })
     return specs
+
+
+def measurement_fields(spec: dict) -> dict:
+    """The measurement object this spec writes: the row's cell identity.
+
+    Shared with the regression tests, because the D3.7 rule that a rerun must
+    reproduce a recorded cell is only checkable while the producer still
+    measures the same workload under the same spec id.
+    """
+    fields = {
+        "kind": spec["kind"],
+        "matmul_width": spec["batch"],
+        "n_prompt": spec["n_prompt"],
+        "n_gen": spec["n_gen"],
+        "cache_depth": spec.get("depth", 0) + spec["n_prompt"],
+        "width_mechanism": "prompt-width" if spec["stack"] == "llama.cpp"
+                           else "batch-size",
+    }
+    if spec["kind"] == "batch_decode":
+        fields |= {"n_parallel": spec["batch"], "stack_scope": "mlx-only"}
+    return fields
 
 
 def measure_once(spec: dict) -> dict:
@@ -385,6 +463,16 @@ def utilisation(spec: dict, value: float, ceilings: dict) -> dict:
         ctx = spec.get("depth", 0) + spec["n_prompt"] + spec["n_gen"] / 2
         bytes_per_pass = gen_bytes(cost) + kv_bytes(cost, ctx)
         passes_per_s = value
+        denominator = "read"
+    elif spec["kind"] == "batch_decode":
+        # One forward pass advances every stream one token: the weights are
+        # read once per pass, but each stream drags its own KV cache, so KV
+        # is charged per stream at the average depth. Charging it once would
+        # overstate utilisation by nearly the stream count at serving depth.
+        streams = spec["batch"]
+        ctx = spec["n_prompt"] + spec["n_gen"] / 2
+        bytes_per_pass = gen_bytes(cost) + streams * kv_bytes(cost, ctx)
+        passes_per_s = value / streams
         denominator = "read"
     else:
         width = max(spec["batch"], 1)
@@ -543,15 +631,7 @@ def main() -> int:
                 "sha256_32": model_hash(model_path),
                 "quant": "Q4_K_M" if spec["stack"] == "llama.cpp" else "mlx-affine-4bit",
             },
-            "measurement": {
-                "kind": spec["kind"],
-                "matmul_width": spec["batch"],
-                "n_prompt": spec["n_prompt"],
-                "n_gen": spec["n_gen"],
-                "cache_depth": spec.get("depth", 0) + spec["n_prompt"],
-                "width_mechanism": "prompt-width" if spec["stack"] == "llama.cpp"
-                                   else "batch-size",
-            },
+            "measurement": measurement_fields(spec),
             "result": {
                 "metric": "tokens_per_s", "median": round(median, 2),
                 "spread_pct": spread, "reps": len(vals),
@@ -602,8 +682,14 @@ def render(rows: list[dict]) -> str:
             pct = f"{roof['roofline_utilisation_pct']}%"
         else:
             pct = f"{roof['bandwidth_utilisation_pct']}%"
+        # The scope travels with the kind here too: the operator reading a
+        # run's summary is a reader like any other (SCHEMA.md renderer notes).
+        kind = m["kind"]
+        scope = m.get("stack_scope")
+        if scope:
+            kind = f"{kind} ({scope})"
         out.append(
-            f"| {r['stack']['name']} | {m['kind']} | {m['matmul_width']} |"
+            f"| {r['stack']['name']} | {kind} | {m['matmul_width']} |"
             f" {res['median']} | {res['spread_pct']}% | {roof['achieved_gbs']} |"
             f" {resource} | {pct} |"
             f" {'yes' if r['binding'] else 'NO'} |"

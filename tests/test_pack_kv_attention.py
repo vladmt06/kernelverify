@@ -29,6 +29,14 @@ from kernelverify.pack.kv_attention import (
     quantize_cache,
 )
 from kernelverify.pack.verify import kv_inputs, verify_output
+from kernelverify.runners import MetalRunner
+
+# The raw-door test drives the runner itself, whose PyObjC Metal bindings are
+# a separate dependency from mlx's Metal: a venv can carry one and not the
+# other, so that test needs test_metal_runner.py's own probe-based skip and
+# the module-level mlx guard above cannot stand in for it.
+requires_metal_runner = pytest.mark.skipif(
+    MetalRunner().probe() is None, reason="no Metal device for the runner")
 
 MXD = {"float16": mx.float16, "float32": mx.float32}
 
@@ -211,6 +219,7 @@ def test_mlx_door_rejects_over_capacity(kernel):
         _run(kernel, q, kc, vc, nk, nv, 8, "float16")
 
 
+@requires_metal_runner
 def test_raw_door_poisons_over_capacity_output():
     """The raw door's t_cached is a runtime scalar binding, so the rejection
     lives in the kernel body: an over-capacity launch must come back all-NaN,
