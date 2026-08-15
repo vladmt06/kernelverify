@@ -138,3 +138,11 @@ No claim about those cells is made in this ADR, in either direction: the tables 
 K = 4 over the nine-name floor is not attested at the Qwen3-4B serving shapes; the run's operative outcome is the refusal, exit code 1.
 The renegotiation belongs to the coordinator; until it lands, the pre-registered rule, the harness and the shipped tolerance stay exactly as committed.
 Reruns must reproduce this ADR's tables.
+
+## Amendment (2026-08-15, same day): the resumed step has been re-measured under the merge-review fixes
+
+The checkpoint that supplied the resumed `continuity` step was written by pre-pool code, and the fingerprint of that era carried no code identity, so the resume validated silently across the buffer-pool change in `kernelverify/runners/device.py`.
+The merge review caught this; commit c5b508a added a code-identity component to the checkpoint fingerprint and a `--continuity-only` mode.
+Under c5b508a, STEP 0 was then re-measured in the foreground twice (once by the lane, once independently by the coordinator): both runs reproduced ADR 0012's 64 cached device records exactly, exit 0.
+The pool therefore did not change device arithmetic, and this ADR's verdict stands on a re-measured anchor rather than a resumed one.
+The pre-pool checkpoint is preserved at `bench/.cache/quant_serving_partial.prepool-backup.json`.
