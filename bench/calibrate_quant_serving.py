@@ -720,6 +720,7 @@ from memory_guard import (  # noqa: E402
     BudgetGuard,
     LowMemoryRefusal,
     available_memory_gb,
+    budget_gb_arg,
     machine_ram_gb,
     phys_footprint_gb,
     positive_float_arg,
@@ -747,10 +748,6 @@ def refuse(code: int, reason: str, fingerprint: dict, steps: dict) -> int:
     print(f"checkpoint intact at {CHECKPOINT_PATH}; rerun with --resume once "
           f"the machine has room")
     return code
-
-
-def _budget_gb_arg(text: str) -> float:
-    return positive_float_arg(text, "budget", "decimal GB")
 
 
 def _wall_cap_arg(text: str) -> float:
@@ -1595,7 +1592,7 @@ def build_parser() -> argparse.ArgumentParser:
                              "by an earlier run of the SAME shapes and "
                              "artifact; step granularity only, and every "
                              "reused step is named in the output JSON")
-    parser.add_argument("--budget-gb", type=_budget_gb_arg,
+    parser.add_argument("--budget-gb", type=budget_gb_arg,
                         default=DEFAULT_BUDGET_GB,
                         help="phys_footprint budget in decimal GB; crossing "
                              "it writes the checkpoint, names the live cell "

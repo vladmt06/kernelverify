@@ -111,9 +111,9 @@ from memory_guard import (  # noqa: E402
     BudgetExceeded,
     BudgetGuard,
     LowMemoryRefusal,
+    budget_gb_arg,
     machine_ram_gb,
     phys_footprint_gb,
-    positive_float_arg,
     require_available_memory,
 )
 
@@ -363,10 +363,6 @@ def instrument(kernel, shapes, guard: PricingGuard) -> int:
     return 0
 
 
-def _budget_gb_arg(text: str) -> float:
-    return positive_float_arg(text, "budget", "decimal GB")
-
-
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--smoke", action="store_true",
@@ -376,7 +372,7 @@ def main(argv=None) -> int:
                         help="bounded foreground memory instrumentation "
                              "(lock held, wall-capped, nothing recorded); "
                              "its measured peak sets PRICING_BUDGET_GB")
-    parser.add_argument("--budget-gb", type=_budget_gb_arg, default=None,
+    parser.add_argument("--budget-gb", type=budget_gb_arg, default=None,
                         help="phys_footprint budget in decimal GB; crossing "
                              f"it refuses and exits {EXIT_BUDGET_REFUSAL} "
                              f"(default {PRICING_BUDGET_GB} from the "

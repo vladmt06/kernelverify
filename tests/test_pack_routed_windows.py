@@ -43,6 +43,18 @@ def test_windows_are_sets_so_a_future_gap_is_representable():
     assert all(isinstance(v, frozenset) for v in rw.ROUTED_WINDOWS.values())
 
 
+def test_every_derived_window_is_contiguous_today():
+    """Sets can hold a hole; this recording has none, and the pre-registered
+    widening rule only admits cells CONTIGUOUS with an existing window. So a
+    hole appearing in a later recording has to reach a person: it is a finding
+    to be ruled on (is the middle cell a real loss, or a bad round?), never
+    something the derivation ships because the container could express it."""
+    for (bits, d_out, d_in), window in rw.ROUTED_WINDOWS.items():
+        ms = sorted(window)
+        assert ms == list(range(ms[0], ms[-1] + 1)), (
+            f"{bits}-bit {d_out}x{d_in} won at {ms}, which has a hole")
+
+
 def test_lm_head_m4_is_excluded_by_ruling_d2():
     """lm_head M=4 measured WIN and is still NOT routed: taking it would
     widen below the pre-registered 5..11 window, which the pre-registration
@@ -75,6 +87,25 @@ def test_pinned_launch_config_matches_the_shipped_one():
 def test_provenance_names_the_recording_and_its_hash():
     assert rw.RECORDING_DATE in rw.PROVENANCE
     assert rw.RECORDING_SHA256[:12] in rw.PROVENANCE
+
+
+def test_an_exclusion_at_a_priced_width_must_name_a_priced_shape():
+    """The exclusions are hand-written and the windows are derived, so the two
+    can disagree. A ruling naming a shape THIS recording never priced is that
+    disagreement, and it must raise rather than quietly exclude nothing."""
+    record = dict(rw._RECORD)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(rw, "EXCLUDED_CELLS", {(3, 4096, 9999): frozenset({5})})
+        with pytest.raises(ValueError, match="did not price that shape"):
+            rw._derive(record)
+
+
+def test_an_exclusion_at_another_width_is_ignored_not_a_crash():
+    """The 3-bit exclusions must not make the queued 4-bit recording
+    underivable: a ruling about another width simply does not apply here."""
+    _, windows = rw._derive(dict(rw._RECORD, bits=4))
+    assert set(windows) == {(4, d_out, d_in) for d_out, d_in in rw.PRICED_SHAPES[3]}
+    assert windows[(4, 151936, 2560)] == frozenset({4, 5, 6, 7, 8, 9, 10})
 
 
 def test_an_unpriced_key_has_an_empty_window_not_a_default():

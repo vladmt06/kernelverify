@@ -123,6 +123,12 @@ def _derive(record: dict) -> tuple[dict, dict]:
         if point["verdict"] == "WIN" and point["ratio_lo"] > 1.0:
             window.add(m)
     for key, excluded in EXCLUDED_CELLS.items():
+        if key[0] != bits:
+            continue           # an exclusion for a width this recording never priced
+        if key not in windows:
+            raise ValueError(
+                f"cell {key} is excluded by a ruling, but this recording did "
+                "not price that shape: the exclusion and the evidence disagree")
         windows[key] -= excluded
     return ({bits: tuple(shapes)},
             {key: frozenset(ms) for key, ms in windows.items() if ms})

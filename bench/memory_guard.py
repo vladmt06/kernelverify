@@ -163,3 +163,9 @@ def positive_float_arg(text: str, what: str, unit: str) -> float:
         raise argparse.ArgumentTypeError(
             f"{what} must be positive finite {unit}, got {text!r}")
     return value
+
+
+def budget_gb_arg(text: str) -> float:
+    """The `--budget-gb` parser every harness with a footprint budget shares,
+    so the budget cannot be validated one way here and another way there."""
+    return positive_float_arg(text, "budget", "decimal GB")

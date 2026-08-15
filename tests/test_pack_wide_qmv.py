@@ -178,6 +178,22 @@ def test_gate_coverage_is_exactly_the_routed_cells_per_shape():
                 == window_for(gate.E2E_BITS, s.d_out, s.d_in))
 
 
+def test_no_routed_shape_is_missing_from_the_gate():
+    """The other direction, and the one that can go wrong silently: the gate's
+    shapes come from the MODEL CONFIG and the routing table comes from the
+    RECORDING, so a recording that prices a shape outside Qwen3-4B's decode set
+    would route it with zero gate coverage and every per-shape check above
+    would still pass, because they only walk the shapes the gate already has."""
+    import pack_wide_qmv as gate
+
+    from kernelverify.pack.routed_windows import ROUTED_WINDOWS
+
+    gated = {(s.d_out, s.d_in) for s in gate.E2E_SHAPES}
+    routed = {(d_out, d_in) for (bits, d_out, d_in) in ROUTED_WINDOWS
+              if bits == gate.E2E_BITS}
+    assert routed <= gated, f"routed but never verified: {sorted(routed - gated)}"
+
+
 # ---------------------------------------------------------------------------
 # D2 evidence retention: fingerprints always, full arrays only for failures.
 # The boundary-pricing probe was killed holding every case's input arrays in
