@@ -148,15 +148,30 @@ def member_lut_gather(x: np.ndarray, a: QuantArtefact) -> np.ndarray:
 def member_factored_groups(x: np.ndarray, a: QuantArtefact) -> np.ndarray:
     """Integer-domain accumulation: s * sum(x*q) + b * sum(x), per group.
 
-    Algebraically identical, numerically a different rounding sequence - the
-    shape of every int-accumulate quantized GEMV kernel.
+    Algebraically identical to the dequant-domain members, numerically a
+    different rounding sequence. Both per-group sums are EXPLICIT fp32 CHAINS,
+    accumulated left to right the way an int-accumulate GEMV kernel's inner
+    loop runs; only the cross-group combination stays vectorized (that is the
+    freedom `factored-serial` varies).
+
+    The chains are the member's whole point and were once its bug. Formed by a
+    pairwise reduction instead, the activation sum is EXACT on a constant row -
+    64 identical fp32 values halve down a power-of-two tree with no rounding at
+    all - so the member was most accurate exactly where a real kernel is least
+    accurate, the floor it feeds was too tight there, and the shipped tolerance
+    flagged a correct in-contract device kernel on 10 of 1,536 serving records
+    (worst 1.743x; ADR 0016, tests/test_quant_contract_members.py).
     """
     g = a.contract.group_size
     rows, cols = a.q.shape
-    xg = _f32(x).reshape(x.shape[0], cols // g, g)
-    qg = a.q.reshape(rows, cols // g, g).astype(np.float32)
-    xq = np.einsum("bgk,rgk->brg", xg, qg, optimize=True)
-    xs = xg.sum(axis=2)
+    groups = cols // g
+    xg = _f32(x).reshape(x.shape[0], groups, g)
+    qg = a.q.reshape(rows, groups, g).astype(np.float32)
+    xq = np.zeros((x.shape[0], rows, groups), dtype=np.float32)
+    xs = np.zeros((x.shape[0], groups), dtype=np.float32)
+    for k in range(g):
+        xq += xg[:, None, :, k] * qg[None, :, :, k]
+        xs += xg[:, :, k]
     out = (xq * a.scales.astype(np.float32)[None, :, :]).sum(axis=2)
     out += xs @ a.biases.astype(np.float32).T
     return out.astype(x.dtype)

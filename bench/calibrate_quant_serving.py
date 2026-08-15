@@ -441,6 +441,11 @@ def _f32(x: np.ndarray) -> np.ndarray:
 # to a block. Bit-identity is proven, not assumed, in tests/test_serving_adequacy.py.
 DEQUANT_CHUNK_BYTES = 1 << 27  # ~134 MB per row block of the working array
 
+# The int-domain chain's working block, measured rather than guessed: at
+# lm_head B16 the whole-width chain runs 24.5 s and ~1 MB blocks run 6.4 s,
+# with 16 MB blocks already back at 20 s.
+FACTORED_CHUNK_BYTES = 1 << 20
+
 
 def dequant_chunk_rows(d_in: int, itemsize: int) -> int:
     return max(1, DEQUANT_CHUNK_BYTES // max(1, d_in * itemsize))
@@ -585,13 +590,35 @@ def eval_serial_chunked(x: np.ndarray, w32: np.ndarray, chunk_rows: int,
 
 
 def eval_factored_groups(x: np.ndarray, qg32: np.ndarray, scales32: np.ndarray,
-                         biases32: np.ndarray) -> np.ndarray:
-    """member_factored_groups with the code tensor and parameters hoisted."""
+                         biases32: np.ndarray,
+                         chunk_rows: int | None = None) -> np.ndarray:
+    """member_factored_groups with the code tensor and parameters hoisted.
+
+    The member's per-group code-dot is an explicit fp32 chain over 64 steps,
+    and at lm_head each step touches a 389 MB working array, so the whole-width
+    chain spends 25 GB of traffic per record. Running the chain in output-row
+    BLOCKS keeps a block in cache and costs a quarter of the time. The block is
+    sound where the row-chunked matmul of the memory amendment was not: the
+    chain is elementwise in the row index with no reduction and no BLAS across
+    it, so every block computes the same bits the whole width computes, at
+    every block size (test_chunked_factored_groups_is_bit_identical). The
+    cross-group tail - and in particular ``xs @ biases32.T``, which IS a BLAS
+    call whose output-row dimension must never be partitioned - runs whole.
+    """
     batch, cols = x.shape
-    groups, g = qg32.shape[1], qg32.shape[2]
+    rows, groups, g = qg32.shape
+    if chunk_rows is None:
+        chunk_rows = max(1, FACTORED_CHUNK_BYTES // max(1, batch * groups * 4))
     xg = _f32(x).reshape(batch, groups, g)
-    xq = np.einsum("bgk,rgk->brg", xg, qg32, optimize=True)
-    xs = xg.sum(axis=2)
+    xq = np.empty((batch, rows, groups), dtype=np.float32)
+    for start, stop in _row_blocks(rows, chunk_rows):
+        block = np.zeros((batch, stop - start, groups), dtype=np.float32)
+        for k in range(g):
+            block += xg[:, None, :, k] * qg32[None, start:stop, :, k]
+        xq[:, start:stop] = block
+    xs = np.zeros((batch, groups), dtype=np.float32)
+    for k in range(g):
+        xs += xg[:, :, k]
     out = (xq * scales32[None, :, :]).sum(axis=2)
     out += xs @ biases32.T
     return out.astype(x.dtype)

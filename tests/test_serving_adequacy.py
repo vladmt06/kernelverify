@@ -249,6 +249,20 @@ def test_chunked_lut_gather_is_bit_identical(chunk):
 
 
 @pytest.mark.parametrize("chunk", CHUNK_SIZES)
+@pytest.mark.parametrize("mode", ["unit", "constant-rows"])
+def test_chunked_factored_groups_is_bit_identical(chunk, mode, small):
+    """The int-domain chain is elementwise in the output row, so its row block
+    is exact at every size - unlike the fp64 reference matmul, whose output-row
+    partition demonstrably is not (test_reference_matmul_is_never_row_partitioned).
+    The member's own BLAS term stays whole inside the chunked path."""
+    _, artefact, hoists = small
+    x = _xs(128, mode, np.float32)
+    ours = eval_factored_groups(x, hoists.qg32, hoists.scales32,
+                                hoists.biases32, chunk)
+    assert np.array_equal(ours, ENSEMBLE["factored-groups"](x, artefact))
+
+
+@pytest.mark.parametrize("chunk", CHUNK_SIZES)
 def test_chunked_f16_roundtrip_is_bit_identical(chunk, small):
     """The fp16-dequant boundary's weights: two elementwise casts, so chunked."""
     _, artefact, hoists = small
