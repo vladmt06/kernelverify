@@ -55,6 +55,20 @@ def fatal(status: RunStatus, detail: str) -> int:
     return 0
 
 
+def _run_case(kernel, raw_case: dict, warmup: int, repeats: int) -> RunResult:
+    """Run one case on a compiled kernel, folding every failure into a result."""
+    try:
+        case = RunCase.from_json(raw_case)
+        return kernel.run(case, warmup=warmup, repeats=repeats)
+    except SpecError as error:
+        return RunResult(status=RunStatus.INVALID_SPEC, detail=str(error),
+                         label=raw_case.get("label", ""))
+    except Exception:  # a PyObjC or driver failure is the kernel's problem
+        return RunResult(status=RunStatus.LAUNCH_ERROR,
+                         detail=traceback.format_exc(limit=3).strip(),
+                         label=raw_case.get("label", ""))
+
+
 def main(argv: list[str]) -> int:
     # The import is inside main so that a machine without Metal reports an
     # honest status instead of failing at module import with a traceback.
@@ -112,16 +126,7 @@ def main(argv: list[str]) -> int:
               "compile_options": {"math_mode": kernel.math_mode}})
 
         for index, raw_case in enumerate(entry.get("cases", [])):
-            try:
-                case = RunCase.from_json(raw_case)
-                result = kernel.run(case, warmup=warmup, repeats=repeats)
-            except SpecError as error:
-                result = RunResult(status=RunStatus.INVALID_SPEC, detail=str(error),
-                                   label=raw_case.get("label", ""))
-            except Exception:  # a PyObjC or driver failure is the kernel's problem
-                result = RunResult(status=RunStatus.LAUNCH_ERROR,
-                                   detail=traceback.format_exc(limit=3).strip(),
-                                   label=raw_case.get("label", ""))
+            result = _run_case(kernel, raw_case, warmup, repeats)
             emit({"event": "case", "spec": spec_index, "index": index,
                   "result": result.to_json()})
 
@@ -168,16 +173,7 @@ def stream(device) -> int:
             break
         raw_case = message.get("case", {})
         index = int(message.get("index", 0))
-        try:
-            case = RunCase.from_json(raw_case)
-            result = kernel.run(case, warmup=warmup, repeats=repeats)
-        except SpecError as error:
-            result = RunResult(status=RunStatus.INVALID_SPEC, detail=str(error),
-                               label=raw_case.get("label", ""))
-        except Exception:  # a PyObjC or driver failure is the kernel's problem
-            result = RunResult(status=RunStatus.LAUNCH_ERROR,
-                               detail=traceback.format_exc(limit=3).strip(),
-                               label=raw_case.get("label", ""))
+        result = _run_case(kernel, raw_case, warmup, repeats)
         emit({"event": "case", "spec": 0, "index": index, "result": result.to_json()})
 
     emit({"event": "done"})

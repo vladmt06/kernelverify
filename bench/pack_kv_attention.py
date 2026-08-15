@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import statistics
 import sys
-import time
 from pathlib import Path
 
 import numpy as np
@@ -33,11 +32,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import mlx.core as mx  # noqa: E402
 
+from interleave import (  # noqa: E402
+    MAX_CANARY_SPREAD,
+    MIN_SAMPLE_MS,
+    arms_agree,
+    calibrate_copies,
+    dispatch,
+)
 from kernelverify.extraction.surface import LiveCall  # noqa: E402
 from kernelverify.pack.evidence import (  # noqa: E402
     CaseEvidence,
     GateEvidence,
-    output_fingerprint,
     render_banner,
 )
 from kernelverify.pack.kv_attention import (  # noqa: E402
@@ -51,6 +56,7 @@ from kernelverify.pack.kv_attention import (  # noqa: E402
 )
 from kernelverify.pack.verify import (  # noqa: E402
     judge,
+    judge_case,
     kv_inputs,
     reference_and_tolerance,
 )
@@ -63,14 +69,8 @@ VERIFY_BITS = (4, 8)
 TIMED_T = [64, 128, 256, 512, 1024]
 TIMED_B = [1, 2, 4, 8]
 TIMED_H, TIMED_DH = 8, 128
-MIN_SAMPLE_MS = 5.0
 ROUNDS = 7
 WORKING_SET_MB = 512
-
-# Interleaving equalises a clock excursion across the arms; it cannot detect
-# one. The reference arm's own spread is the detector, and rows that fail it
-# are withheld rather than published.
-MAX_CANARY_SPREAD = 1.5
 
 
 def make_case(b, h, t, dh, seed, dtype="float16"):
@@ -203,15 +203,8 @@ def verify(runner: MetalRunner) -> GateEvidence:
     expected = [e for _, _, exp in grouped.values() for e in exp]
     results = [r for batch in runner.run_candidate(spec_batches) for r in batch]
     for result, (spec_ev, label, ref, tol, incumbent) in zip(results, expected):
-        if not result.ok:
-            spec_ev.cases.append(CaseEvidence(
-                label=label, passed=False, tol=tol,
-                detail=f"runner {result.status.value}: {result.detail}"))
+        if judge_case(spec_ev, result, label, ref, tol) is None:
             continue
-        v_ours = judge(result.outputs[0], ref, tol)
-        spec_ev.cases.append(CaseEvidence(
-            label=label, passed=v_ours.ok, err=v_ours.err, tol=v_ours.tol,
-            output_sha256=output_fingerprint(result.outputs[0])))
         # The incumbent arm is a gate fairness condition, not kernel evidence.
         v_mlx = judge(incumbent, ref, tol)
         evidence.checks.append(CaseEvidence(
@@ -224,23 +217,8 @@ def verify(runner: MetalRunner) -> GateEvidence:
 
 
 # --------------------------------------------------------------------------
-# timing
+# timing (engine shared with the other gates: bench/interleave.py)
 # --------------------------------------------------------------------------
-def dispatch(build_one, copies: int) -> float:
-    outs = [build_one(i) for i in range(copies)]
-    t0 = time.perf_counter()
-    mx.eval(outs)
-    mx.synchronize()
-    return time.perf_counter() - t0
-
-
-def calibrate_copies(sample) -> int:
-    copies = 8
-    while copies < 4096 and sample(copies) * 1e3 < MIN_SAMPLE_MS:
-        copies *= 2
-    return copies
-
-
 def time_row(kernel, b, h, t, dh, bits) -> tuple:
     """(ours_us, mlx_us, agree) for one shape, or a spread rejection."""
     assert should_dispatch(t)
@@ -273,8 +251,7 @@ def time_row(kernel, b, h, t, dh, bits) -> tuple:
         _, (kq, vq) = sets[i % n_sets]
         return mlx_arm(qx, nkx, nvx, kq, vq, bits)
 
-    a, m = np.array(ours(0)).astype(np.float64), np.array(theirs(0)).astype(np.float64)
-    agree = float(np.max(np.abs(a - m))) <= 5e-3 * max(1.0, float(np.max(np.abs(m))))
+    agree = arms_agree(ours(0), theirs(0))
 
     mx.synchronize()
     copies = calibrate_copies(lambda c: dispatch(ours, c))

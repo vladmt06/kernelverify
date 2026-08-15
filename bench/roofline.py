@@ -24,6 +24,10 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import machine_state  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "bench" / "metal" / "roofline_probe.mm"
 BIN = ROOT / "bench" / ".cache" / "roofline_probe"
@@ -58,37 +62,26 @@ SPECS = {
 }
 
 
-def host_id() -> str:
-    return subprocess.run(
-        ["sysctl", "-n", "hw.model"], capture_output=True, text=True, check=True
-    ).stdout.strip()
-
-
 def machine_facts() -> dict:
-    def sysctl(key: str) -> str:
-        r = subprocess.run(["sysctl", "-n", key], capture_output=True, text=True)
-        return r.stdout.strip()
+    """This machine and its power state, from bench/machine_state.py, mapped
+    onto the key names roofline.json has always recorded.
 
-    # Power state belongs in the provenance: this is a laptop, and a ceiling
-    # measured under a battery power cap is not the ceiling a plugged-in
-    # machine has.
-    batt = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True).stdout
-    power = "AC" if "AC Power" in batt else "battery"
-    low_power = subprocess.run(["pmset", "-g"], capture_output=True, text=True).stdout
-    lpm = next(
-        (ln.split()[-1] for ln in low_power.splitlines() if "lowpowermode" in ln), "?"
-    )
-
+    Power state belongs in the provenance: this is a laptop, and a ceiling
+    measured under a battery power cap is not the ceiling a plugged-in
+    machine has.
+    """
+    fp = machine_state.fingerprint()
+    power = machine_state.power_state()
     return {
-        "power_source": power,
-        "low_power_mode": lpm,
-        "hw_model": sysctl("hw.model"),
-        "cpu": sysctl("machdep.cpu.brand_string"),
-        "cpu_cores": int(sysctl("hw.ncpu")),
-        "cpu_performance_cores": int(sysctl("hw.perflevel0.physicalcpu")),
-        "cpu_efficiency_cores": int(sysctl("hw.perflevel1.physicalcpu")),
-        "memory_bytes": int(sysctl("hw.memsize")),
-        "os": f"{platform.system()} {platform.mac_ver()[0]}",
+        "power_source": power["source"],
+        "low_power_mode": power["low_power_mode"],
+        "hw_model": fp["hw_model"],
+        "cpu": fp["chip"],
+        "cpu_cores": fp["cores"],
+        "cpu_performance_cores": fp["performance_cores"],
+        "cpu_efficiency_cores": fp["efficiency_cores"],
+        "memory_bytes": fp["memory_bytes"],
+        "os": fp["os"],
     }
 
 

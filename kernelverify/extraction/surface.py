@@ -13,7 +13,7 @@ form as the runner transport.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from kernelverify.runners.spec import array_from_json, array_to_json
 

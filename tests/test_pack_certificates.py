@@ -12,7 +12,6 @@ the suite pays seconds, not the full gate's minutes; nothing about the path
 is stubbed in the happy-path test.
 """
 
-import importlib.util
 import json
 
 import numpy as np
@@ -33,10 +32,11 @@ from kernelverify.pack.evidence import (  # noqa: E402
     GateEvidence,
     SpecializationEvidence,
 )
+from conftest import METAL_DEVICE  # noqa: E402
 from kernelverify.runners import MetalRunner  # noqa: E402
 
 RUNNER = MetalRunner()
-if RUNNER.probe() is None:
+if METAL_DEVICE is None:
     pytest.skip("no Metal device", allow_module_level=True)
 
 

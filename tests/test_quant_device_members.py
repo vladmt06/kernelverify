@@ -22,7 +22,6 @@ pytest.importorskip("Metal")
 from kernelverify.runners.device import MetalDevice  # noqa: E402
 from kernelverify.runners.result import RunResult  # noqa: E402
 from kernelverify.schemas.quant_contract import (  # noqa: E402
-    ENSEMBLE,
     FAULTS,
     QuantContract,
     canonical_quantize,

@@ -13,6 +13,7 @@ import pytest
 
 import machine_state
 import measure_baselines
+from conftest import schema_row
 from machine_state import binding_verdict, timing_verdict
 
 
@@ -168,21 +169,7 @@ def test_timing_floor_blocks_binding_on_an_otherwise_perfect_machine():
 
 
 def valid_row():
-    return {
-        "schema_version": 3, "run_id": "r", "row_id": "r/x", "measured_at": "t",
-        "provenance_tier": "owner-run", "machine": {}, "idle_before": state(),
-        "idle_after": state(), "stack": {"name": "llama.cpp"},
-        "model": {"name": "Qwen3-4B-Q4_K_M.gguf", "logical_name": "qwen3-4b"},
-        "measurement": {"kind": "decode"},
-        "result": {"metric": "tokens_per_s", "median": 1.0, "reps": 3,
-                   "samples": [1.0], "min_sample_ms": 50.0, "floor_ms": 1.0,
-                   "below_timing_floor": False},
-        "roofline": {"bandwidth_utilisation_pct": 80.0,
-                     "binding_resource": "memory"},
-        "sampling": {"interleaved": True, "rotation": "arm-alternation",
-                     "rounds": 3, "group": "r/decode-w1", "group_members": ["x"]},
-        "binding": True, "binding_blockers": [],
-    }
+    return schema_row(version=3)
 
 
 def test_a_complete_row_validates_and_round_trips_as_jsonl():

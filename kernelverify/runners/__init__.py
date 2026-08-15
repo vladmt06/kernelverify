@@ -10,7 +10,8 @@ per candidate and dispatched over a batch of cases inside a worker process the
 candidate cannot take down with it.
 
 Importing this package does not import Metal, so a machine without a GPU can
-still load the harness; ask `MetalRunner().available()` before running.
+still load the harness; ask whether `MetalRunner().probe()` finds a device
+before running.
 
 The Metal backend needs `pyobjc-framework-Metal`, which is the only dependency
 this repository has beyond numpy. It is imported in the worker process alone,

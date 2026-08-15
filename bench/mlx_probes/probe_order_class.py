@@ -15,30 +15,20 @@ Run at fp32 so the result isolates reduction order from output-dtype rounding.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import numpy as np
 import mlx.core as mx
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from phase0_contract_k import unpack_mlx_q  # noqa: E402
 
 BITS, GROUP = 4, 64
 ROWS, KDIM = 64, 4096
 N_PERMS = 200
 SEED = 0
-
-
-def unpack(wq: np.ndarray, bits: int, cols: int) -> np.ndarray:
-    byts = np.ascontiguousarray(wq).view(np.uint8)
-    rows = byts.shape[0]
-    stream = np.zeros((rows, byts.shape[1] // 8 + 2), dtype=np.uint64)
-    for b in range(byts.shape[1]):
-        stream[:, b // 8] |= byts[:, b].astype(np.uint64) << np.uint64(8 * (b % 8))
-    out = np.zeros((rows, cols), dtype=np.uint32)
-    mask = (1 << bits) - 1
-    for i in range(cols):
-        word, off = divmod(i * bits, 64)
-        val = stream[:, word] >> np.uint64(off)
-        if off + bits > 64:
-            val = val | (stream[:, word + 1] << np.uint64(64 - off))
-        out[:, i] = (val & np.uint64(mask)).astype(np.uint32)
-    return out
 
 
 def main():
@@ -49,7 +39,7 @@ def main():
     mx.eval(wq, sc, bi, x)
 
     # The contract reference: the intended quantized weights, exactly, in fp64.
-    q = unpack(np.array(wq), BITS, KDIM).astype(np.float64)
+    q = unpack_mlx_q(np.array(wq), KDIM, BITS).astype(np.float64)
     s = np.array(sc).astype(np.float64).repeat(GROUP, axis=1)
     b = np.array(bi).astype(np.float64).repeat(GROUP, axis=1)
     w64 = s * q + b

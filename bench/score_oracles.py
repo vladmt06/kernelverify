@@ -64,8 +64,6 @@ from kernelverify.battery import (  # noqa: E402,F401 - re-exported for callers
 from kernelverify.battery.policies import (  # noqa: E402,F401 - test helpers
     _boundary_features,
     _dim_bounds,
-    _is_pow2,
-    _tie_break,
 )
 from kernelverify.mutation.catalogue import CATALOGUE, KERNEL_TO_OP  # noqa: E402
 from kernelverify.schemas.native_ops import NATIVE_OPS  # noqa: E402
@@ -96,7 +94,10 @@ def main() -> int:
 
     metas = {op: _meta_for(op) for op in set(KERNEL_TO_OP.values())}
 
-    def detection_rate(policy_fn, stochastic, budget, population):
+    def detection_rate(policy_fn, stochastic, budget, population,
+                       miss_counts=None):
+        """Mean detection fraction; optionally counts each miss per mutation,
+        so the exact-miss report reuses this pass instead of re-running it."""
         repeats = REPEATS if stochastic else 1
         totals = []
         for repeat in range(repeats):
@@ -109,6 +110,8 @@ def main() -> int:
                 verdicts = table[mutation.name]
                 if any(verdicts[c] for c in selected):
                     found += 1
+                elif miss_counts is not None:
+                    miss_counts[mutation.name] = miss_counts.get(mutation.name, 0) + 1
             totals.append(found / len(population))
         return float(np.mean(totals))
 
@@ -121,8 +124,12 @@ def main() -> int:
     print("=" * len(header))
     print(header)
     print("-" * len(header))
+    ours_misses: dict[int, dict[str, int]] = {b: {} for b in BUDGETS}
     for name, (fn, stochastic) in POLICIES.items():
-        cells = "".join(f"{detection_rate(fn, stochastic, b, viable):>8.1%} " for b in BUDGETS)
+        ours = name == "boundary pairs + random (ours)"
+        cells = "".join(
+            f"{detection_rate(fn, stochastic, b, viable, ours_misses[b] if ours else None):>8.1%} "
+            for b in BUDGETS)
         print(f"{name:<{width}}{cells}")
     print("-" * len(header))
 
@@ -142,16 +149,10 @@ def main() -> int:
     print()
     print(f"exact misses by our policy at each budget, over {REPEATS} runs")
     print("(a 100.0% table cell above is honest only if its budget shows none here):")
-    fn, _ = POLICIES["boundary pairs + random (ours)"]
+    # Counted during the all-faults detection_rate pass above: same seeds,
+    # same policy calls, same order by construction.
     for budget in BUDGETS:
-        miss_counts: dict[str, int] = {}
-        for repeat in range(REPEATS):
-            rng = random.Random(1000 + repeat)
-            for mutation in viable:
-                corpus_op = KERNEL_TO_OP[mutation.kernel]
-                selected = fn(spaces[corpus_op], metas[corpus_op], budget, rng)
-                if not any(table[mutation.name][c] for c in selected):
-                    miss_counts[mutation.name] = miss_counts.get(mutation.name, 0) + 1
+        miss_counts = ours_misses[budget]
         if not miss_counts:
             print(f"  B={budget:>2}: none, every viable fault caught in every run")
             continue

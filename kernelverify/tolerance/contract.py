@@ -545,9 +545,6 @@ def _population(op: str, *, n_random: int, seed: int) -> list[tuple[str, Callabl
     5. seeded random permutations, which are what actually bound the class
        on the reduction-heavy operators and which no fixed list reaches.
     """
-    orders = reduction_orders(n_random, seed)
-    by_label = {o.label: o for o in orders}
-
     if op == "gelu_triton":
         from kernelverify.reference.kernels import gelu
         return [("reference", gelu)] + _gelu_variants()
@@ -557,6 +554,8 @@ def _population(op: str, *, n_random: int, seed: int) -> list[tuple[str, Callabl
     if op == "leaky_relu_triton":
         from kernelverify.reference.kernels import leaky_relu
         return [("reference", leaky_relu)] + _leaky_relu_variants()
+
+    orders = reduction_orders(n_random, seed)
 
     if op in ("rmsnorm_triton", "l2norm_triton"):
         build = _rmsnorm_variant if op == "rmsnorm_triton" else _l2norm_variant
@@ -581,6 +580,7 @@ def _population(op: str, *, n_random: int, seed: int) -> list[tuple[str, Callabl
                                    "k-sum:magnitude-desc", "k-sum:blocked-32"])
 
     if op in ("attention_triton", "flash_attention_triton"):
+        by_label = {o.label: o for o in orders}
         members = [("blas", _attention_blas), ("binary64", _attention_wide)]
         members += [(f"sum:{o.label}", _attention_variant(o)) for o in orders]
         members += [

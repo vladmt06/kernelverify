@@ -34,6 +34,7 @@ from typing import Sequence
 
 import numpy as np
 
+from kernelverify.pack.evidence import CaseEvidence, output_fingerprint
 from kernelverify.schemas.native_ops import NATIVE_OPS
 from kernelverify.schemas.quant_contract import QuantArtefact, dequantize
 
@@ -115,3 +116,26 @@ def verify_output(op_name: str, inputs: dict, candidate,
     """One-step gate: reference, tolerance, and verdict for one case."""
     ref, tol = reference_and_tolerance(op_name, inputs, dtype)
     return judge(candidate, ref, tol)
+
+
+def judge_case(spec_ev, result, label: str, ref: np.ndarray, tol: float,
+               aux: dict | None = None) -> Verdict | None:
+    """One crash-isolated runner result, judged into gate evidence.
+
+    The bench gates batch their cases through the runner first and judge
+    afterwards; this is that judging step, shared so the evidence a refused
+    runner leaves and the fields a judged case carries cannot drift between
+    gates. A runner that did not finish is recorded as a failed case with the
+    runner's own status, and None is returned in place of a verdict.
+    """
+    if not result.ok:
+        spec_ev.cases.append(CaseEvidence(
+            label=label, passed=False, tol=tol,
+            detail=f"runner {result.status.value}: {result.detail}"))
+        return None
+    v = judge(result.outputs[0], ref, tol)
+    spec_ev.cases.append(CaseEvidence(
+        label=label, passed=v.ok, err=v.err, tol=v.tol,
+        output_sha256=output_fingerprint(result.outputs[0]),
+        **({"aux": aux} if aux is not None else {})))
+    return v

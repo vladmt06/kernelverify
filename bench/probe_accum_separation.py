@@ -45,7 +45,6 @@ for i, case in enumerate(cases):
     # The sequential sub-shape: a naive one-thread-per-output kernel adds the
     # whole row left to right in half precision. np.add.accumulate is truly
     # sequential where np.add.reduce is pairwise.
-    from kernelverify.reference.native_kernels import canonical_quantize as _cq  # noqa
     x_, w_ = inputs["x"], inputs["w"]
     import kernelverify.reference.native_kernels as nk
     from kernelverify.schemas.quant_contract import QuantContract, dequantize

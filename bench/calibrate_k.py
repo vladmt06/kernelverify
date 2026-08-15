@@ -55,7 +55,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from kernelverify.mutation.catalogue import CATALOGUE, KERNEL_TO_CORPUS_OP  # noqa: E402
-from kernelverify.reference.kernels import KERNELS  # noqa: E402
 from kernelverify.tolerance.contract import (  # noqa: E402
     CONTRACT_VERSION,
     contract_implementations,
@@ -67,7 +66,7 @@ from kernelverify.tolerance.floor import (  # noqa: E402
     ensemble_labels,
 )
 from measure_escape import load_meta, reference  # noqa: E402
-from score_oracles import INPUT_MODES, Case, case_space, make_mode_inputs  # noqa: E402
+from score_oracles import INPUT_MODES, case_space, make_mode_inputs  # noqa: E402
 
 CACHE_PATH = Path(__file__).resolve().parent / ".cache" / "contract_k.pkl"
 
@@ -186,16 +185,20 @@ def measure(n_random: int, rebuild: bool) -> dict:
         cases = case_space(meta)
         build_pop = contract_implementations(op, n_random=n_random, seed=SEED_BUILD)
         holdout_pop = contract_implementations(op, n_random=n_random, seed=SEED_HOLDOUT)
-        by_label = dict(build_pop)
-        legacy = [by_label[label] for label in ADR0004_ENSEMBLE[op]]
-        ensemble = ENSEMBLES[op]
-        control = ensemble[0]
+        # The shipped ensemble, the ADR 0004 ensemble and the control are all
+        # members of the build population (same builders, same SEED_BUILD), so
+        # their per-case errors come out of the build sweep by label instead
+        # of being evaluated a second time; the floats are identical.
+        shipped_labels = ensemble_labels(op)
+        legacy_labels = ADR0004_ENSEMBLE[op]
+        control_label = shipped_labels[0]
         faults = faults_for(op)
         rows = []
 
         def sweep(population, inputs, ref, case):
-            """Running max over the population, in ensemble-priority order."""
-            running, worst_label, curve = 0.0, "", []
+            """Running max over the population, in ensemble-priority order.
+            Also returns every member's error by label, for the lookups above."""
+            running, worst_label, curve, errs = 0.0, "", [], {}
             for label, fn in population:
                 err = oracle_error(fn(inputs), ref)
                 if not np.isfinite(err):
@@ -205,10 +208,11 @@ def measure(n_random: int, rebuild: bool) -> dict:
                         "it is not a correct implementation and does not belong "
                         "in the population"
                     )
+                errs[label] = err
                 if err > running:
                     running, worst_label = err, label
                 curve.append(running)
-            return running, worst_label, curve
+            return running, worst_label, curve, errs
 
         for case in cases:
             inputs = make_mode_inputs(
@@ -218,20 +222,18 @@ def measure(n_random: int, rebuild: bool) -> dict:
             key = (op, case.dims, case.dtype, case.seed, case.distribution)
             ref = reference(meta, inputs, key)
 
-            floor_e = max(oracle_error(fn(inputs), ref) for fn in ensemble)
-            floor_legacy = max(oracle_error(fn(inputs), ref) for fn in legacy)
-            floor_build, build_label, curve = sweep(build_pop, inputs, ref, case)
-            floor_holdout, holdout_label, _ = sweep(holdout_pop, inputs, ref, case)
+            floor_build, build_label, curve, errs = sweep(build_pop, inputs, ref, case)
+            floor_holdout, holdout_label, _, _ = sweep(holdout_pop, inputs, ref, case)
             rows.append({
                 "case": (case.dims, case.dtype, case.distribution, case.seed),
                 "base_tol": base_tol,
-                "floor_e": floor_e,
-                "floor_legacy": floor_legacy,
+                "floor_e": max(errs[label] for label in shipped_labels),
+                "floor_legacy": max(errs[label] for label in legacy_labels),
                 "floor_c": max(floor_build, floor_holdout),
                 "worst_label": build_label if floor_build >= floor_holdout else holdout_label,
                 "floor_holdout": floor_holdout,
                 "floor_at": {b: curve[min(b, len(curve)) - 1] for b in ENSEMBLE_BUDGETS},
-                "control_err": oracle_error(control(inputs), ref),
+                "control_err": errs[control_label],
                 "faults": {m.name: oracle_error(m.build()(inputs), ref) for m in faults},
             })
         records[op] = rows
@@ -314,7 +316,7 @@ def report_gate_a(records: dict) -> float:
         reqs = [(k_required(r), r) for r in rows]
         binding = [(k, r) for k, r in reqs if k > 0.0]
         top_k, top_row = max(reqs, key=lambda kr: kr[0])
-        near = [(under_coverage(r), r) for r in rows if under_coverage(r) is not None]
+        near = [(c, r) for r in rows if (c := under_coverage(r)) is not None]
         fp = sum(1 for r in rows
                  if r["floor_c"] > max(r["base_tol"], K_ENSEMBLE * r["floor_e"]))
         total_fp += fp
@@ -409,8 +411,9 @@ def report_gate_b(records: dict, anchored: float) -> None:
     print("=" * len(header))
     print(header)
     print("-" * len(header))
+    counts_by_k = {}
     for k in grid:
-        counts = detection_at(records, k)
+        counts = counts_by_k[k] = detection_at(records, k)
         viable = sum(1 for hits, _ in counts.values() if hits)
         hits = sum(h for h, _ in counts.values())
         canary_hits, canary_total = counts[CANARY]
@@ -421,8 +424,11 @@ def report_gate_b(records: dict, anchored: float) -> None:
               f"{control_failures_at(records, k):>15}{mark}")
     print("=" * len(header))
 
-    shipped = detection_at(records, K_ENSEMBLE)
-    target = detection_at(records, max(anchored, K_ENSEMBLE))
+    def counts_at(k: float) -> dict:
+        return counts_by_k.get(k) or detection_at(records, k)
+
+    shipped = counts_at(K_ENSEMBLE)
+    target = counts_at(max(anchored, K_ENSEMBLE))
     changed = {n: (shipped[n][0], target[n][0]) for n in shipped
                if shipped[n][0] != target[n][0]}
     print()
@@ -474,8 +480,8 @@ def report_gate_c(records: dict) -> None:
                     reqs.append(float("inf") if f_e <= 0 else target / f_e)
                 if target >= NEAR_BINDING * row["base_tol"] and f_e > 0:
                     ratios.append(target / f_e)
-                fp += target > max(row["base_tol"], K_ENSEMBLE * f_e)
                 tol = max(row["base_tol"], K_ENSEMBLE * f_e)
+                fp += target > tol
                 legacy_tol = max(row["base_tol"], K_ENSEMBLE * row["floor_legacy"])
                 moved += sum(1 for err in row["faults"].values()
                              if (err > tol) != (err > legacy_tol))

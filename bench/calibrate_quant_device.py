@@ -88,6 +88,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import mlx.core as mx  # noqa: E402
+
 from kernelverify.schemas.quant_contract import (  # noqa: E402
     ENSEMBLE,
     FAULTS,
@@ -147,6 +149,8 @@ def measure(bits: int, shapes: list, session: DeviceMemberSession,
                 w = make_w(d_out, d_in, draw, rng)
                 artefact, exact = verify_against_mlx(w, contract)
                 exactness.append(exact)
+                quantized = mx.quantize(mx.array(w), group_size=contract.group_size,
+                                        bits=contract.bits)
                 carrier = {
                     "q": np.ascontiguousarray(artefact.q.astype(np.float16)),
                     "scales": np.ascontiguousarray(artefact.scales.astype(np.float32)),
@@ -188,7 +192,7 @@ def measure(bits: int, shapes: list, session: DeviceMemberSession,
                             "members": members,
                             "heldout": {
                                 "block-tiled": err(heldout_block_tiled(x, artefact), ref),
-                                "mlx-on-device": err(mlx_on_device(x, w, contract), ref),
+                                "mlx-on-device": err(mlx_on_device(x, quantized, contract), ref),
                             },
                             "faults": {n: err(ENSEMBLE["dequant-pairwise"](x, f(artefact)), ref)
                                        for n, f in FAULTS.items()},

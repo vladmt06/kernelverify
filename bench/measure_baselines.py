@@ -43,18 +43,21 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-import gguf_info
-import machine_state
-import mlx_info
-import roofline
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import external  # noqa: E402
+import gguf_info  # noqa: E402
+import machine_state  # noqa: E402
+import mlx_info  # noqa: E402
+import roofline  # noqa: E402
+
+from external import GGUF_DIR, LLAMA_CPP  # noqa: E402
+from kernelverify.report.matrix import _workload  # noqa: E402
+from kernelverify.report.matrix import utilisation as _renderer_utilisation  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = ROOT / "bench" / ".baselines"
 HASH_CACHE = ROOT / "bench" / ".cache" / "model_hashes.json"
-
-LLAMA_CPP = Path("/Users/vlad/llama.cpp")
-LLAMA_BENCH = LLAMA_CPP / "build" / "bin" / "llama-bench"
-GGUF_DIR = Path("/Users/vlad/models/gguf")
 
 SCHEMA_VERSION = 3
 PROVENANCE_TIER = "owner-run"
@@ -215,10 +218,7 @@ def llama_cpp_build() -> dict:
         "name": "llama.cpp",
         "version": commit,
         "path": str(LLAMA_CPP),
-        "build_flags": [
-            "-DCMAKE_BUILD_TYPE=Release", "-DGGML_METAL=ON",
-            "-DGGML_METAL_EMBED_LIBRARY=ON",
-        ],
+        "build_flags": list(external.CMAKE_FLAGS),
     }
 
 
@@ -239,14 +239,10 @@ def mlx_build() -> dict:
 
 
 def run_llama_sample(model: Path, n_prompt: int, n_gen: int, depth: int = 0) -> dict:
-    cmd = [
-        str(LLAMA_BENCH), "-m", str(model), "-r", "1", "-o", "json",
-        "-p", str(n_prompt), "-n", str(n_gen), "-d", str(depth),
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise RuntimeError(f"llama-bench failed: {proc.stderr[-1200:]}")
-    rows = [r for r in json.loads(proc.stdout) if (r["n_gen"] or r["n_prompt"])]
+    rows = [r for r in external.run_llama_bench(
+                model, ["-r", "1", "-p", str(n_prompt), "-n", str(n_gen),
+                        "-d", str(depth)])
+            if (r["n_gen"] or r["n_prompt"])]
     row = rows[0]
     return {
         "tokens_per_s": row["avg_ts"],
@@ -393,14 +389,16 @@ def sample_value(spec: dict, sample: dict) -> float:
 
 
 def workload_cell(spec: dict) -> tuple:
-    """WHAT this spec measures, mirroring the renderer's cell key.
+    """WHAT this spec measures: the renderer's own cell key, not a mirror.
 
     The specs sharing this key are the arms of one A/B, and they are the only
     rows that will ever share a sampling group, so a group is one real A/B
     session by construction rather than a relabel of a run-wide rotation.
+    Computed by the renderer's `_workload` over the measurement object this
+    spec will write, so producer and consumer cannot disagree about what a
+    cell is.
     """
-    return (spec["kind"], spec["batch"],
-            spec["n_prompt"] if spec["kind"] == "prefill" else None)
+    return _workload({"measurement": measurement_fields(spec)})
 
 
 def cell_label(key: tuple) -> str:
@@ -445,16 +443,36 @@ def measure_cells(specs: list[dict], rounds: int,
 # utilisation
 
 
-def utilisation(spec: dict, value: float, ceilings: dict) -> dict:
+def cost_models(specs: list[dict]) -> dict:
+    """One tensor-table cost model per (stack, model), built before the row
+    loop: `utilisation` is an untimed reporting path, but re-reading a model
+    header per spec is still work the loop repeats for no reason."""
+    out: dict[tuple, dict] = {}
+    for spec in specs:
+        key = (spec["stack"], spec["model_path"])
+        if key not in out:
+            out[key] = (gguf_info.cost_model(gguf_info.read(spec["model_path"]))
+                        if spec["stack"] == "llama.cpp"
+                        else mlx_info.cost_model(spec["model_path"]))
+    return out
+
+
+def utilisation(spec: dict, value: float, ceilings: dict,
+                cost: dict | None = None) -> dict:
     """Bytes and flops per pass from the model's tensor table, never file size."""
     read_gbs = ceilings["read_gbs"]
     flops_ceiling = ceilings["fp16_gflops"]
+    # Decode streams weights and barely writes, so the read ceiling is the
+    # denominator for every kind here.
+    denominator = "read"
 
     if spec["stack"] == "llama.cpp":
-        cost = gguf_info.cost_model(gguf_info.read(spec["model_path"]))
+        if cost is None:
+            cost = gguf_info.cost_model(gguf_info.read(spec["model_path"]))
         gen_bytes, kv_bytes = gguf_info.gen_bytes, gguf_info.kv_bytes
     else:
-        cost = mlx_info.cost_model(spec["model_path"])
+        if cost is None:
+            cost = mlx_info.cost_model(spec["model_path"])
         gen_bytes, kv_bytes = mlx_info.gen_bytes, mlx_info.kv_bytes
 
     if spec["kind"] == "decode":
@@ -463,7 +481,6 @@ def utilisation(spec: dict, value: float, ceilings: dict) -> dict:
         ctx = spec.get("depth", 0) + spec["n_prompt"] + spec["n_gen"] / 2
         bytes_per_pass = gen_bytes(cost) + kv_bytes(cost, ctx)
         passes_per_s = value
-        denominator = "read"
     elif spec["kind"] == "batch_decode":
         # One forward pass advances every stream one token: the weights are
         # read once per pass, but each stream drags its own KV cache, so KV
@@ -473,13 +490,11 @@ def utilisation(spec: dict, value: float, ceilings: dict) -> dict:
         ctx = spec["n_prompt"] + spec["n_gen"] / 2
         bytes_per_pass = gen_bytes(cost) + streams * kv_bytes(cost, ctx)
         passes_per_s = value / streams
-        denominator = "read"
     else:
         width = max(spec["batch"], 1)
-        ctx = spec["n_prompt"] if spec["kind"] == "prefill" else spec["n_prompt"]
+        ctx = spec["n_prompt"]
         bytes_per_pass = gen_bytes(cost) + kv_bytes(cost, ctx)
         passes_per_s = value / width
-        denominator = "read"
 
     achieved_gbs = bytes_per_pass * passes_per_s / 1e9
     out = {
@@ -554,12 +569,12 @@ def main() -> int:
     print("[roofline] measuring machine ceilings", flush=True)
     roof = roofline.measure()
     ceilings = {
-        "read_gbs": roof["probe"]["bandwidth_gbs"]["read_shared"],
+        "read_gbs": max(roof["probe"]["bandwidth_gbs"]["read_shared"],
+                        roof["probe"]["bandwidth_gbs"]["read_private"]),
         "copy_gbs": roof["probe"]["bandwidth_gbs"]["copy_private"],
         "fp16_gflops": roof["measured"]["peak_fp16_gflops"],
         "fp32_gflops": roof["measured"]["peak_fp32_gflops"],
     }
-    ceilings["read_gbs"] = max(ceilings["read_gbs"], roof["probe"]["bandwidth_gbs"]["read_private"])
     print(f"           read {ceilings['read_gbs']} GB/s, copy {ceilings['copy_gbs']} GB/s,"
           f" fp16 {ceilings['fp16_gflops']} GFLOP/s", flush=True)
 
@@ -577,6 +592,11 @@ def main() -> int:
 
     after = machine_state.idle_check(fp["cores"])
     stacks = {"llama.cpp": llama_cpp_build(), "mlx-lm": mlx_build()}
+
+    # Untimed reporting inputs, once per (stack, model) and once per model
+    # file instead of once per spec.
+    costs = cost_models(specs)
+    hashes = {path: model_hash(path) for path in {s["model_path"] for s in specs}}
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     out_path = OUT_DIR / f"{datetime.now(timezone.utc):%Y-%m-%d}.jsonl"
@@ -611,9 +631,10 @@ def main() -> int:
         sample_ms = min(s["sample"]["sample_ms"] for s in samples[spec["id"]])
         timing = machine_state.timing_verdict(sample_ms)
         median = statistics.median(vals)
-        spread = round((max(vals) - min(vals)) / median * 100, 2) if median else None
+        spread = round(machine_state.spread_pct(vals), 2) if median else None
         dispersion = machine_state.dispersion_verdict(spread)
-        util = utilisation(spec, median, ceilings)
+        util = utilisation(spec, median, ceilings,
+                           costs[(spec["stack"], spec["model_path"])])
         model_path = spec["model_path"]
         rows.append({
             "schema_version": SCHEMA_VERSION,
@@ -628,7 +649,7 @@ def main() -> int:
                 "name": model_path.name,
                 "logical_name": LOGICAL_MODEL,
                 "path": str(model_path),
-                "sha256_32": model_hash(model_path),
+                "sha256_32": hashes[model_path],
                 "quant": "Q4_K_M" if spec["stack"] == "llama.cpp" else "mlx-affine-4bit",
             },
             "measurement": measurement_fields(spec),
@@ -678,10 +699,10 @@ def render(rows: list[dict]) -> str:
             continue
         m, res, roof = r["measurement"], r["result"], r["roofline"]
         resource = roof.get("binding_resource", "memory")
-        if resource == "compute" and roof.get("roofline_utilisation_pct") is not None:
-            pct = f"{roof['roofline_utilisation_pct']}%"
-        else:
-            pct = f"{roof['bandwidth_utilisation_pct']}%"
+        # The renderer owns the choice of which utilisation column a row is
+        # about; this console table only formats what it returns.
+        _, pct_value = _renderer_utilisation(r)
+        pct = f"{pct_value}%"
         # The scope travels with the kind here too: the operator reading a
         # run's summary is a reader like any other (SCHEMA.md renderer notes).
         kind = m["kind"]
