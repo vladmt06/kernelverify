@@ -76,6 +76,27 @@ def _meta_for(op: str) -> dict:
     return native.meta if native else load_meta(op)
 
 
+# The one policy the exact-miss report is about. Held as a name and resolved by
+# lookup, never compared inline against a literal: an inline comparison against
+# a renamed policy evaluates False in silence, so the miss table stays empty and
+# the report prints "none, every viable fault caught in every run" for a policy
+# it never scored. AGENTS.md: any 100% claim must be backed by exact miss counts.
+OURS = "boundary pairs + random (ours)"
+
+if OURS not in POLICIES:
+    raise KeyError(f"{OURS!r} is not a registered policy; the exact-miss report "
+                   f"has nothing to score. Registered: {list(POLICIES)}")
+
+
+def ours_policy() -> tuple:
+    """The (policy function, stochastic) entry the exact-miss report scores.
+
+    A lookup, so a rename or a removal raises here instead of quietly reporting
+    zero misses under a 100.0% cell.
+    """
+    return POLICIES[OURS]
+
+
 def main() -> int:
     built = build_verdicts()
     table, spaces = built["table"], built["spaces"]
@@ -125,8 +146,9 @@ def main() -> int:
     print(header)
     print("-" * len(header))
     ours_misses: dict[int, dict[str, int]] = {b: {} for b in BUDGETS}
+    ours_fn = ours_policy()[0]
     for name, (fn, stochastic) in POLICIES.items():
-        ours = name == "boundary pairs + random (ours)"
+        ours = fn is ours_fn
         cells = "".join(
             f"{detection_rate(fn, stochastic, b, viable, ours_misses[b] if ours else None):>8.1%} "
             for b in BUDGETS)

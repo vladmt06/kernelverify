@@ -10,6 +10,7 @@ import random
 
 import pytest
 
+import score_oracles
 from measure_escape import load_meta
 from score_oracles import (
     POLICIES,
@@ -105,3 +106,25 @@ def test_pairwise_reaches_full_pair_coverage_given_budget(op):
         *(pairs_of(_boundary_features(c, dim_min, dim_max)) for c in prefix)
     )
     assert covered == achievable
+
+
+# --- the exact-miss report names its policy by lookup ----------------------
+#
+# AGENTS.md: any 100% claim must be backed by exact miss counts. The report
+# under the 100.0% cells counts misses for one policy, so it has to be able to
+# find that policy; an inline `name == "..."` comparison against a renamed
+# policy evaluates False, leaves the miss table empty, and prints "none, every
+# viable fault caught in every run" for a policy it never scored.
+
+
+def test_ours_names_a_registered_policy():
+    assert score_oracles.OURS in POLICIES
+    assert score_oracles.ours_policy() == POLICIES[score_oracles.OURS]
+
+
+def test_a_renamed_policy_raises_rather_than_reporting_zero_misses(monkeypatch):
+    renamed = {("boundary pairs + random" if name == score_oracles.OURS else name): entry
+               for name, entry in POLICIES.items()}
+    monkeypatch.setattr(score_oracles, "POLICIES", renamed)
+    with pytest.raises(KeyError, match="boundary pairs"):
+        score_oracles.ours_policy()
