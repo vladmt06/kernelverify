@@ -1,10 +1,12 @@
 """Price the wide_qmv routing boundary at the E2E dispatch shapes.
 
-The routing boundary (kernelverify/pack/wide_qmv.py, MIN/MAX_PROFITABLE_M)
-ships as the 5..11 default ruled by D3.1 until this probe prices it where
-the serving path actually dispatches: the six Qwen3-4B decode shapes, ours
-against mx.quantized_matmul, M = 1..16, 3-bit (the block's arm, D1; 2-bit
-is cut, D4).
+The routing boundary lives in kernelverify/pack/routed_windows.py as a
+per-shape, per-bit-width SET of tile widths derived from this probe's own
+recording. It replaced the uniform 5..11 default D3.1 shipped while the
+shapes the serving path actually dispatches were still unpriced. This
+probe produces that evidence: the six Qwen3-4B decode shapes, ours against
+mx.quantized_matmul, M = 1..16, 3-bit (the block's arm, D1; 2-bit is cut,
+D4).
 
 Verification precedes timing, enforced: the extended pack gate must be
 green in this same process before a single ratio is printed, exactly as
@@ -48,9 +50,31 @@ Boundary interpretation is PRE-REGISTERED (ruling D3, decided 2026-08-15
 before any number existed): a boundary cell that comes back REFUSED or
 REJECTED under the probe's own interval rule is DROPPED from the routed
 window - the window may narrow, it never keeps an unevidenced cell. The
-reconciliation step reads this rule from here; MIN/MAX_PROFITABLE_M stay
-at the shipped 5..11 default until that step runs against the recorded
-numbers.
+reconciliation step reads this rule from here. It has now run against the
+2026-08-15 recording: every per-shape window it produced is strictly
+inside the old 5..11 default, so the adoption was pure narrowing under
+this rule and needed no further authority.
+
+WIDENING is pre-registered here too, ADDED 2026-08-15, before any run it
+can govern - a rule written after the numbers is a reading of them, not a
+rule. A future pricing run may widen a shape's routed set only to cells
+that are BOTH (a) WIN in that run, under this probe's own interval rule,
+and (b) contiguous with the set that shape already holds. A window may
+therefore grow at its edges and may never acquire an island across cells
+the same run left undecided. Any widen is adopted only TOGETHER WITH gate
+coverage of the new cells: the routed set and the per-shape E2E coverage
+in bench/pack_wide_qmv.py move in one change, never in two, because a
+routed cell that nothing verifies is precisely the shipped-untested cell
+this block exists to prevent. REFUSED and LOSS still drop, in the same
+run, under the same rule - widening buys narrowing no leniency.
+
+The cell this rule is written for is lm_head M=4. It measured WIN on
+2026-08-15 (interval [1.018, 1.028]) and is NOT routed (ruling D2): it
+falls outside the 5..11 window the original pre-registration allowed
+narrowing within, so taking it then would have been a widening read out of
+a rule that pre-registered only narrowing. It is contiguous with that
+shape's routed 5..10, so a later run that prices it WIN again may take it
+under the rule above, together with its gate coverage.
 
 The full samples, spreads, machine state and shape provenance land in
 bench/results/, committed, so the boundary the pricing justifies can cite
