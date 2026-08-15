@@ -564,6 +564,42 @@ def test_the_producer_console_table_carries_the_scope_too():
     assert "batch_decode (mlx-only)" in measure_baselines.render([row])
 
 
+# --- the operator console cell for a row no compute column can place --------
+
+
+def unknown_resource_row(**roofline):
+    """An mlx prefill row: the producer stamps binding_resource 'unknown' for
+    every non-llama.cpp prefill, because the MLX checkpoint gives bytes but no
+    unambiguous parameter count to place the row on the compute axis."""
+    row = valid_row()
+    row["stack"] = {"name": "mlx-lm"}
+    row["measurement"] = {"kind": "prefill", "matmul_width": 1024,
+                          "width_mechanism": "prompt-width"}
+    row["result"] |= {"spread_pct": 0.5}
+    row["roofline"] |= {"binding_resource": "unknown", "achieved_gbs": 12.3,
+                        "roofline_utilisation_pct": None,
+                        "bandwidth_utilisation_pct": 9.1, **roofline}
+    return row
+
+
+def test_an_unknown_binding_resource_row_prints_its_bandwidth_percentage():
+    """The renderer returns no percentage for an 'unknown' row on purpose: the
+    published matrix must not read a prefill row as a bandwidth catastrophe.
+    The console summary is the operator card's own table and has always shown
+    the bandwidth number there, so formatting the renderer's None straight into
+    the cell put a literal 'None%' in front of the operator.
+    """
+    table = measure_baselines.render([unknown_resource_row()])
+    assert "None%" not in table
+    assert "| unknown | 9.1% |" in table
+
+
+def test_a_cell_with_no_percentage_at_all_says_so_rather_than_printing_None():
+    table = measure_baselines.render(
+        [unknown_resource_row(bandwidth_utilisation_pct=None)])
+    assert "| unknown | n/a |" in table
+
+
 def test_the_shipped_v3_record_still_validates_under_todays_producer():
     """The other half of only-add: tightening the contract for new cells must
     not retroactively reject the rows already in the record."""

@@ -700,9 +700,16 @@ def render(rows: list[dict]) -> str:
         m, res, roof = r["measurement"], r["result"], r["roofline"]
         resource = roof.get("binding_resource", "memory")
         # The renderer owns the choice of which utilisation column a row is
-        # about; this console table only formats what it returns.
+        # about, but it declines to choose for a row stamped "unknown" - which
+        # is every non-llama.cpp prefill row, because no parameter count places
+        # them on the compute axis. This console summary has always printed the
+        # bandwidth percentage for those, so it keeps doing that; formatting
+        # the renderer's None straight into the cell printed a literal "None%"
+        # at the operator.
         _, pct_value = _renderer_utilisation(r)
-        pct = f"{pct_value}%"
+        if pct_value is None:
+            pct_value = roof.get("bandwidth_utilisation_pct")
+        pct = "n/a" if pct_value is None else f"{pct_value}%"
         # The scope travels with the kind here too: the operator reading a
         # run's summary is a reader like any other (SCHEMA.md renderer notes).
         kind = m["kind"]
