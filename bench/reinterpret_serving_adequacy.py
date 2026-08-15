@@ -153,6 +153,16 @@ def reinterpret(evidence: dict) -> dict:
     attested = (not misses
                 and all(cell["verdict"] == "ADEQUATE" for cell in cells.values())
                 and pooled_gates["verdict"] == "ADEQUATE")
+    if attested:
+        verdict = ("NO IN-CONTRACT DEMAND MISS: every withheld contribution "
+                   "sits in an out-of-contract-labelled cell (ADR 0014) and "
+                   "every cell is ADEQUATE under eligibility-aware G1")
+    else:
+        verdict = (f"IN-CONTRACT DEMAND ABOVE K = {K_SHIP:g} remains at "
+                   f"{misses} after the out-of-contract contributions are "
+                   f"withheld (each cell's k_eligible_binding names it): "
+                   f"the pre-registered membership-before-K renegotiation "
+                   f"belongs to the coordinator; nothing is resolved here")
     return {
         "derived_from": {
             "evidence_path": "bench/results/quant_serving_adequacy.json",
@@ -172,15 +182,7 @@ def reinterpret(evidence: dict) -> dict:
                        "cells_checked": len(evidence["cells"]) + 1,
                        "demand_cells_checked":
                            len(evidence["demands"]["cells"]) + 1},
-        "verdict": ("NO IN-CONTRACT DEMAND MISS: every withheld contribution "
-                    "sits in an out-of-contract-labelled cell (ADR 0014) and "
-                    "every cell is ADEQUATE under eligibility-aware G1"
-                    if attested else
-                    f"IN-CONTRACT DEMAND ABOVE K = {K_SHIP:g} remains at "
-                    f"{misses} after the out-of-contract contributions are "
-                    f"withheld (each cell's k_eligible_binding names it): "
-                    f"the pre-registered membership-before-K renegotiation "
-                    f"belongs to the coordinator; nothing is resolved here"),
+        "verdict": verdict,
     }
 
 
@@ -191,13 +193,16 @@ def main(out_path: Path = OUT_PATH) -> int:
     print(f"eligibility v{ELIGIBILITY_VERSION}, ruled on mlx "
           f"{MLX_VERSION_RULED}; interpretation code "
           f"{derived['derived_from']['interpretation_code_sha256'][:16]}...")
-    print(f"\nper-cell demand (k_demand | overshoot of shipped tol | "
-          f"admissible; calibration / independent):")
+    print("\nper-cell demand (k_demand | overshoot of shipped tol | "
+          "admissible; calibration / independent):")
     for key, d in derived["demands"]["cells"].items():
-        label = (" [OUT OF CONTRACT: numbers withheld from coverage, ADR 0014]"
-                 if d["out_of_contract"]
-                 else (" [fp16 heldout excluded, ADR 0014]"
-                       if d["excluded_heldouts"] else ""))
+        if d["out_of_contract"]:
+            label = (" [OUT OF CONTRACT: numbers withheld from coverage, "
+                     "ADR 0014]")
+        elif d["excluded_heldouts"]:
+            label = " [fp16 heldout excluded, ADR 0014]"
+        else:
+            label = ""
         print(f"  {key:>17} {d['k_needed_calibration']:8.3f} / "
               f"{d['k_needed_independent']:8.3f} | "
               f"{d['overshoot_calibration']:6.2f}x / "

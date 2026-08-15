@@ -85,20 +85,21 @@ def _exclusion(batch: int, kernel: str, violation: str) -> Exclusion:
     )
 
 
-# Keyed (heldout name, batch, dtype), exactly the cells the ruling names.
+# Keyed (heldout name, batch, dtype), exactly the cells the ruling names;
+# the keys are derived from the entries so the two can never disagree.
 # `block-tiled` appears nowhere: it is eligible everywhere.
-EXCLUSIONS = {
-    ("mlx-on-device", 1, "float16"): _exclusion(
+EXCLUSIONS = {(entry.heldout, entry.batch, entry.dtype): entry for entry in (
+    _exclusion(
         batch=1, kernel="affine_qmv / affine_qmv_fast",
         violation="C1: the per-thread sub-sum of 8 activations is evaluated "
                   "in half precision (all operands are T = half, so the "
                   "seven adds round in fp16) before the fp32 accumulator"),
-    ("mlx-on-device", 16, "float16"): _exclusion(
+    _exclusion(
         batch=16, kernel="affine_qmm_t",
         violation="C1: the dequantized weight tile is stored in "
                   "threadgroup T*, i.e. half at fp16 activations, a "
                   "narrower-than-fp32 intermediate"),
-}
+)}
 
 
 def installed_kernel_source() -> Path | None:

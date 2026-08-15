@@ -1622,12 +1622,14 @@ def tolerance_overshoot(records: list) -> tuple[float, str]:
         if tol <= 0:
             continue
         for name in ALL_MEMBERS:
-            if r["members"][name] / tol > worst:
-                worst = r["members"][name] / tol
+            ratio = r["members"][name] / tol
+            if ratio > worst:
+                worst = ratio
                 binding = _binding_label("member", name, r)
         for name in HELDOUTS:
-            if r["heldout"][name] / tol > worst:
-                worst = r["heldout"][name] / tol
+            ratio = r["heldout"][name] / tol
+            if ratio > worst:
+                worst = ratio
                 binding = _binding_label("heldout", name, r)
     return worst, binding
 

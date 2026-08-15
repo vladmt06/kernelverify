@@ -175,6 +175,7 @@ from reinterpret_serving_adequacy import (  # noqa: E402
     OUT_PATH,
     interpretation_identity,
     load_evidence,
+    main,
     reinterpret,
 )
 
@@ -282,7 +283,6 @@ def test_in_contract_cells_are_bit_identical_to_the_original_tables(derived):
 
 def test_derived_artifact_is_written_beside_the_evidence_never_into_it(
         tmp_path, derived):
-    from reinterpret_serving_adequacy import main
     out = tmp_path / "derived.json"
     assert main(out_path=out) == 0
     on_disk = json.loads(out.read_text())
