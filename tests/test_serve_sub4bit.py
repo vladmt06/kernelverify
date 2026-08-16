@@ -600,3 +600,189 @@ def test_require_idle_raises_the_transient_refusal(monkeypatch, capsys):
     with pytest.raises(serve_sub4bit.NotIdle):
         serve_sub4bit.require_idle("before")
     assert "NOT QUIET" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# the decision surface
+#
+# primary_verdict and composed_attribution ARE the experiment: every number
+# the A/B prints is read through them, and they had no test at all. The losing
+# branches come first on purpose - wide_qmv is a measured loss at batch 1-3
+# (ADR 0015), so those are the branches M2 will actually take, and a decision
+# function whose losing branches were never executed is not a decision
+# function. This is the check this repo learned to write after G1.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("prim, noise, expected", [
+    (-3.0, 1.0, "regression"),   # the branch wide_qmv is expected to hit at B = 1..3
+    (-0.5, 1.0, "null"),         # a loss inside the noise floor is NOT a regression
+    (0.5, 1.0, "null"),          # nor is a gain inside it a win
+    (3.0, 1.0, "win"),
+    (1.0, 1.0, "null"),          # the boundary belongs to null: a gap the noise could produce proves nothing
+    (-1.0, 1.0, "null"),
+])
+def test_primary_verdict_reads_section_6(prim, noise, expected):
+    assert serve_sub4bit.primary_verdict(prim, noise) == expected
+
+
+@pytest.mark.parametrize("comp, base, noise, expected", [
+    (-3.0, 0.0, 1.0, "negative"),        # composed loses outright
+    (-0.5, 0.0, 1.0, "inconclusive"),    # inside the floor
+    (3.0, 2.5, 1.0, "artifact-alone"),   # arm 2 already beat arm 3 beyond noise
+    (3.0, 0.5, 1.0, "joint"),            # arm 2 did not; the kernel unlocked it
+    (0.0, 5.0, 1.0, "inconclusive"),     # comp inside the floor: base is never consulted
+])
+def test_composed_attribution_reads_section_6(comp, base, noise, expected):
+    assert serve_sub4bit.composed_attribution(comp, base, noise) == expected
+
+
+def test_the_verdict_can_say_loss():
+    """A decision function that can only confirm is not a decision. Both
+    losing outcomes must be reachable."""
+    assert serve_sub4bit.primary_verdict(-10.0, 0.1) == "regression"
+    assert serve_sub4bit.composed_attribution(-10.0, 0.0, 0.1) == "negative"
+
+
+# ---------------------------------------------------------------------------
+# the pre-registered rules the code derived and then dropped
+# ---------------------------------------------------------------------------
+def _mde_deciders(tmp_path, cells, manifest=None):
+    path = tmp_path / "serve_mde.json"
+    serve_sub4bit.write_mde(manifest or {"pins": "ok"}, cells, path)
+    return path
+
+
+def test_the_ab_refuses_when_no_mde_record_exists(tmp_path):
+    """Section 5's non-decider rule decides which cells the A/B may be read
+    as evidence for, so an A/B with no MDE behind it has no such reading.
+    Defaulting every cell to "decider" is the failure this refuses."""
+    with pytest.raises(serve_sub4bit.PreconditionFailed):
+        serve_sub4bit.load_mde({"pins": "ok"}, tmp_path / "absent.json")
+
+
+def test_the_ab_refuses_an_mde_record_from_different_artifacts(tmp_path):
+    path = _mde_deciders(tmp_path, {6: True}, manifest={"pins": "old"})
+    with pytest.raises(serve_sub4bit.PreconditionFailed):
+        serve_sub4bit.load_mde({"pins": "new"}, path)
+
+
+def test_the_mde_record_round_trips_its_cells(tmp_path):
+    path = _mde_deciders(tmp_path, {5: True, 6: False, 8: True})
+    assert serve_sub4bit.load_mde({"pins": "ok"}, path) == {5: True, 6: False,
+                                                            8: True}
+
+
+def _arms(one=100.0, two=100.0, three=100.0, four=100.0):
+    return {"1": [one] * 5, "2": [two] * 5, "3": [three] * 5, "4": [four] * 5}
+
+
+def test_a_non_decider_cell_is_labelled_in_its_ab_row(tmp_path):
+    path = _mde_deciders(tmp_path, {5: True, 6: False})
+    deciders = serve_sub4bit.load_mde({"pins": "ok"}, path)
+    row, code = serve_sub4bit.ab_row(6, _arms(one=110.0), ["1024x2560"],
+                                     10, 10, {}, deciders[6])
+    assert row["decider"] is False
+    assert code == 0                      # not an error: an unreadable win
+    assert row["primary_verdict"] == "win"
+    decided, _ = serve_sub4bit.ab_row(5, _arms(one=110.0), ["1024x2560"],
+                                      10, 10, {}, deciders[5])
+    assert decided["decider"] is True
+
+
+def test_every_ab_row_carries_the_decider_label_even_when_invalid():
+    """A cell that never produced a verdict still says whether it could
+    have: a reader must not have to infer it from the absence of one."""
+    invalid, code = serve_sub4bit.ab_row(6, _arms(), ["1024x2560"], 9, 10,
+                                         {"dtype-x": 3}, False)
+    assert invalid["decider"] is False and code == 1
+    assert invalid["verdict"].startswith("INVALID")
+    withheld, code = serve_sub4bit.ab_row(
+        6, {"1": [100.0] * 5, "2": [100.0, 200.0, 100.0, 100.0, 100.0],
+            "3": [100.0] * 5, "4": [100.0] * 5}, ["1024x2560"], 10, 10, {},
+        True)
+    assert code == 1 and withheld["verdict"].startswith("WITHHELD")
+    assert withheld["decider"] is True
+
+
+def test_the_summary_line_names_the_non_decider_cells():
+    line = serve_sub4bit.non_decider_line({5: True, 6: False, 8: False})
+    assert "B=6" in line and "B=8" in line and "B=5" not in line
+    assert "NON-DECIDER" in line
+    assert "every" in serve_sub4bit.non_decider_line({5: True})
+
+
+# --- the MDE's own row: the comparison it printed and never made -----------
+def _probe_row(shape="2560x4096", routed=True, spread=1.0):
+    return {"shape": shape, "count": 1, "routed": routed,
+            "stock_us": 100.0, "fused_us": 90.0, "stock_spread_pct": spread}
+
+
+def test_a_cell_whose_gain_is_under_its_noise_floor_is_a_non_decider():
+    """Section 5, verbatim: "a cell whose expected gain is below its noise
+    floor is a pre-declared non-decider". The two numbers were printed
+    adjacently and never compared."""
+    under = serve_sub4bit.mde_row(6, [_probe_row()], i_ms=0.0, saving_ms=0.1,
+                                  t_step_ms=10.0, noise_floor_pct=2.0)
+    assert under["expected_gain_pct"] == 1.0 and under["decider"] is False
+    over = serve_sub4bit.mde_row(6, [_probe_row()], i_ms=0.0, saving_ms=0.5,
+                                 t_step_ms=10.0, noise_floor_pct=2.0)
+    assert over["expected_gain_pct"] == 5.0 and over["decider"] is True
+
+
+def test_an_expected_loss_is_a_non_decider_not_a_verdict():
+    row = serve_sub4bit.mde_row(1, [_probe_row()], i_ms=1.0, saving_ms=0.0,
+                                t_step_ms=10.0, noise_floor_pct=2.0)
+    assert row["expected_gain_pct"] == -10.0 and row["decider"] is False
+
+
+def test_the_mde_withholds_a_cell_whose_reference_arm_disagreed():
+    """AGENTS.md: reject any round whose reference samples exceed the class
+    spread limit. _op_probe measured that spread, reported it, and nothing
+    read it - so a saving built on an unstable stock arm fed the gain."""
+    row = serve_sub4bit.mde_row(
+        6, [_probe_row(spread=serve_sub4bit.MAX_SPREAD_PCT + 0.1)],
+        i_ms=0.0, saving_ms=5.0, t_step_ms=10.0, noise_floor_pct=2.0)
+    assert row["verdict"].startswith("WITHHELD")
+    assert "2560x4096" in row["verdict"]
+    assert row["decider"] is False
+    assert "expected_gain_pct" not in row, \
+        "a gain derived from a rejected round is not a number"
+
+
+def test_an_unrouted_shapes_spread_cannot_withhold_a_cell():
+    """A shape the table does not route at this B contributes no saving, so
+    its stock arm's spread says nothing about this cell."""
+    row = serve_sub4bit.mde_row(
+        6, [{"shape": "2560x4096", "count": 1, "routed": False}],
+        i_ms=0.0, saving_ms=5.0, t_step_ms=10.0, noise_floor_pct=2.0)
+    assert "verdict" not in row and row["decider"] is True
+
+
+# --- the corpus pin --------------------------------------------------------
+def test_the_ppl_mode_refuses_a_corpus_that_is_not_the_registered_one(
+        tmp_path, monkeypatch):
+    """Section 7 registers the corpus by sha256. ppl() computed the digest,
+    printed it and never compared it, so any text at that path would have
+    been scored and recorded under the registered hash's authority."""
+    _pins_ok(monkeypatch)
+    _lock_granted(monkeypatch)
+    monkeypatch.setattr(serve_sub4bit, "load_model", _never_load)
+    wrong = tmp_path / "ppl.txt"
+    wrong.write_text("not the wikitext-2 test split")
+    assert serve_sub4bit.main(["--ppl", "--corpus", str(wrong)]) == \
+        serve_sub4bit.EXIT_PRECONDITION
+
+
+def test_the_registered_corpus_digest_is_the_one_in_the_findings_doc():
+    doc = (Path(serve_sub4bit.__file__).resolve().parents[1] / "docs"
+           / "research" / "2026-08-15-sub4bit-serve-findings.md").read_text()
+    assert serve_sub4bit.PPL_CORPUS_SHA256 in doc
+
+
+def test_the_round_count_is_the_registered_one():
+    """Section 3 registers 5 rounds per cell; _op_probe took 7."""
+    doc = (Path(serve_sub4bit.__file__).resolve().parents[1] / "docs"
+           / "research" / "2026-08-15-sub4bit-serve-findings.md").read_text()
+    assert f"Rounds: {serve_sub4bit.ROUNDS} per B cell" in doc
+    import inspect
+    src = inspect.getsource(serve_sub4bit._op_probe)
+    assert "range(ROUNDS)" in src and "range(7)" not in src

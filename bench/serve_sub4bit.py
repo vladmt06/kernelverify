@@ -560,6 +560,65 @@ def routed_shapes(patch: Patch, b: int) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# the non-decider rule (findings doc, section 5)
+#
+# "A cell whose expected gain is below its noise floor is a pre-declared
+# non-decider." The MDE derived both numbers, printed them one line apart and
+# never compared them, so every A/B cell read as evidence regardless of
+# whether the arithmetic said it could decide anything. These three functions
+# are that comparison, plus the channel that carries it from --mde to --ab.
+# ---------------------------------------------------------------------------
+MDE_CACHE = Path(__file__).with_name(".cache") / "serve_mde.json"
+
+
+def write_mde(manifest: dict, deciders: dict[int, bool],
+              path: Path | None = None) -> Path:
+    """Record which cells the MDE declared deciders, under the pins it was
+    derived on: a decider label from a different pair of artifacts describes
+    a different experiment."""
+    path = MDE_CACHE if path is None else path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(
+        {"pins": manifest,
+         "deciders": {str(b): bool(v) for b, v in deciders.items()}}))
+    return path
+
+
+def load_mde(manifest: dict, path: Path | None = None) -> dict[int, bool]:
+    """The MDE's decider labels, for --ab to mark its rows with.
+
+    Absent or pin-stale REFUSES rather than defaulting. Defaulting would mean
+    labelling every cell a decider because nobody derived the MDE, which is
+    precisely the reading the rule exists to prevent, and re-running --mde is
+    a decision about the machine's time that belongs to a human.
+    """
+    path = MDE_CACHE if path is None else path
+    if not path.exists():
+        raise PreconditionFailed(
+            f"no MDE record at {path}: section 5's non-decider rule decides "
+            "which cells an A/B may be read as evidence for, so --mde runs "
+            "first")
+    record = json.loads(path.read_text())
+    if record.get("pins") != manifest:
+        raise PreconditionFailed(
+            f"the MDE record at {path} was derived against different pinned "
+            "artifacts; re-run --mde on these ones")
+    return {int(b): bool(v) for b, v in record["deciders"].items()}
+
+
+def non_decider_line(deciders: dict[int, bool]) -> str:
+    """The run's own summary of where its verdicts are not evidence."""
+    cells = sorted(b for b, decides in deciders.items() if not decides)
+    if not cells:
+        return ("DECIDERS: every MDE cell's expected gain cleared its own "
+                "noise floor")
+    return ("NON-DECIDERS (section 5, from --mde): "
+            + ", ".join(f"B={b}" for b in cells)
+            + " - the expected gain sits under the cell's own noise floor, "
+              "so neither a win nor a regression there is evidence")
+
+
+# ---------------------------------------------------------------------------
 # modes
 # ---------------------------------------------------------------------------
 def smoke() -> int:
@@ -706,12 +765,42 @@ def _op_probe(bits: int, d_in: int, d_out: int, m: int) -> dict:
     while copies < 4096 and sample(theirs, copies) * 1e3 < MIN_SAMPLE_MS:
         copies *= 2
     a_s, b_s = [], []
-    for _ in range(7):
+    for _ in range(ROUNDS):
         a_s.append(sample(ours, copies) / copies)
         b_s.append(sample(theirs, copies) / copies)
     return {"stock_us": statistics.median(b_s) * 1e6,
             "fused_us": statistics.median(a_s) * 1e6,
             "stock_spread_pct": round(spread_pct(b_s), 1)}
+
+
+def mde_row(b: int, rows: list[dict], i_ms: float, saving_ms: float,
+            t_step_ms: float, noise_floor_pct: float) -> dict:
+    """One --mde cell: the arithmetic, and the decision it was always
+    supposed to make.
+
+    A routed shape whose STOCK arm disagreed with itself past the class
+    spread limit withholds the whole cell. Its contribution to the saving is
+    the difference of two numbers, one of which is not a measurement, and
+    AGENTS.md rejects such a round rather than letting its median stand in
+    for it. The cell then carries no expected gain at all: a gain derived
+    from a rejected round is not a number a reader may weigh.
+    """
+    over = [r["shape"] for r in rows
+            if r.get("routed") and r["stock_spread_pct"] > MAX_SPREAD_PCT]
+    row = {"B": b, "per_op": rows,
+           "arm2_ms_per_step": round(t_step_ms, 3),
+           "arm2_noise_floor_pct": round(noise_floor_pct, 2),
+           "step_saving_ms": round(saving_ms, 4),
+           "interception_cost_ms_per_step": round(i_ms, 4)}
+    if over:
+        row["verdict"] = (f"WITHHELD: reference-arm spread over "
+                          f"{MAX_SPREAD_PCT}% at {', '.join(over)}")
+        row["decider"] = False
+        return row
+    gain_pct = 100 * (saving_ms - i_ms) / t_step_ms
+    row["expected_gain_pct"] = round(gain_pct, 2)
+    row["decider"] = gain_pct > noise_floor_pct
+    return row
 
 
 def mde(manifest: dict, guard) -> int:
@@ -744,6 +833,8 @@ def mde(manifest: dict, guard) -> int:
                       "wrapped_calls_per_step": patch.n_wrapped}))
 
     # Per-op savings at the true shapes, then the expected gain per B.
+    deciders: dict[int, bool] = {}
+    exit_code = 0
     for b in zone:
         guard(f"B={b}")
         saving_us = 0.0
@@ -765,16 +856,22 @@ def mde(manifest: dict, guard) -> int:
                                       make_prompts(tok, PROMPT_T, b),
                                       GEN_TOKENS)
             dts.append(dt / steps)
-        t_step_ms = statistics.median(dts) * 1e3
-        saving_ms = n_layers * saving_us / 1e3
-        gain_pct = 100 * (saving_ms - i_ms) / t_step_ms
-        print(json.dumps({
-            "B": b, "per_op": rows,
-            "arm2_ms_per_step": round(t_step_ms, 3),
-            "arm2_noise_floor_pct": round(spread_pct(dts), 2),
-            "step_saving_ms": round(saving_ms, 4),
-            "expected_gain_pct": round(gain_pct, 2)}))
-    return check_idle_after(0)
+        row = mde_row(b, rows, i_ms=i_ms,
+                      saving_ms=n_layers * saving_us / 1e3,
+                      t_step_ms=statistics.median(dts) * 1e3,
+                      noise_floor_pct=spread_pct(dts))
+        print(json.dumps(row))
+        if "verdict" in row:
+            print(f"B={b:>2} {row['verdict']}")
+            exit_code = 1
+        elif not row["decider"]:
+            print(f"B={b:>2} NON-DECIDER: expected gain "
+                  f"{row['expected_gain_pct']}% is inside the cell's noise "
+                  f"floor {row['arm2_noise_floor_pct']}%")
+        deciders[b] = row["decider"]
+    print(non_decider_line(deciders))
+    print(f"MDE record written to {write_mde(manifest, deciders)}")
+    return check_idle_after(exit_code)
 
 
 def primary_verdict(prim_pct: float, noise_pct: float) -> str:
@@ -802,11 +899,59 @@ def composed_attribution(comp_pct: float, base_pct: float,
     return "joint"
 
 
+def ab_row(b: int, arms: dict[str, list[float]], routed: list[str],
+           calls_got: int, calls_want: int, hard: dict[str, int],
+           decider: bool) -> tuple[dict, int]:
+    """One --ab cell: the row it publishes and the exit code it earns.
+
+    Pure, so every branch is reachable from a test without a GPU - including
+    the two the grid is expected to take, a losing kernel and a cell the MDE
+    already declared cannot decide. `decider` rides on every row, valid or
+    not, so no reader has to infer from a missing verdict whether the cell
+    could have produced one.
+    """
+    med = {k: statistics.median(v) for k, v in arms.items()}
+    sp = spread_pct(arms["2"])
+    row = {"B": b, "gen": GEN_TOKENS, "rounds": ROUNDS,
+           "routed_shapes": routed, "in_zone": bool(routed),
+           "decider": decider,
+           "fused_calls": calls_got, "fused_calls_want": calls_want,
+           "hard_fallbacks": hard}
+    if hard or calls_got != calls_want:
+        row["verdict"] = "INVALID: arm 1 stopped being arm 1"
+        return row, 1
+    if sp > MAX_SPREAD_PCT:
+        row["verdict"] = (f"WITHHELD: canary spread {sp:.1f}% > "
+                          f"{MAX_SPREAD_PCT}%")
+        return row, 1
+    # Every claim is qualified by the cell's noise floor: the canary arm's
+    # spread (doc, section 6).
+    comp_pct = 100 * (med["1"] / med["3"] - 1)
+    base_pct = 100 * (med["2"] / med["3"] - 1)
+    prim_pct = 100 * (med["1"] / med["2"] - 1)
+    row.update({
+        "per_stream_tps": {k: round(v, 3) for k, v in med.items()},
+        "aggregate_tps": {k: round(b * v, 2) for k, v in med.items()},
+        "spread_pct": {k: round(spread_pct(v), 2) for k, v in arms.items()},
+        "noise_floor_pct": round(sp, 2),
+        "ratio_ours_stock3": round(med["1"] / med["2"], 4),
+        "primary_verdict": primary_verdict(prim_pct, sp),
+        "ratio_patchcost": round(med["4"] / med["2"], 4),
+        "ratio_composed_vs_4bit": round(med["1"] / med["3"], 4),
+        "composed_attribution": composed_attribution(comp_pct, base_pct, sp),
+    })
+    return row, 0
+
+
 def ab(manifest: dict, guard) -> int:
     """The pre-registered four-arm grid (doc, sections 3 and 6): arms
     interleaved [1, 2, 3, 4] in every round, arm 2 the canary, cells over
     the spread limit withheld, dispatch counts asserted exact."""
     guard("ab-start")           # before the first model, or it guards nothing
+    # Before the models, too: an A/B whose cells cannot be labelled decider
+    # or not is not readable, so discovering that after an hour of grid is
+    # an hour spent on an unreadable result.
+    deciders = load_mde(manifest)
     print(json.dumps(provenance(manifest)))
     model3, tok = load_model(MODEL_3BIT)
     model4, _ = load_model(MODEL_4BIT)
@@ -852,41 +997,11 @@ def ab(manifest: dict, guard) -> int:
             patch.uninstall()
             guard(f"B={b} arm4")
 
-        med = {k: statistics.median(v) for k, v in arms.items()}
-        routed = routed_shapes(patch, b)
-        row = {"B": b, "gen": GEN_TOKENS, "rounds": ROUNDS,
-               "routed_shapes": routed, "in_zone": bool(routed),
-               "fused_calls": calls_got, "fused_calls_want": calls_want,
-               "hard_fallbacks": hard}
-        sp = spread_pct(arms["2"])
-        if hard or calls_got != calls_want:
-            row["verdict"] = "INVALID: arm 1 stopped being arm 1"
-            exit_code = 1
-        elif sp > MAX_SPREAD_PCT:
-            row["verdict"] = (f"WITHHELD: canary spread {sp:.1f}% > "
-                              f"{MAX_SPREAD_PCT}%")
-            exit_code = 1
-        else:
-            # Every claim is qualified by the cell's noise floor: the
-            # canary arm's spread (doc, section 6).
-            comp_pct = 100 * (med["1"] / med["3"] - 1)
-            base_pct = 100 * (med["2"] / med["3"] - 1)
-            prim_pct = 100 * (med["1"] / med["2"] - 1)
-            row.update({
-                "per_stream_tps": {k: round(v, 3) for k, v in med.items()},
-                "aggregate_tps": {k: round(b * v, 2)
-                                  for k, v in med.items()},
-                "spread_pct": {k: round(spread_pct(v), 2)
-                               for k, v in arms.items()},
-                "noise_floor_pct": round(sp, 2),
-                "ratio_ours_stock3": round(med["1"] / med["2"], 4),
-                "primary_verdict": primary_verdict(prim_pct, sp),
-                "ratio_patchcost": round(med["4"] / med["2"], 4),
-                "ratio_composed_vs_4bit": round(med["1"] / med["3"], 4),
-                "composed_attribution": composed_attribution(
-                    comp_pct, base_pct, sp),
-            })
+        row, code = ab_row(b, arms, routed_shapes(patch, b), calls_got,
+                           calls_want, hard, deciders.get(b, False))
+        exit_code = max(exit_code, code)
         print(json.dumps(row))
+    print(non_decider_line(deciders))
     return check_idle_after(exit_code)
 
 
