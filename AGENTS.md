@@ -90,7 +90,9 @@ Vlad's global instructions still apply; this file adds the project's layout, how
 - `bench/probe_baseline_gaps.py` - one-off probes that closed the three claims ADR 0007 first shipped as inferred; rerun it whenever the baseline moves.
 - `bench/measure_baselines.py` - the one command that measures the machine's baselines across both stacks and appends them to `bench/.baselines/<date>.jsonl`.
   It alternates the arms within each workload cell (one sampling group per cell, schema v3), refuses to call a number binding on a busy or unplugged machine, and refuses sub-millisecond samples as absolute claims.
-- `bench/machine_state.py` - the idle gate, the timing floor, and the one machine-wide measurement lock (`MeasurementLock`, an `fcntl.flock` on a fixed path) every heavy harness takes, with the reason each exists.
+- `bench/machine_state.py` - the idle gate, the timing floor, and the one machine-wide measurement lock (`MeasurementLock`, an `fcntl.flock` on a fixed path), with the reason each exists.
+  Four harnesses take it today: `calibrate_quant_serving.py`, `price_qmv_boundary.py`, `derive_repaired_member_column.py` and `derive_prerepair_device_records.py`.
+  `serve_sub4bit.py`, `calibrate_quant_device.py`, `measure_baselines.py`, `spike_mlx_e2e.py` and `emit_pack_certificates.py` do NOT, which is the gap tasks I1 and I2 of the 2026-08-16 plan close; until they land, running two of those together is on the operator.
 - `bench/interleave.py` - the shared interleaved-timing engine every GPU A/B in bench/ runs on: dispatch-size calibration to `MIN_SAMPLE_MS`, the timed dispatch itself, the canary spread limit a pack gate withholds a certificate above, and the arms-agree smoke check.
   One copy of the discipline, so a timing rule amended in one gate cannot silently stay old in another.
   Its `MAX_CANARY_SPREAD` is deliberately its own literal rather than the comparator's `DEFAULT_SPREAD_LIMIT`, because the limit is per class; `tests/test_interleave.py` is where a divergence surfaces.
@@ -136,8 +138,8 @@ cd /Users/vlad/kernelverify
 - The environment needs `torch`, which only `gelu[variant=erf]` uses; a worktree venv created without it fails part-way through a verdict build.
 - It also needs `mlx==0.32.0` and `mlx-lm==0.31.3`, pinned across worktrees so binding comparisons stay on one toolchain.
   Without mlx, the mlx-dependent test modules are skipped whole or fail to collect, so the suite under-reports badly.
-  Skipped modules hide their contents rather than their count, so quote test counts from a fully equipped venv only; `.venv/bin/python -m pytest -q` reported 810 passed in 82 s warm on 2026-08-16, and 107 s on the first cold run of the session.
-  There is no fast subset yet: the repository has no pytest configuration file and no test carries a `slow` or `gpu` marker, so `-m "not slow"` deselects nothing and the full suite is the only time worth quoting.
+  Skipped modules hide their contents rather than their count, so quote test counts from a fully equipped venv only; `.venv/bin/python -m pytest -q` reported 816 passed in 81 s warm on 2026-08-16, and 107 s on the first cold run of the session.
+  There is no fast subset yet: the repository has no pytest settings file (`tests/conftest.py` exists, but it only puts the repo root and `bench/` on `sys.path`) and no test carries a `slow` or `gpu` marker, so `-m "not slow"` deselects nothing and the full suite is the only time worth quoting.
   Fully equipped means `pyobjc` as well as `mlx`: without the Metal bindings the runner-backed pack tests fail rather than skip, so a venv with mlx alone reports a partial count nobody should quote.
 
 The machine baseline, in this order, because each step writes the denominators the next one divides by:
@@ -169,7 +171,9 @@ bench/start_binding_run.sh     # arms a launchd job, then quit Terminal
 
 - Every method change needs a measurement behind it and an ADR entry recording what forced it.
   Pre-register the next upgrade and adopt it only when a measured miss demands it, the way ADR 0002 pre-registered pairwise coverage and ADR 0003 adopted it.
-- One heavy measurement on this machine at a time, and the harness takes the lock rather than the caller: `machine_state.MeasurementLock` is a single `fcntl.flock` on a fixed path that every heavy harness acquires for itself.
+- One heavy measurement on this machine at a time, and the harness takes the lock rather than the caller: `machine_state.MeasurementLock` is a single `fcntl.flock` on a fixed path.
+  This is the RULE, not yet the state of the tree - only four harnesses acquire it (see the `machine_state.py` entry above), so read that list before running two things.
+  A launcher must never take it on the harness's behalf: a child cannot acquire the flock its parent holds, verified live, so a locking launcher makes every self-locking harness refuse.
   Long runs go detached so no interactive session competes with them (ADR 0010), but `bench/start_binding_run.sh` is wired to one harness only - it arms `bench/detached_run.py`, whose `HARNESS` constant is `bench/measure_baselines.py` - so every other long harness is started by hand in a quiet window until that is generalised.
 - Never cite the corpus's `benchmark_verdict` fields as evidence; they are hardcoded "pass" and were never computed.
 - Any 100% claim must be backed by exact miss counts, not by a rounded table cell.

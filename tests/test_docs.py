@@ -9,8 +9,6 @@ the tree. These are those tests.
 import re
 from pathlib import Path
 
-import pytest
-
 ROOT = Path(__file__).resolve().parents[1]
 AGENTS = (ROOT / "AGENTS.md").read_text()
 
@@ -23,14 +21,27 @@ def test_adr_numbering_is_contiguous():
 def test_agents_md_catalogue_count_matches_the_tree():
     from kernelverify.mutation.catalogue import CATALOGUE
     m = re.search(r"fault catalogue \((\d+) entries\)", AGENTS)
-    assert m and int(m.group(1)) == len(CATALOGUE), (m and m.group(1), len(CATALOGUE))
+    # Two different failures, told apart on purpose: a reworded line reads as a
+    # count mismatch of (None, 65) otherwise, and sends the reader to the wrong file.
+    assert m, "AGENTS.md no longer says 'fault catalogue (N entries)'; this test parses that exact phrasing"
+    assert int(m.group(1)) == len(CATALOGUE), (m.group(1), len(CATALOGUE))
 
 
 def test_every_path_agents_md_layout_names_exists():
-    layout = AGENTS.split("## Layout", 1)[1].split("\n## ", 1)[0]
-    for path in re.findall(r"`((?:kernelverify|bench|docs|vendor)/[^`]+?)`", layout):
-        if path.endswith("/") or path.endswith(".py") or path.endswith(".md") or path.endswith(".mm") or path.endswith(".sh"):
-            assert (ROOT / path.rstrip("/")).exists(), f"AGENTS.md Layout names {path}, which does not exist"
+    # Every section that names paths, not just Layout: the Running block and the
+    # Mistakes entries cite files too, and a path that has moved is as stale there.
+    #
+    # Runtime outputs are excluded by directory, not waved through case by case.
+    # Everything under these is written BY a harness and gitignored, so it is
+    # absent in a fresh clone and its absence says nothing about the record being
+    # stale - which is the only thing this test is for. Source paths that moved
+    # are the failure it must catch, and those all live outside them.
+    outputs = (".cache/", ".models/", ".baselines/", ".corpus/", ".certificates/")
+    for path in re.findall(r"`((?:kernelverify|bench|docs|vendor)/[^`]+?)`", AGENTS):
+        if any(marker in path for marker in outputs):
+            continue
+        if path.endswith(("/", ".py", ".md", ".mm", ".sh", ".json", ".txt")):
+            assert (ROOT / path.rstrip("/")).exists(), f"AGENTS.md names {path}, which does not exist"
 
 
 def test_agents_md_empty_packages_list_is_true():
@@ -47,3 +58,24 @@ def test_the_battery_100_percent_claim_has_a_committed_record():
     rec = ROOT / "bench/results/score_oracles-2026-08-15.txt"
     assert rec.exists()
     assert "B=16: none, every viable fault caught in every run" in rec.read_text()
+
+
+def test_the_100_percent_record_scored_todays_catalogue():
+    """The half that makes the claim's staleness visible.
+
+    AGENTS.md and ADR 0008 both say the claim goes stale the moment the
+    catalogue outgrows what the record scored. Nothing enforced that until
+    here: the test above only greps a fixed string, so the population could
+    double and the record would still 'back' the claim. This compares the
+    record's own synthesised count against the live catalogue, which is the
+    comparison both documents promise a reader.
+    """
+    from kernelverify.mutation.catalogue import CATALOGUE
+    text = (ROOT / "bench/results/score_oracles-2026-08-15.txt").read_text()
+    m = re.search(r"fault population: (\d+) synthesised, (\d+) viable", text)
+    assert m, "the record no longer states its population in the parsed form"
+    scored, viable = int(m.group(1)), int(m.group(2))
+    assert scored == len(CATALOGUE), (
+        f"the committed record scored {scored} faults but the catalogue now holds "
+        f"{len(CATALOGUE)}; the 100% claim is stale until score_oracles is re-run")
+    assert viable <= scored
