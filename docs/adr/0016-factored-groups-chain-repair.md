@@ -163,9 +163,18 @@ The count is three, out of 384 float32 cells across the four widths, and every o
 The "before" column was recomputed rather than remembered: the device grid overwrites its cache on every run and ADR 0012's records were never committed, so the pre-repair member was re-run verbatim (from `0052f7b`) over the same rng stream, with the untouched member and the repaired member both cross-checked bit-exactly against this run's 768 records first.
 The boundary table moves from ADR 0012's K = 3 CPU-floor column of 39 / 96 / 96 / 96 to 38 / 95 / 95 / 96 at bits 2 / 3 / 4 / 8; float16 activations stay 0 / 96 everywhere.
 
-EVIDENCE GAP, recorded rather than glossed: the "after" halves of both tables come from the committed `bench/results/quant_device_adequacy.json` and reproduce, but that pre-repair re-run's own records were never preserved, so the "before" ratios (1.248 / 1.640 / 1.963) and the 39 / 96 / 96 / 96 boundary counts cannot be recomputed from anything in the repository.
-They rest on a run that no longer exists, which is the same asymmetry this ADR's serving column was written to close, caught by the merge review on the half that was missed.
-Closing it needs the device harness re-run on a GPU with the member reverted to `0052f7b`, so it is queued in TODOS.md rather than done here; nothing in the decision depends on it, because K is decided by the serving demand and the false-positive count, both of which are now backed.
+Both halves are committed and recomputed by test.
+The merge review of 2026-08-16 found that only the "after" halves had evidence: the pre-repair re-run's own records had never been preserved, so the numbers most damaging to this ADR were the only ones nobody could check.
+`bench/derive_prerepair_device_records.py` closes that.
+It runs the device harness unmodified with `ENSEMBLE["factored-groups"]` swapped at runtime to the implementation from before `d3ab30a` - nothing on disk is patched, so there is no reverted member to forget - and commits the result at `bench/results/quant_device_adequacy_prerepair.json`.
+The two runs agree on every other member, the three device members included and genuinely re-measured on the GPU, which is what licenses reading them as one comparison; `tests/test_detection_price_evidence.py` re-asserts that on the committed files and recomputes all eight boundary counts and all six ratios above.
+
+One qualification that closing the gap surfaced, which the paragraph below does not carry.
+The trade is not monotone: the CPU floor grows on 117 of the 768 device records, shrinks on 116, and is unchanged on 535.
+Chaining and pairwise reduction are two legitimate rounding orders, and away from the constant-rows regime either can land closer to the fp64 reference - even on constant rows only the activation sum is exact, while the x*q sum still varies - so the chained member is the larger of the two on 543 records, not on all 768.
+Where it was the unique maximum and shrank, the floor shrank with it.
+Nothing was harmed by that here: no boundary cell moves from not-caught to caught, and the gates pass, so the effect is recorded rather than acted on.
+But "the tolerance is wider" is a summary of the dominant direction, not an invariant, and a tightening floor is the false-positive direction.
 
 This is the honest shape of the trade.
 The member stopped being unrealistically exact on constant rows, so on constant rows the tolerance is wider both for correct kernels (ten false positives closed) and for one boundary implementation (three of 384 cells stop being flagged, each now sitting at 0.84-0.98 of tolerance).

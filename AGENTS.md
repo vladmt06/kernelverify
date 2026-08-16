@@ -80,6 +80,7 @@ cd /Users/vlad/kernelverify
 .venv/bin/python bench/calibrate_quant_device.py      # ~7 min, needs the Metal GPU, must reproduce ADR 0016
 .venv/bin/python bench/calibrate_quant_serving.py     # ~45 min, needs the Metal GPU and the pinned artifact, reproduces ADR 0013 except the factored-groups column (ADR 0016)
 .venv/bin/python -u bench/derive_repaired_member_column.py   # ~70 min, CPU only, ~16 GB steady and 24.3 GB peak at lm_head; rewrites ADR 0016's committed column
+.venv/bin/python -u bench/derive_prerepair_device_records.py # ~7 min, needs the Metal GPU; rewrites ADR 0016's detection-price "before" records
 ```
 
 - `derive_repaired_member_column.py` is derived, not measured: it re-reads the committed ADR 0013 records with the repaired `factored-groups` column recomputed, and every ADR 0016 number comes from its output.
@@ -92,7 +93,7 @@ cd /Users/vlad/kernelverify
 - The environment needs `torch`, which only `gelu[variant=erf]` uses; a worktree venv created without it fails part-way through a verdict build.
 - It also needs `mlx==0.32.0` and `mlx-lm==0.31.3`, pinned across worktrees so binding comparisons stay on one toolchain.
   Without mlx, the mlx-dependent test modules are skipped whole or fail to collect, so the suite under-reports badly.
-  Skipped modules hide their contents rather than their count, so quote test counts from a fully equipped venv only; this branch passes 725 in 78 s as of 2026-08-16.
+  Skipped modules hide their contents rather than their count, so quote test counts from a fully equipped venv only; this branch passes 729 in 78 s as of 2026-08-16.
   Fully equipped means `pyobjc` as well as `mlx`: without the Metal bindings the runner-backed pack tests fail rather than skip, and a venv with mlx alone reports a number nobody should quote.
 
 The machine baseline, in this order, because each step writes the denominators the next one divides by:
