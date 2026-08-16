@@ -180,3 +180,12 @@
 - Cons: it makes any R experiment cost a full pricing slot before it can ship, which is the intended price and not a defect.
 - Context: the current pins are R = 4 up to M = 10 and R = 2 above it, matching every point of the 2026-08-15 recording; `KERNEL_SOURCE_SHA256` carries the same discipline for the kernel body itself, so editing the MSL has the same consequence.
 - Depends on / blocked by: nothing; it is a standing rule that applies to whoever next moves R.
+
+## The held-out draw differs from calibration by seed only
+
+- What: pre-register and run a held-out draw for the device-arithmetic K derivation that varies SHAPE (the six Qwen3-4B serving shapes, not the three calibration shapes) and WEIGHT DISTRIBUTION (a draw the calibration never saw), so G1 on the held-out draw can actually disagree with calibration.
+- Why: the 2026-08-16 amendment (ruling 1A) made G1 falsifiable in principle - K is set from calibration seeds 0/1 and tested on seeds 100/101 - but both draws use the same three shapes and the same two weight distributions, so the test is honest in the record and weak in practice; the outside voice of the plan review named it.
+- Pros: the serving records already exist as a natural distinct draw, so half the design is done; a real held-out disagreement is the first evidence the K rule could ever produce against itself.
+- Cons: a new measurement design needs its own pre-registration and ADR, and a serving-shape draw costs the ~45-minute cold grid rather than the 7-minute device grid.
+- Context: `bench/calibrate_quant_device.py` docstring amendment of 2026-08-16 and ADR 0017; `choose_k` takes per-width `(cal, indep)` record lists, so a different held-out source is a change to what `indep` holds, not to the rule.
+- Depends on / blocked by: ADR 0017 (the M1 re-run under the amendment) landing first, so the two changes are never mixed in one reading.
