@@ -142,6 +142,26 @@ K_QUANT = 3.0                # what Phase 0 shipped; fixed unless adequacy fails
 K_GRID = (1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0)
 MARGIN_GATE = 10.0           # every artefact fault, every width
 
+
+def cover(demand: float) -> float:
+    """The smallest grid value at or above `demand`.
+
+    Lives here, beside the grid it reads, because every harness that derives a
+    K needs the same lookup and two copies are how one of them keeps an old
+    rule after the other is amended.
+
+    A demand no grid value covers RAISES. That is the KILL branch every
+    calibration in this repo pre-registers: clamping to the top of the grid
+    would ship a tolerance already measured to be too tight, and say nothing
+    about it.
+    """
+    for k in K_GRID:
+        if k >= demand:
+            return k
+    raise ValueError(
+        f"demand {demand:.3f} is above the K grid {K_GRID}: this is the KILL "
+        f"branch, and no grid value may be clamped to cover it")
+
 BATCH = 2
 MODES = ("unit", "corpus-scale", "near-zero", "constant-rows")
 IID_MODES = ("unit", "corpus-scale")

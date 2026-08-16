@@ -159,6 +159,21 @@ def test_kv_members_are_distinct_and_two_classes():
     assert len(scores_class) >= 2 and len(combine_class) >= 2
 
 
+def test_kv_tolerance_says_out_loud_that_its_k_is_borrowed():
+    """ADR 0008 says each operator family ships "its own calibrated K".
+    For kv_attention that is not true: K_QUANT = 4.0 arrived from the
+    quantized_matmul device calibration and no harness has ever derived a K
+    over KV_MEMBERS, so the docstring has to say so where a reader of the
+    tolerance will see it."""
+    import inspect
+
+    from kernelverify.schemas import native_ops
+
+    doc = inspect.getdoc(native_ops.kv_tolerance) or ""
+    assert "borrowed" in doc.lower()
+    assert "KV_MEMBERS" in doc, "the docstring names the ensemble nobody calibrated"
+
+
 def test_predicted_equivalents_measure_equivalent():
     inputs = moe_inputs()
     base = moe_dispatch(inputs).astype(np.float64)
@@ -184,3 +199,44 @@ def test_controls_pass_across_sampled_battery():
             tol = op.tolerance(case, inputs, ref)
             assert corpus_oracle_passes(KERNELS[op_name](inputs), ref, tol), \
                 f"{op_name} control fails at {case}"
+
+
+@pytest.mark.parametrize("bits", [2, 3, 4, 8])
+def test_cache_dequant_matches_mlx_quantize_dequantize_bit_for_bit(bits):
+    """The kv reference's cache half, checked against code it shares nothing with.
+
+    The attention half is already cross-checked against
+    `mx.fast.scaled_dot_product_attention`. The cache half was checked only
+    against this project's own numpy kv_attention, which calls the SAME
+    `_cache_dequant` - so a shared misreading of the quantized cache passes on
+    both sides. `_cache_dequant` takes the RAW cache and quantizes then
+    dequantizes internally, so MLX's own quantize-then-dequantize on the same
+    raw cache is the independent statement of both steps.
+    """
+    mx = pytest.importorskip("mlx.core")
+    from kernelverify.reference.native_kernels import _cache_dequant
+
+    rng = np.random.default_rng(3)
+    cache = (rng.standard_normal((4, 128, 256)) * 0.05).astype(np.float16)
+    ours = _cache_dequant(cache, bits)          # fp32, as the contract anchors
+    wq, scales, biases = mx.quantize(mx.array(cache.reshape(-1, 256)),
+                                     group_size=64, bits=bits)
+
+    # `mx.dequantize` returns the SCALES' dtype, so with the fp16 scales it
+    # hands back an fp16 array and a bit-for-bit comparison against our fp32
+    # result would only be measuring that truncation. Upcasting the scales and
+    # biases - the same values, in a wider container - makes MLX compute the
+    # same quantity at the same precision, which is the comparison worth
+    # making: same codes, same group layout, same s*q+b, no shared code.
+    exact = np.array(mx.dequantize(wq, scales.astype(mx.float32),
+                                   biases.astype(mx.float32),
+                                   group_size=64, bits=bits)).reshape(cache.shape)
+    assert exact.dtype == np.float32
+    assert np.array_equal(ours, exact)
+
+    # And at MLX's own stock output precision the two still agree exactly, so
+    # the fp32 result above is the fp16 one with nothing else changed.
+    stock = np.array(mx.dequantize(wq, scales, biases, group_size=64,
+                                   bits=bits)).reshape(cache.shape)
+    assert stock.dtype == np.float16
+    assert np.array_equal(ours.astype(np.float16), stock)

@@ -117,6 +117,38 @@ e. The five untouched CPU members must reproduce their committed values
    bit-identically (tests/test_quant_contract_members.py pins this on a 64
    record sample). Any other member moving means the environment moved, not
    the repair, and this run's numbers describe neither.
+
+AMENDMENT, 2026-08-16: G1 was not a test
+--------------------------------------
+Step 3 chose k_ship as max(calibration demand, independent demand) and step 4
+then scored G1 over the union of both draws at that k.
+Since the demand IS the maximum of heldout/floor over those records, G1 = 0 was
+true by construction and every ADR since 0009 reported it as evidence.
+From this amendment: k_ship is chosen from the CALIBRATION draw alone; the
+independent draw TESTS it and never sets it.
+If the independent draw's demand exceeds k_ship, that is an INDEPENDENT MISS:
+the cell is named, the run exits 1, and the rule is renegotiated by a human -
+the same stop-at-miss semantics as the serving harness's DEMAND MISS branch.
+This REPLACES ADR 0012's pre-registered "take the next covering grid value and
+report the miss": rolling K up to cover the held-out draw would make G1 on that
+draw true by construction again, and the whole point of this amendment is that
+G1 can fail (ruling 1A of the 2026-08-16 plan review).
+G1 is evaluated on the independent draw only.
+Value-duplicate members (leave-one-out ratio pinned at 1.0 by a bit-identical
+twin) are collapsed before the demand is taken; both readings are printed.
+K rising under this amendment is a stop, as before.
+
+Data flow, before and after::
+
+  BEFORE (ADR 0012 as implemented)                AFTER (this amendment)
+  records --+-- cal ---> k_demand -+              records --+-- cal ---> k_demand --> cover() --> k_ship
+            +-- indep -> k_demand -+-> max -> k_ship        +-- indep -> k_demand --> > k_ship ? --> INDEPENDENT MISS, exit 1
+  records (both) --> gates(k_ship) -> G1 = 0 always         indep --> gates(k_ship) -> G1 can fail
+                                                            records (both) --> gates(k_ship) -> G2, G3
+
+What this amendment does NOT change: G2 and G3 stay scored over both draws,
+because they ask whether the ensemble catches faults and spans its classes,
+which every record is evidence about. Only G1 is an out-of-sample question.
 """
 
 from __future__ import annotations
@@ -132,6 +164,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import mlx.core as mx  # noqa: E402
 
+from kernelverify.schemas.native_ops import K_QUANT as SHIPPED_K  # noqa: E402
 from kernelverify.schemas.quant_contract import (  # noqa: E402
     ENSEMBLE,
     FAULTS,
@@ -153,13 +186,18 @@ from calibrate_quant_bits import (  # noqa: E402
     HELDOUT_SEEDS,
     IID_MODES,
     K_GRID,
-    K_QUANT,
+    # Phase 0's CPU-calibrated starting K (3.0), renamed at the import so it
+    # cannot be read as the shipped one: what ships is native_ops.K_QUANT
+    # (4.0, imported above as SHIPPED_K), decided across every harness's
+    # records rather than here (ADR 0016).
+    K_QUANT as K_CPU,
     MARGIN_GATE,
     MODES,
     SHAPES,
     WEIGHT_DRAWS,
     base_tol,
     boundary_fp16_dequant,
+    cover,
     mlx_on_device,
     verify_against_mlx,
 )
@@ -254,7 +292,7 @@ def trigger(records: list) -> dict:
     device_names = DEVICE_MEMBERS + ("mlx-on-device",)
     exceed, worst, worst_at = {n: 0 for n in device_names}, 0.0, ""
     for r in records:
-        tol = max(r["base_tol"], K_QUANT * floor_of(r, CPU_MEMBERS))
+        tol = max(r["base_tol"], K_CPU * floor_of(r, CPU_MEMBERS))
         for name in device_names:
             e = r["members"][name] if name in r["members"] else r["heldout"][name]
             if e > tol:
@@ -271,14 +309,46 @@ def trigger(records: list) -> dict:
 # ---------------------------------------------------------------------------
 # Step 3: K re-derivation with full membership, Phase 0's rule
 # ---------------------------------------------------------------------------
-def k_demand(records: list) -> tuple[float, str]:
-    """The K the full-membership class demands over these records."""
+def distinct_members(records: list) -> tuple:
+    """The members with distinct error signatures over `records`, first name
+    per signature kept.
+
+    A member with a bit-identical twin has its leave-one-out ratio pinned at
+    exactly 1.0 - the twin is always in the "others" floor at the same value -
+    so it can never bind the demand and never shows up as the reason for a K.
+    Three of this ensemble's nine names are such twins (ADR 0012), which means
+    the estimator was running on six effective points while reporting nine.
+    Collapsing them first is what lets a pair bind at its true ratio.
+    """
+    signature = {m: tuple(round(r["members"][m], 17) for r in records)
+                 for m in ALL_MEMBERS}
+    kept, seen = [], set()
+    for name in ALL_MEMBERS:
+        if signature[name] not in seen:
+            seen.add(signature[name])
+            kept.append(name)
+    return tuple(kept)
+
+
+def k_demand(records: list, distinct_only: bool = False) -> tuple[float, str]:
+    """The K the full-membership class demands over these records.
+
+    `distinct_only` collapses value-duplicate members before the leave-one-out
+    is taken. The floor itself is a maximum over member errors, so collapsing
+    never moves it; only the leave-one-out ratios change, and they change in
+    the direction that stops a twin from hiding its pair.
+    """
+    members = distinct_members(records) if distinct_only else ALL_MEMBERS
     needed, binding = 0.0, ""
     for r in records:
         base = r["base_tol"]
-        for name in ALL_MEMBERS:
+        for name in members:
             e = r["members"][name]
-            others = max(r["members"][m] for m in ALL_MEMBERS if m != name)
+            # `default` matters once duplicates collapse: a single surviving
+            # member has no "others", and a leave-one-out over nothing is not
+            # a demand of zero, it is not a demand at all.
+            others = max((r["members"][m] for m in members if m != name),
+                         default=0.0)
             if e > base and others > 0 and e / others > needed:
                 needed = e / others
                 binding = (f"member {name} @ {r['shape']} {r['draw']} "
@@ -291,6 +361,29 @@ def k_demand(records: list) -> tuple[float, str]:
                 binding = (f"heldout {name} @ {r['shape']} {r['draw']} "
                            f"s{r['seed']} {r['mode']} {r['dtype']}")
     return needed, binding
+
+
+def choose_k(per_bits: dict) -> tuple[float, dict]:
+    """One K across widths, from the CALIBRATION draw alone, plus the misses.
+
+    `per_bits` maps a bit width to its `(calibration_records,
+    independent_records)`. The independent draw never enters the choice: it is
+    scored against the chosen K afterwards, and a width whose held-out demand
+    exceeds it is returned as a miss for `main()` to name and stop on.
+
+    An empty `per_bits` means every width failed G0, which is a verdict about
+    the run and not an error in this function, so it returns the floor value
+    and no misses rather than raising.
+    """
+    needed_cal = max((k_demand(cal, distinct_only=True)[0]
+                      for cal, _ in per_bits.values()), default=0.0)
+    k_grid = max(K_CPU, cover(needed_cal))
+    misses = {}
+    for bits, (_, indep) in per_bits.items():
+        needed, binding = k_demand(indep, distinct_only=True)
+        if needed > k_grid:
+            misses[bits] = (needed, binding)
+    return k_grid, misses
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +475,18 @@ def gates(records: list, k: float) -> dict:
     return report
 
 
-def main() -> int:
+def _persist(k_grid: float, shapes: list, out: dict, results: dict) -> None:
+    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    OUT_PATH.write_text(json.dumps(
+        {"k_grid": k_grid, "k_shipped": SHIPPED_K, "k_cpu": K_CPU,
+         "shapes": shapes,
+         "classes": {c: list(m) for c, m in CLASSES.items()},
+         "reports": out,
+         "records": {b: results[b]["records"] for b in results}}, default=float))
+    print(f"\nrecords: {OUT_PATH}")
+
+
+def main(argv=None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(
@@ -391,25 +495,29 @@ def main() -> int:
     parser.add_argument("--full-shapes", action="store_true",
                         help="restore Phase 0's shape set, including 2048x11008")
     parser.add_argument("--quiet", action="store_true")
-    args = parser.parse_args()
-
-    try:
-        session = DeviceMemberSession()
-    except Exception as error:  # no PyObjC Metal, no GPU: nothing to calibrate
-        print(f"no usable Metal device for the device members: {error}")
-        return 2
+    args = parser.parse_args(argv)
 
     shapes = SHAPES + [(2048, 11008)] if args.full_shapes else SHAPES
     print(f"contract: mlx-affine, group_size={GROUP_SIZE}; "
-          f"CPU-calibrated K={K_QUANT} (Phase 0)")
+          f"CPU-calibrated K={K_CPU} (Phase 0)")
     print(f"membership: {len(CPU_MEMBERS)} CPU members + "
           f"{len(DEVICE_MEMBERS)} device members ({', '.join(DEVICE_MEMBERS)})")
     print(f"bits: {args.bits}; shapes: {shapes}")
     print(f"calibration seeds {CALIBRATION_SEEDS}, independent draw {HELDOUT_SEEDS}\n")
 
-    results, out = {}, {}
+    session = None
+    results, out, per_bits = {}, {}, {}
     for bits in args.bits:
         print(f"  measuring bits={bits} ...")
+        if session is None:
+            # Built lazily here rather than before the loop, so a unit test can
+            # replace `measure` and `DeviceMemberSession` and drive this whole
+            # decision path without opening a Metal device.
+            try:
+                session = DeviceMemberSession()
+            except Exception as error:  # no PyObjC Metal, no GPU: nothing to do
+                print(f"no usable Metal device for the device members: {error}")
+                return 2
         measured = measure(bits, shapes, session, not args.quiet)
         results[bits] = measured
         if not measured["bit_exact"]:
@@ -420,32 +528,36 @@ def main() -> int:
         records = measured["records"]
         cal = [r for r in records if not r["heldout_draw"]]
         indep = [r for r in records if r["heldout_draw"]]
+        per_bits[bits] = (cal, indep)
+        # Both readings, always: the two unsuffixed keys are what ADR 0016 and
+        # the serving tests read, and the *_distinct pair is what the amended
+        # rule decides on.
         needed_cal, binding_cal = k_demand(cal)
         needed_indep, binding_indep = k_demand(indep)
+        needed_cal_d, binding_cal_d = k_demand(cal, distinct_only=True)
+        needed_indep_d, binding_indep_d = k_demand(indep, distinct_only=True)
         out[bits] = {
             "trigger": trigger(records),
             "k_needed_calibration": needed_cal, "k_binding": binding_cal,
             "k_needed_independent": needed_indep,
             "k_binding_independent": binding_indep,
+            "k_needed_calibration_distinct": needed_cal_d,
+            "k_binding_distinct": binding_cal_d,
+            "k_needed_independent_distinct": needed_indep_d,
+            "k_binding_independent_distinct": binding_indep_d,
+            "distinct_members": list(distinct_members(records)),
+            "independent_miss": None,
         }
 
-    # -- the shipped K, decided across widths after the membership join -----
     usable = [b for b in args.bits if out[b].get("verdict") != "GATE-0-FAIL"]
-    demand = max((max(out[b]["k_needed_calibration"],
-                      out[b]["k_needed_independent"]) for b in usable),
-                 default=0.0)
-    k_ship = K_QUANT if demand <= K_QUANT else next(
-        (k for k in K_GRID if k >= demand), None)
-    if k_ship is None:
-        print(f"\nKILL: full membership demands K = {demand:.2f}, above the grid")
+    if not usable:
+        print("\nno usable width: G0 failed everywhere, so nothing measured "
+              "here describes MLX and no K may be read from this run")
         return 1
-
-    for bits in usable:
-        out[bits].update(gates(results[bits]["records"], k_ship))
 
     # ------------------------------------------------------------------ print
     print("\nTRIGGER: device implementations vs the CPU-calibrated tolerance "
-          f"(K={K_QUANT}, CPU floor)")
+          f"(K={K_CPU}, CPU floor)")
     for bits in usable:
         t = out[bits]["trigger"]
         state = ("FIRES" if t["fires"] else "covered")
@@ -455,21 +567,76 @@ def main() -> int:
         print(f"  bits={bits:<3} {t['total']}/{t['cases']} case-exceedances "
               f"-> re-derivation branch {state}{detail} {by if by else ''}")
 
-    print("\nK RE-DERIVATION, membership joined first (Phase 0 rule, full ensemble):")
+    # -- the harness's own K, from the calibration draw alone ---------------
+    k_grid, misses = choose_k({b: per_bits[b] for b in usable})
+    demand = max(out[b]["k_needed_calibration_distinct"] for b in usable)
+
+    print("\nK RE-DERIVATION, membership joined first (Phase 0 rule, full "
+          "ensemble); K comes from the CALIBRATION draw alone since the "
+          "2026-08-16 amendment.")
+    print("  'all' counts every named member; 'distinct' collapses "
+          "value-duplicates, and only 'distinct' decides.")
     for bits in usable:
         o = out[bits]
-        print(f"  bits={bits:<3} k_needed {o['k_needed_calibration']:.3f} "
-              f"(calibration draw; binding: {o['k_binding']})")
-        print(f"          k_needed {o['k_needed_independent']:.3f} "
-              f"(independent draw)")
-    moved = "" if k_ship == K_QUANT else "  <- K MOVED, membership could not repair"
-    print(f"  shipped K: {k_ship} (demand {demand:.3f}, grid {K_GRID}){moved}")
+        print(f"  bits={bits:<3} calibration  all {o['k_needed_calibration']:.3f}"
+              f"  distinct {o['k_needed_calibration_distinct']:.3f}  "
+              f"(binding: {o['k_binding_distinct']})")
+        print(f"          independent  all {o['k_needed_independent']:.3f}"
+              f"  distinct {o['k_needed_independent_distinct']:.3f}  "
+              f"(tests K, never sets it)")
+    moved = "" if k_grid == K_CPU else "  <- K MOVED, membership could not repair"
+    # Two different numbers, and calling this one "shipped K" is how a reading
+    # taken on three synthetic shapes nearly became the verifier's K at a value
+    # the serving grid would then have refused (ADR 0016).
+    print(f"  device-grid K: {k_grid} (this harness's shapes only; the verifier "
+          f"ships native_ops.K_QUANT = {SHIPPED_K})")
+    print(f"    calibration demand {demand:.3f}, grid {K_GRID}{moved}")
+
+    for bits in usable:
+        if bits in misses:
+            needed, binding = misses[bits]
+            out[bits]["independent_miss"] = {"demand": needed, "binding": binding}
+    if misses:
+        for bits in sorted(misses):
+            needed, binding = misses[bits]
+            print(f"\nINDEPENDENT MISS: bits={bits} held-out demand "
+                  f"{needed:.3f} > device-grid K {k_grid} at {binding}")
+        print("\nThe held-out draw exceeds the K the calibration draw chose. "
+              "Under the 2026-08-16 amendment that is a stop, not a roll-up: "
+              "covering it would make the next gate true by construction, "
+              "which is the defect the amendment exists to remove. The rule "
+              "is renegotiated by a human before anything else here is read.")
+        _persist(k_grid, shapes, out, results)
+        return 1
+
+    for bits in usable:
+        cal_b, indep_b = per_bits[bits]
+        report = gates(results[bits]["records"], k_grid)
+        # G1 asks an out-of-sample question, so it is scored on the independent
+        # draw alone. G2 and G3 ask whether faults are caught and whether the
+        # classes are spanned, which every record is evidence about.
+        #
+        # Read this honestly: once the INDEPENDENT MISS branch above has not
+        # fired, no held-out error on the independent draw can exceed
+        # k_grid * floor either, so G1 still cannot fail HERE. The falsifiable
+        # form of "the tolerance flags no correct implementation" is the miss
+        # branch itself, which stops the run and names the cell; this line is
+        # what keeps the reported G1 about the draw K was not fitted to.
+        out_of_sample = gates(indep_b, k_grid)
+        report["false_positives"] = out_of_sample["false_positives"]
+        report["g1_scored_on"] = {"records": len(indep_b), "draw": "independent"}
+        report["gates"]["G1_no_false_positives"] = (
+            out_of_sample["gates"]["G1_no_false_positives"])
+        report["verdict"] = ("ADEQUATE" if all(report["gates"].values())
+                             else "INADEQUATE")
+        out[bits].update(report)
 
     header = (f"{'bits':>6}{'records':>9}{'G1 FP':>7}{'G2 worst margin':>17}"
               f"{'G3 classes':>12}{'equiv':>7}{'verdict':>13}")
     print()
     print("=" * len(header))
-    print(f"AMENDED GATE AT K = {k_ship}, THREE-CLASS MEMBERSHIP")
+    print(f"AMENDED GATE AT device-grid K = {k_grid}, THREE-CLASS MEMBERSHIP")
+    print("G1 is scored on the independent draw alone; G2 and G3 on both")
     print("=" * len(header))
     print(header)
     print("-" * len(header))
@@ -507,13 +674,7 @@ def main() -> int:
               f"float16: {f16['cpu_floor']}/{f16['of']} -> "
               f"{f16['full_floor']}/{f16['of']}")
 
-    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUT_PATH.write_text(json.dumps(
-        {"k_ship": k_ship, "k_cpu": K_QUANT, "shapes": shapes,
-         "classes": {c: list(m) for c, m in CLASSES.items()},
-         "reports": out,
-         "records": {b: results[b]["records"] for b in results}}, default=float))
-    print(f"\nrecords: {OUT_PATH}")
+    _persist(k_grid, shapes, out, results)
 
     verdicts = {out[b].get("verdict") for b in args.bits}
     print(f"VERDICT: {'ADEQUATE at every width' if verdicts == {'ADEQUATE'} else sorted(verdicts)}")

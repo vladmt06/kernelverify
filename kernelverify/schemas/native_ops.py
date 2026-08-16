@@ -231,6 +231,11 @@ MOE_MEMBERS = {
     "moe:reversed-slots": _moe_member_reversed,
 }
 
+# Bumped whenever a member's ARITHMETIC changes under an unchanged name, the
+# way QUANT_ENSEMBLE_VERSION was for the factored-groups repair: the verdict
+# cache keys on labels, so a same-name change is exactly what it cannot see.
+MOE_ENSEMBLE_VERSION = "moe-ensemble-v1"
+
 
 def moe_tolerance(case, inputs, ref) -> float:
     floor = max(_max_err(fn(inputs), ref) for fn in MOE_MEMBERS.values())
@@ -351,8 +356,28 @@ KV_MEMBERS = {
     "kv:reversed-combine": dict(scores_order="pairwise", combine_order="reversed"),
 }
 
+# Same discipline as MOE_ENSEMBLE_VERSION above. This ensemble shares
+# `_kv_member` and `_cache_dequant` with the reference, so a change to either
+# moves every member at once under four unchanged names.
+KV_ENSEMBLE_VERSION = "kv-ensemble-v1"
+
 
 def kv_tolerance(case, inputs, ref) -> float:
+    """The kv_attention tolerance, whose K is BORROWED and uncalibrated.
+
+    K_QUANT = 4.0 was derived by the quantized_matmul device calibration
+    (ADR 0012, re-read by ADR 0016) over that operator's nine-name ensemble on
+    that operator's grid. No harness has ever derived a K over KV_MEMBERS: the
+    four members below have never been scored leave-one-out against a held-out
+    implementation of this operator, at any shape or width.
+
+    So ADR 0008's sentence about each family shipping "its own calibrated K"
+    does not hold here, and this number is a reuse, not a measurement. It is
+    not obviously wrong - both floors are ensembles of legitimate fp32
+    reduction orders over a dequantized artefact - but nothing has measured
+    whether 4.0 is loose, tight, or beside the point for an operator whose
+    floor also carries a softmax. Calibrating it is queued in TODOS.md.
+    """
     floor = max(_max_err(_kv_member(inputs, **kw), ref)
                 for kw in KV_MEMBERS.values())
     return max(_base_tol(case.dtype, ref), K_QUANT * floor)
