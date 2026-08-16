@@ -33,6 +33,7 @@ timing measured under contention would only exist to be misquoted.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import platform
 import subprocess
 import sys
@@ -73,10 +74,20 @@ from kernelverify.report.certificate import (  # noqa: E402
     emit,
 )
 from kernelverify.runners import LaunchSpec, MetalRunner, RunCase  # noqa: E402
-from kernelverify.schemas.native_ops import K_QUANT  # noqa: E402
-from kernelverify.schemas.quant_contract import ENSEMBLE  # noqa: E402
+from kernelverify.schemas.native_ops import K_NATIVE, K_QUANT  # noqa: E402
+from kernelverify.schemas.quant_contract import (  # noqa: E402
+    ENSEMBLE,
+    QUANT_ENSEMBLE_VERSION,
+)
 
 CERT_DIR = Path(__file__).resolve().parent / ".certificates"
+
+#: The ensemble the quant tolerance divides by, as source bytes. The member
+#: names alone cannot see an arithmetic change under an unchanged name - which
+#: is exactly what the factored-groups repair was - so a certificate that
+#: names only the members vouches for whatever the floor happens to be today.
+QUANT_ENSEMBLE_SOURCE = (Path(__file__).resolve().parents[1] / "kernelverify"
+                         / "schemas" / "quant_contract.py")
 
 #: Same-program-two-doors agreement bound for the routing gate weights: both
 #: arms compute the same fp32 arithmetic, so anything beyond rounding noise
@@ -242,23 +253,42 @@ def contract_version_for(family: str) -> str:
             "routing over dense experts)")
 
 
+def native_tolerance_model(operator: str) -> dict:
+    """The tolerance model of a native operator, naming the K that operator's
+    own tolerance function multiplies.
+
+    The two differ and stating one for the other is a false claim, not a
+    cosmetic one: `native_ops.kv_tolerance` multiplies K_QUANT = 4.0 (borrowed
+    from the quantized_matmul calibration and never calibrated over
+    KV_MEMBERS), while `native_ops.moe_tolerance` multiplies K_NATIVE = 1.5
+    over an unquantized ensemble.
+    """
+    if operator == "kv_attention":
+        key, name, value = "K_quant", "K_QUANT", K_QUANT
+    else:
+        key, name, value = "K_native", "K_NATIVE", K_NATIVE
+    return {"anchor": f"NATIVE_OPS['{operator}'] fp64 reference",
+            "floor": "operator ensemble floor",
+            key: value,
+            "form": f"max(base_tol(dtype), {name} * floor)"}
+
+
 def tolerance_model_for(family: str) -> dict:
     if family == wide_qmv.KERNEL_NAME:
         return {"anchor": "r_contract (fp64 dequantized reference)",
                 "floor": "quant-contract ensemble",
                 "K_quant": K_QUANT,
                 "ensemble_members": sorted(ENSEMBLE),
+                "ensemble_version": QUANT_ENSEMBLE_VERSION,
+                "ensemble_source_sha256": hashlib.sha256(
+                    QUANT_ENSEMBLE_SOURCE.read_bytes()).hexdigest(),
                 "form": "max(base_tol(dtype), K_QUANT * floor)"}
     if family == moe_dispatch.ROUTING_NAME:
         return {"criterion": "top-2 indices bit-exact against the contract's "
                              "tie-to-lower-index rule; no numeric tolerance",
                 "gate_weights": "renormalized top-2 probabilities"}
-    operator = ("kv_attention" if family == kv_attention.KERNEL_NAME
-                else "moe_dispatch")
-    return {"anchor": f"NATIVE_OPS['{operator}'] fp64 reference",
-            "floor": "operator ensemble floor",
-            "K_quant": K_QUANT,
-            "form": "max(base_tol(dtype), K_QUANT * floor)"}
+    return native_tolerance_model(
+        "kv_attention" if family == kv_attention.KERNEL_NAME else "moe_dispatch")
 
 
 # The quant tolerance's own validity domain (ADR 0014): what the K_QUANT
