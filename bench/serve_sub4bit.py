@@ -68,11 +68,14 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import interleave  # noqa: E402
 import machine_state  # noqa: E402
 import mlx.core as mx  # noqa: E402
 import mlx.nn as nn  # noqa: E402
 
-from machine_state import MeasurementLock  # noqa: E402
+# One copy of the timing discipline, imported rather than restated: a rule
+# amended in interleave.py must not silently stay old here (AGENTS.md).
+from machine_state import MeasurementLock, spread_pct  # noqa: E402
 
 # The refusal vocabulary, single-sourced: this harness numbers nothing itself,
 # because per-harness numbering is how two "protected" runs collapsed the
@@ -163,7 +166,6 @@ PROJ_SHAPES = [(2560, 4096, 1), (2560, 1024, 2), (4096, 2560, 1),
                (2560, 9728, 2), (9728, 2560, 1)]
 PROJS_PER_LAYER = 7
 
-MIN_SAMPLE_MS = 5.0
 WORKING_SET_MB = 512
 
 PROMPT_SEED = (
@@ -537,10 +539,6 @@ def check_idle_after(exit_code: int) -> int:
     return exit_code
 
 
-def spread_pct(vals: list[float]) -> float:
-    return (max(vals) - min(vals)) / statistics.median(vals) * 100
-
-
 def expected_calls(patch: Patch, b: int, steps: int) -> int:
     """The exact fused-call count for a decode window at batch size b.
 
@@ -752,22 +750,14 @@ def _op_probe(bits: int, d_in: int, d_out: int, m: int) -> dict:
         return mx.quantized_matmul(x, wq, sc, bi, transpose=True,
                                    group_size=GROUP_SIZE, bits=bits)
 
-    def sample(fn, copies):
-        outs = [fn(i) for i in range(copies)]
-        t0 = time.perf_counter()
-        mx.eval(outs)
-        mx.synchronize()
-        return time.perf_counter() - t0
-
     mx.eval(ours(0), theirs(0))
     mx.synchronize()
-    copies = 8
-    while copies < 4096 and sample(theirs, copies) * 1e3 < MIN_SAMPLE_MS:
-        copies *= 2
+    copies = interleave.calibrate_copies(
+        lambda c: interleave.dispatch(theirs, c))
     a_s, b_s = [], []
     for _ in range(ROUNDS):
-        a_s.append(sample(ours, copies) / copies)
-        b_s.append(sample(theirs, copies) / copies)
+        a_s.append(interleave.dispatch(ours, copies) / copies)
+        b_s.append(interleave.dispatch(theirs, copies) / copies)
     return {"stock_us": statistics.median(b_s) * 1e6,
             "fused_us": statistics.median(a_s) * 1e6,
             "stock_spread_pct": round(spread_pct(b_s), 1)}
@@ -784,6 +774,12 @@ def mde_row(b: int, rows: list[dict], i_ms: float, saving_ms: float,
     AGENTS.md rejects such a round rather than letting its median stand in
     for it. The cell then carries no expected gain at all: a gain derived
     from a rejected round is not a number a reader may weigh.
+
+    `composition` says cross-pass because it is: the saving comes from
+    _op_probe's own interleaved rounds and t_step_ms from a separate decode
+    pass minutes later, which is exactly the composition interleaving exists
+    to forbid. It is labelled rather than hidden, and section 5 of the
+    findings doc carries it as a second reason the MDE is an upper bound.
     """
     over = [r["shape"] for r in rows
             if r.get("routed") and r["stock_spread_pct"] > MAX_SPREAD_PCT]
@@ -791,7 +787,8 @@ def mde_row(b: int, rows: list[dict], i_ms: float, saving_ms: float,
            "arm2_ms_per_step": round(t_step_ms, 3),
            "arm2_noise_floor_pct": round(noise_floor_pct, 2),
            "step_saving_ms": round(saving_ms, 4),
-           "interception_cost_ms_per_step": round(i_ms, 4)}
+           "interception_cost_ms_per_step": round(i_ms, 4),
+           "composition": "cross-pass"}
     if over:
         row["verdict"] = (f"WITHHELD: reference-arm spread over "
                           f"{MAX_SPREAD_PCT}% at {', '.join(over)}")
@@ -997,6 +994,9 @@ def ab(manifest: dict, guard) -> int:
             patch.uninstall()
             guard(f"B={b} arm4")
 
+        # A cell the MDE never derived is out of the dispatch zone, so it
+        # routes nothing and decides nothing about the kernel: False is the
+        # honest default, not a gap.
         row, code = ab_row(b, arms, routed_shapes(patch, b), calls_got,
                            calls_want, hard, deciders.get(b, False))
         exit_code = max(exit_code, code)

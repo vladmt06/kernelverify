@@ -135,6 +135,21 @@ Every quantity below is per decode step, never per token: at B > 1 a step produc
 - Noise floor: arm 2's round-to-round per-step spread at that B.
 - Decision rule, pre-stated: a cell whose expected gain is below its noise floor is a pre-declared non-decider; if every in-zone cell is a non-decider and the reshaping arithmetic (longer G, more rounds) cannot bring the floor under the effect, the honest report is that the arithmetic answers the question, and the A/B runs as confirmation only.
 
+### Amendment, 2026-08-16: the decision rule is now enforced, and the MDE is an upper bound for a second reason
+
+Two things about this section, written before any MDE number exists.
+
+The decision rule above was derived and never applied.
+`--mde` printed the expected gain and the noise floor one line apart and compared them nowhere, so every A/B cell read as evidence whatever the arithmetic said.
+From this amendment the comparison is made per cell, recorded as `decider` in the MDE's own row, carried to `--ab` through `bench/.cache/serve_mde.json` under the pins it was derived on, and stamped on every A/B row the run publishes - valid, invalid or withheld alike.
+`--ab` refuses to start when that record is absent or was derived against different artifacts, because defaulting a cell to "decider" is the reading this rule exists to prevent.
+A routed shape whose stock arm's own round-to-round spread exceeds `machine_state.MAX_SPREAD_PCT` withholds its whole cell and the cell publishes no expected gain at all; that spread was measured and reported from the first version of the harness and nothing read it.
+
+The known residual above named one reason the expected gain is an upper bound.
+There is a second: `saving(B)` comes from `_op_probe`'s own interleaved rounds and `t_step(B)` from a separate decode pass minutes later, so the ratio composes two numbers measured across passes - the composition interleaving exists to forbid, because a power-state excursion between them moves the denominator without touching the numerator.
+It is labelled rather than hidden: every MDE row carries `"composition": "cross-pass"`, and the number is to be read as an upper bound for this reason as well.
+Computing it from a single interleaved pass would be a redesign of the MDE and is not made silently here.
+
 Measured inputs to the derivation (from `bench/serve_sub4bit.py --mde`, quiet window only):
 
 <!-- MDE numbers go here -->

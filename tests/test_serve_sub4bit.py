@@ -861,3 +861,46 @@ def test_the_corpus_location_is_recorded():
     """bench/.corpus is gitignored, so the file exists per worktree and the
     doc is the only place that can say where it comes from."""
     assert "`bench/.corpus/` is gitignored" in _findings_doc()
+
+
+# ---------------------------------------------------------------------------
+# one copy of the timing discipline
+#
+# AGENTS.md: "One copy of the discipline, so a timing rule amended in one gate
+# cannot silently stay old in another." _op_probe had its own MIN_SAMPLE_MS,
+# its own spread_pct and its own calibrate-and-batch loop, all of which
+# bench/interleave.py and bench/machine_state.py already own.
+# ---------------------------------------------------------------------------
+def test_the_harness_owns_no_second_copy_of_the_timing_rules():
+    import inspect
+
+    src = inspect.getsource(serve_sub4bit)
+    assert "def spread_pct" not in src
+    assert "MIN_SAMPLE_MS =" not in src
+    assert serve_sub4bit.spread_pct is serve_sub4bit.machine_state.spread_pct
+
+
+def test_the_op_probe_times_through_the_shared_engine(monkeypatch):
+    """Counted, not read off the source: the probe must calibrate once and
+    then sample both arms ROUNDS times through interleave.dispatch."""
+    calls = []
+
+    def _fake_dispatch(build_one, copies):
+        calls.append(copies)
+        return 0.010                      # already past MIN_SAMPLE_MS
+
+    monkeypatch.setattr(serve_sub4bit.interleave, "dispatch", _fake_dispatch)
+    probe = serve_sub4bit._op_probe(BITS, d_in=128, d_out=64, m=1)
+    assert len(calls) == 1 + 2 * serve_sub4bit.ROUNDS
+    assert set(calls) == {8}, "one calibration, then every sample at that size"
+    assert probe["stock_spread_pct"] == 0.0
+
+
+def test_the_expected_gain_is_labelled_as_the_cross_pass_composition():
+    """_op_probe's saving and arm 2's per-step time come from separate
+    passes minutes apart, which is the composition interleaving exists to
+    forbid; the row says so rather than reading as a single measurement."""
+    row = serve_sub4bit.mde_row(6, [_probe_row()], i_ms=0.0, saving_ms=0.5,
+                                t_step_ms=10.0, noise_floor_pct=2.0)
+    assert row["composition"] == "cross-pass"
+    assert "cross-pass" in _findings_doc()
