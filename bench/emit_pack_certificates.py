@@ -230,7 +230,14 @@ def contract_version_for(family: str) -> str:
         return (f"MLX-affine quant contract, device-joined ensemble, "
                 f"K_QUANT={K_QUANT:g} (ADR 0009/0012/0016)")
     if family == kv_attention.KERNEL_NAME:
-        return "kv_attention contract (frozen at 8ec7eca; NATIVE_OPS['kv_attention'])"
+        # The K is quantized_matmul's, derived on quantized_matmul's grid over
+        # quantized_matmul's ensemble; no harness has ever scored KV_MEMBERS.
+        # A certificate that named a contract version without saying so would
+        # be selling a calibration that was never done.
+        return ("kv_attention contract (frozen at 8ec7eca; "
+                "NATIVE_OPS['kv_attention']); K borrowed from "
+                "quantized_matmul, uncalibrated over KV_MEMBERS "
+                "(ADR 0012/0016 derived it for that operator, not this one)")
     return ("moe_dispatch contract (NATIVE_OPS['moe_dispatch'], Qwen3-class "
             "routing over dense experts)")
 

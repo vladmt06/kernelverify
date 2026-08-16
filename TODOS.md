@@ -180,3 +180,12 @@
 - Cons: it makes any R experiment cost a full pricing slot before it can ship, which is the intended price and not a defect.
 - Context: the current pins are R = 4 up to M = 10 and R = 2 above it, matching every point of the 2026-08-15 recording; `KERNEL_SOURCE_SHA256` carries the same discipline for the kernel body itself, so editing the MSL has the same consequence.
 - Depends on / blocked by: nothing; it is a standing rule that applies to whoever next moves R.
+
+## kv_attention's K is borrowed; nothing has ever calibrated one over KV_MEMBERS
+
+- What: build a pre-registered adequacy harness for kv_attention modelled on `bench/calibrate_quant_bits.py` - its rule in the module docstring, committed before any measurement - that derives K over `KV_MEMBERS` on a grid of (B, H, T, DH, BITS) and both activation dtypes, with a held-out implementation and an independent draw, and reports both the calibration and the independent demand.
+- Why: `kernelverify/schemas/native_ops.py::kv_tolerance` divides by an ensemble floor and multiplies by `K_QUANT = 4.0`, a value ADR 0012 derived for quantized_matmul over quantized_matmul's nine-name ensemble on quantized_matmul's grid; ADR 0008's claim that each family ships "its own calibrated K" is false for this operator, and every kv_attention certificate has been resting on the reuse.
+- Pros: CPU-only - the four members and the fp64 reference are all numpy, so this needs no GPU slot and no coordinated quiet window, unlike every other calibration this repo has queued; the grid, the leave-one-out rule, the K grid and the gate vocabulary all already exist and are copied, not invented.
+- Cons: the answer may be that 4.0 is wrong in either direction, and a K that moves obliges re-emission of the kv certificates and a bump of a kv ensemble version; the operator's floor also carries a softmax, so the zero-variance regimes that bind every other tolerance decision here may not be the binding ones and the grid needs its own thought.
+- Context: `native_ops.py::kv_tolerance` (its docstring states the borrow), `KV_MEMBERS` beside it, `bench/emit_pack_certificates.py::contract_version_for` (the certificate prose that now says "K borrowed from quantized_matmul, uncalibrated"); surfaced by the verification-design audit of 2026-08-15 and labelled by task V2 of the 2026-08-16 amendments plan.
+- Depends on / blocked by: nothing technical; it is a CPU harness that can run beside any GPU measurement.

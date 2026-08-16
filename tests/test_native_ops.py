@@ -159,6 +159,21 @@ def test_kv_members_are_distinct_and_two_classes():
     assert len(scores_class) >= 2 and len(combine_class) >= 2
 
 
+def test_kv_tolerance_says_out_loud_that_its_k_is_borrowed():
+    """ADR 0008 says each operator family ships "its own calibrated K".
+    For kv_attention that is not true: K_QUANT = 4.0 arrived from the
+    quantized_matmul device calibration and no harness has ever derived a K
+    over KV_MEMBERS, so the docstring has to say so where a reader of the
+    tolerance will see it."""
+    import inspect
+
+    from kernelverify.schemas import native_ops
+
+    doc = inspect.getdoc(native_ops.kv_tolerance) or ""
+    assert "borrowed" in doc.lower()
+    assert "KV_MEMBERS" in doc, "the docstring names the ensemble nobody calibrated"
+
+
 def test_predicted_equivalents_measure_equivalent():
     inputs = moe_inputs()
     base = moe_dispatch(inputs).astype(np.float64)
