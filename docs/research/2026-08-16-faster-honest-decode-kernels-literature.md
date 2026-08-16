@@ -260,4 +260,80 @@ Two clauses that bind all three outcomes.
 Every spike is verify-then-time: the gate runs before any timing, and a candidate that fails the gate is never timed, because a speed number about an unverified kernel is the thing this repo exists to refuse (ADR 0015 records that every timed cell of the boundary pricing was verified first).
 And no spike's number is a product claim: the M = 1 spike measures one shape at one width against stock MLX, and the end-to-end baseline every technique must ultimately beat is the batch-1 per-stream tokens/s that M2 pins, whatever `wide_qmv` does there.
 
-## 7. The optimiser's shape (filled by R2)
+## 7. The optimiser's shape
+
+The generator does not exist: the claims audit of 2026-08-15 found zero code in this repository that produces a candidate kernel.
+Almost everything downstream of the generator does exist, and it exists in the shape the sub-question B papers say it should, which is why this section is a wiring diagram and not a design.
+
+### 7.1 The loop, as it would sit on this repo
+
+```
+    generate                gate                     price                    keep
+  (MISSING)  ->  pack_wide_qmv.verify()  ->  price_qmv_boundary protocol  ->  emit_pack_certificates
+      |                  |                             |                            |
+      |            pack/verify.py                interleave.py                routed_windows.py
+      |          NATIVE_OPS reference           MeasurementLock              (derived at import
+      |          ensemble floor, K_QUANT        idle gate, budget             from the recording)
+      |                  |                             |
+      +-- specialize.py  +--- GateEvidence ------------+--- a LOSS or REFUSED cell stops here,
+          or raw MSL          (evidence.py)                 and is recorded, not re-argued
+          (KernelSpec)
+```
+
+A candidate enters as a `KernelSpec` (`kernelverify/runners/spec.py`): raw Metal shading language plus the bindings that say what tensor sits at each buffer index and the launch grid the author intended, because Metal's compiler knows the type at buffer 0 and not its name, shape or intended thread count.
+A family of candidates enters through `kernelverify/runners/specialize.py`, which fills `$NAME` placeholders in a template spec and returns a new validated spec; it lives outside the runner deliberately, so the runner only ever sees finished specs and the specialization a candidate was built from stays with the caller, where a certificate can cite it.
+An unfilled placeholder and an unused substitution both raise, so a generator that emits a malformed family fails loudly at the door.
+
+Every candidate is verified before it is timed.
+`bench/pack_wide_qmv.py` enforces exactly that order and says so in its own docstring: no timing is printed unless every case verifies through the crash-isolated runner against the shipped verdict.
+The verdict itself comes from one place, `kernelverify/pack/verify.py`, which is the only route between a pack surface and a pass/fail claim, so no gate states a tolerance of its own and a change to the shipped formula cannot leave an old copy applying in a corner.
+The gate returns a `GateEvidence` structure (`kernelverify/pack/evidence.py`), one `SpecializationEvidence` per compile-time specialization and one `CaseEvidence` per isolated case, so nothing downstream parses stdout.
+
+A verified candidate is priced under `bench/price_qmv_boundary.py`'s protocol: arms interleaved within each round, a reference-arm canary whose spread caps at 1.5x, `ratio_lo > 1` for WIN, the whole interval below 1.0 for LOSS, REFUSED otherwise, all under the machine-wide `MeasurementLock` and the footprint budget (`bench/machine_state.py`, `bench/memory_guard.py`, `bench/interleave.py`).
+A kept candidate becomes routing (`kernelverify/pack/routed_windows.py`, derived at import from the committed recording and pinned by three sha256s: the recording, the kernel source, the launch config) and a certificate (`bench/emit_pack_certificates.py`, which captures the generated translation unit in a fresh process and behaviorally validates it before writing anything).
+
+### 7.2 What exists, and what is missing
+
+| piece | state | where |
+|---|---|---|
+| candidate representation | exists | `kernelverify/runners/spec.py` (`KernelSpec`: source, bindings, launch) |
+| candidate family expansion | exists | `kernelverify/runners/specialize.py` (`$NAME` substitution, both mistakes raise) |
+| crash-isolated execution on Metal | exists | `kernelverify/runners/device.py`, `metal.py`, `worker.py` |
+| the correctness gate | exists | `bench/pack_wide_qmv.py` -> `kernelverify/pack/verify.py` -> `NATIVE_OPS` reference, ensemble floor, `K_QUANT` |
+| structured gate evidence | exists | `kernelverify/pack/evidence.py` (`GateEvidence`) |
+| the pricing protocol | exists | `bench/price_qmv_boundary.py`, `bench/interleave.py`, `bench/machine_state.py`, `bench/memory_guard.py` |
+| the certificate emitter | exists | `bench/emit_pack_certificates.py` |
+| evidence-derived routing | exists | `kernelverify/pack/routed_windows.py` |
+| **the generator** | **missing** | nothing in the repo emits a candidate kernel |
+| **the search space** | **missing** | tile width M and rows-per-simdgroup R exist only as pinned launch-config DATA in `routed_windows.py`; packing layout, unroll, threadgroup-memory budget and accumulator layout are not parameters anywhere |
+| **the candidate store** | **missing** | a candidate's source, its provenance, its gate verdict and its price have no single home; `routed_windows.py` and the certificates hold survivors only, so a rejected candidate leaves no record and can be re-proposed forever |
+| **the held-out shape sweep** | **missing** | the gate covers the dispatch shapes the pack routes to, which are the shapes a generator would be tuned on |
+| **the tolerance-free gates** | **missing** | NaN and infinity propagation, run-to-run determinism, and shape-change robustness are not a standing gate set |
+
+### 7.3 What the sub-question B papers say to add, and what they say we already have
+
+Three of the four B rows converge on things this repo either has or is one step from.
+
+**The held-out sweep is the gap with a measured price.**
+Metal-Sci (arXiv 2605.09708) ran the same evolutionary loop this section describes, on Apple silicon Metal, and its held-out size sweep caught two failures that in-distribution scoring could not see: a sampler whose covariance was off by about 10 sigma at a size the template enumeration never covered, and a kernel reporting a 2.95x in-distribution speedup that collapsed to 0.23x on a held-out size because it fell back to a quadratic path outside its enumerated set.
+Both are the same failure mode: an optimiser tunes what it is scored on.
+Our gate scores the dispatch shapes the pack routes, and a generator would be tuned on exactly those, so the loop needs shapes and widths withheld from the generator's feedback and read only at the end.
+This repo already has the discipline in its calibration harnesses (the independent draw of ADR 0009 and ADR 0012, and V5 of the current plan is making that draw a test rather than a construction), so what is missing is the sweep in the pack gate, not the idea.
+
+**The tolerance-free gates are cheap and we do not have them as a set.**
+arXiv 2608.12700 audited 2,638 machine-generated kernels behind twelve adversarial gates, several of which need no tolerance at all: a kernel that returns an ordinary number where the true answer is a NaN or an infinity, one that differs from run to run, one that breaks when the shape changes, one that accumulates in fp16 where the reference keeps an fp32 total.
+39.5% of the audited kernels were broken beyond any tolerance argument.
+The fourth of those gates is our contract's own line and we enforce it through the tolerance rather than directly; the first three are not a standing gate anywhere in this repo.
+They cost nothing to run and they cannot produce a false positive, which is the class of check that belongs in front of a tolerance rather than inside one.
+
+**What we already have is the thing the field is missing.**
+The Correctness Illusion (arXiv 2606.20128) recommends op-schema-aware boundary shapes, per-operation and per-dtype tolerances against an fp64 CPU reference, multiple shapes and dtypes per operator, and full error distributions.
+That list is this repository's battery, measured rather than proposed: ADR 0001 through ADR 0005 are the shape, dtype and structured-mode axes and the conditioning-aware tolerance, and the mutation scoring in `bench/score_oracles.py` scores a test policy against a synthesised fault population rather than against a fixed corpus.
+The formal-methods entries mark the boundary of the alternative: ProofWright (arXiv 2511.12294) establishes semantic equivalence for a class of element-wise kernels, and a quantized matvec is a reduction, not an element-wise kernel; VOLTA (arXiv 2511.12638) claims soundness and completeness for a stated class of GPU kernels and this review could not determine from its abstract how it treats a reordered floating-point reduction, which is the entire question a tolerance exists to answer.
+
+### 7.4 The one thing to build first
+
+The loop above has exactly one hole that stops it from running end to end, and it is not the generator.
+It is the candidate store: without a place where a candidate's source, its provenance, its gate verdict and its price live together, every spike in section 5 produces a number in a terminal and the next session re-proposes the same kernel.
+`routed_windows.py` records what won and `bench/results/` records the recordings, so the store's shape is already set by the two things it has to feed.
+A generator writing into a store the gate and the pricing protocol already read is a smaller change than a generator wired directly into either.
