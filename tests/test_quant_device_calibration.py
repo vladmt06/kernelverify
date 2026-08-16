@@ -12,7 +12,6 @@ and the harness's arithmetic must stay checkable on any machine.
 """
 
 import json
-import sys
 
 import pytest
 
@@ -53,8 +52,7 @@ def test_the_device_json_names_its_own_k_and_the_one_that_ships(monkeypatch, tmp
     monkeypatch.setattr(dev, "OUT_PATH", tmp_path / "out.json")
     _no_metal(monkeypatch, _measured(_record(0, [1.0] * 9, 2.5),
                                      _record(100, [1.0] * 9, 2.0)))
-    monkeypatch.setattr(sys, "argv", ["calibrate_quant_device", "--bits", "3"])
-    dev.main()
+    dev.main(["--bits", "3"])
 
     payload = json.loads((tmp_path / "out.json").read_text())
     assert payload["k_grid"] == 3.0, "the harness's own reading of its own grid"
@@ -67,8 +65,7 @@ def test_the_device_grid_k_prints_as_a_reading_beside_the_shipped_value(
     monkeypatch.setattr(dev, "OUT_PATH", tmp_path / "out.json")
     _no_metal(monkeypatch, _measured(_record(0, [1.0] * 9, 2.5),
                                      _record(100, [1.0] * 9, 2.0)))
-    monkeypatch.setattr(sys, "argv", ["calibrate_quant_device", "--bits", "3"])
-    dev.main()
+    dev.main(["--bits", "3"])
 
     out = capsys.readouterr().out
     assert "device-grid K: 3.0" in out
