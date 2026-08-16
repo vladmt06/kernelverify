@@ -132,6 +132,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import mlx.core as mx  # noqa: E402
 
+from kernelverify.schemas.native_ops import K_QUANT as SHIPPED_K  # noqa: E402
 from kernelverify.schemas.quant_contract import (  # noqa: E402
     ENSEMBLE,
     FAULTS,
@@ -463,7 +464,12 @@ def main() -> int:
         print(f"          k_needed {o['k_needed_independent']:.3f} "
               f"(independent draw)")
     moved = "" if k_ship == K_QUANT else "  <- K MOVED, membership could not repair"
-    print(f"  shipped K: {k_ship} (demand {demand:.3f}, grid {K_GRID}){moved}")
+    # Two different numbers, and calling this one "shipped K" is how a reading
+    # taken on three synthetic shapes nearly became the verifier's K at a value
+    # the serving grid would then have refused (ADR 0016).
+    print(f"  device-grid K: {k_ship} (this harness's shapes only; the verifier "
+          f"ships native_ops.K_QUANT = {SHIPPED_K})")
+    print(f"    demand {demand:.3f}, grid {K_GRID}{moved}")
 
     header = (f"{'bits':>6}{'records':>9}{'G1 FP':>7}{'G2 worst margin':>17}"
               f"{'G3 classes':>12}{'equiv':>7}{'verdict':>13}")
@@ -509,7 +515,8 @@ def main() -> int:
 
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUT_PATH.write_text(json.dumps(
-        {"k_ship": k_ship, "k_cpu": K_QUANT, "shapes": shapes,
+        {"k_grid": k_ship, "k_shipped": SHIPPED_K, "k_cpu": K_QUANT,
+         "shapes": shapes,
          "classes": {c: list(m) for c, m in CLASSES.items()},
          "reports": out,
          "records": {b: results[b]["records"] for b in results}}, default=float))
