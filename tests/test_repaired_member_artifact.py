@@ -11,7 +11,7 @@ a reading of the 1,536 committed ADR 0013 records with ONE column recomputed -
 
 The device grid's equivalent records were preserved as an artifact when its ADR
 landed; the serving grid's were not, so those four numbers rested on a run
-nobody could repeat without a 14-minute recomputation. `tests/test_quant_contract
+nobody could repeat without a 70-minute recomputation. `tests/test_quant_contract
 _members.py` closes part of that hole by recomputing a 32-record block live, but
 a block is not the grid, and the two numbers above are maxima OVER the grid: a
 sample cannot pin them.
@@ -128,11 +128,32 @@ def test_the_committed_artifact_names_the_evidence_and_code_it_came_from(artifac
     assert header["adr"] == "ADR 0016"
 
 
-def test_the_artifact_moves_only_the_repaired_column(evidence, artifact):
-    """The continuity invariant, at grid scale. The generator asserts every
-    other member bit-identical on all 1,536 records as it goes and raises if
-    one moved; that it completed is the evidence, and its header says so."""
-    assert "re-derived bit-identical" in artifact["derived_from"]["continuity"]
+def test_the_artifact_says_exactly_which_members_it_verified(artifact):
+    """What the continuity invariant does and does NOT cover.
+
+    The generator re-derives the five untouched CPU members on every record and
+    raises if one moved, so the invariant is enforced at derive time and cannot
+    be re-checked here without repeating a 70-minute run. This test therefore
+    does NOT assert that the invariant held - it asserts that the artifact
+    states its own scope honestly, by naming the members rather than describing
+    them. The three device members need a GPU and are carried through from the
+    evidence unverified; an artifact that claimed otherwise would be a hollow
+    assurance of exactly the kind this file exists to replace, and an earlier
+    draft of this test made precisely that mistake by grepping the artifact's
+    own prose for the word 'bit-identical'.
+    """
+    from kernelverify.schemas.quant_contract import ENSEMBLE
+
+    header = artifact["derived_from"]
+    assert header["cpu_members_rederived"] == sorted(m for m in ENSEMBLE if m != REPAIRED)
+    assert REPAIRED not in header["cpu_members_rederived"]
+    assert header["device_members_carried_through_unverified"] == [
+        "device-dequant-loop", "device-dequant-simd", "device-factored-simd"]
+    assert set(header["cpu_members_rederived"]).isdisjoint(
+        header["device_members_carried_through_unverified"])
+
+
+def test_the_artifact_moves_the_repaired_column(evidence, artifact):
     moved = sum(row[6] != record["members"][REPAIRED]
                 for record, row in zip(evidence, artifact["records"]))
     assert moved, "the repair changed no record: the artifact cannot be of the repair"

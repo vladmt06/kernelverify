@@ -77,7 +77,9 @@ The admissible-only pooled demand over the whole serving grid falls from 6.973 t
 
 Every reading above is the committed ADR 0013 records with one column replaced, so the column is committed too: `bench/results/quant_serving_repaired_member.json`, written by `bench/derive_repaired_member_column.py`.
 It carries the repaired `factored-groups` value for each of the 1,536 records, the identity of the record it belongs to, and a header naming the evidence hash and the sha256 of the code that produced it.
-The generator re-derives the five untouched CPU members and the three device members on every record as it goes and raises if any one of them moved, so the continuity invariant is checked on the whole grid, not on the 64-record sample `tests/test_quant_contract_members.py` can afford.
+The generator re-derives the five untouched CPU members on every record as it goes and raises if any one of them moved, so that half of the continuity invariant is checked on the whole grid rather than on the 64-record sample `tests/test_quant_contract_members.py` can afford.
+The three DEVICE members are carried through from the evidence unchanged and are NOT re-derived: they are measured on a Metal GPU and this derivation is CPU-only, so it preserves their values without verifying them.
+The artifact names both sets explicitly for that reason.
 `tests/test_repaired_member_artifact.py` recomputes 1.743 -> 0.328 and 6.973 -> 3.120 from that file on every test run, and fails if the file predates the evidence or the code it names.
 Regenerating it takes about 70 minutes, holds roughly 16 GB and peaked at 24.3 GB on the run that produced the committed file, so it is a coordinator-run harness under a footprint watchdog, never a headless worker: `.venv/bin/python -u bench/derive_repaired_member_column.py`.
 Eight of its 48 blocks are lm_head and account for most of that time.
@@ -139,7 +141,8 @@ The same records carry a second reading that moved the other way.
 The leave-one-out spread over the six CPU members alone - the floor the shipped tolerance actually divides by - rises from **4.076 to 7.561**, bound by `factored-groups` itself at 9728x2560, batch 1, constant-rows float32.
 
 This is an ensemble-adequacy statistic, not a live flag, and the distinction is exact: the shipped floor CONTAINS `factored-groups`, so a candidate that rounds like it is judged against a floor that already holds its own error and lands at 0.25 of tolerance by construction.
-What the number says is that the int-domain class is now carried by one member that sticks far out from the rest - `factored-serial`, the next int-domain member, reads 1.692 - because the repair moved `factored-groups` from the most accurate member on constant rows to the least.
+What the number says is that the int-domain class is now carried by one member that sticks far out from the rest - `factored-serial`, the next int-domain member, reads 2.166 on the same statistic - because the repair moved `factored-groups` from the most accurate member on constant rows to the least.
+(An earlier draft of this line quoted 1.692, which is `factored-serial` under the NINE-name leave-one-out, not the six-CPU one this paragraph is about; comparing 7.561 against it mixed two statistics. The like-for-like gap is 7.561 against 2.166, and the merge review caught the mix.)
 
 No K in the grid covers 7.561, and raising K to cover it would undo the tightening ADR 0009 and ADR 0012 fought for.
 The standing repair order says membership before K, and this is a membership question: whether the int-domain class needs a second member that rounds like a real kernel, and if so which real kernel it stands for.
@@ -159,6 +162,10 @@ The count is three, out of 384 float32 cells across the four widths, and every o
 
 The "before" column was recomputed rather than remembered: the device grid overwrites its cache on every run and ADR 0012's records were never committed, so the pre-repair member was re-run verbatim (from `0052f7b`) over the same rng stream, with the untouched member and the repaired member both cross-checked bit-exactly against this run's 768 records first.
 The boundary table moves from ADR 0012's K = 3 CPU-floor column of 39 / 96 / 96 / 96 to 38 / 95 / 95 / 96 at bits 2 / 3 / 4 / 8; float16 activations stay 0 / 96 everywhere.
+
+EVIDENCE GAP, recorded rather than glossed: the "after" halves of both tables come from the committed `bench/results/quant_device_adequacy.json` and reproduce, but that pre-repair re-run's own records were never preserved, so the "before" ratios (1.248 / 1.640 / 1.963) and the 39 / 96 / 96 / 96 boundary counts cannot be recomputed from anything in the repository.
+They rest on a run that no longer exists, which is the same asymmetry this ADR's serving column was written to close, caught by the merge review on the half that was missed.
+Closing it needs the device harness re-run on a GPU with the member reverted to `0052f7b`, so it is queued in TODOS.md rather than done here; nothing in the decision depends on it, because K is decided by the serving demand and the false-positive count, both of which are now backed.
 
 This is the honest shape of the trade.
 The member stopped being unrealistically exact on constant rows, so on constant rows the tolerance is wider both for correct kernels (ten false positives closed) and for one boundary implementation (three of 384 cells stop being flagged, each now sitting at 0.84-0.98 of tolerance).

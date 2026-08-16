@@ -92,7 +92,7 @@ cd /Users/vlad/kernelverify
 - The environment needs `torch`, which only `gelu[variant=erf]` uses; a worktree venv created without it fails part-way through a verdict build.
 - It also needs `mlx==0.32.0` and `mlx-lm==0.31.3`, pinned across worktrees so binding comparisons stay on one toolchain.
   Without mlx, the mlx-dependent test modules are skipped whole or fail to collect, so the suite under-reports badly.
-  Skipped modules hide their contents rather than their count, so quote test counts from a fully equipped venv only; this branch passes 724 in 78 s as of 2026-08-16.
+  Skipped modules hide their contents rather than their count, so quote test counts from a fully equipped venv only; this branch passes 725 in 78 s as of 2026-08-16.
   Fully equipped means `pyobjc` as well as `mlx`: without the Metal bindings the runner-backed pack tests fail rather than skip, and a venv with mlx alone reports a number nobody should quote.
 
 The machine baseline, in this order, because each step writes the denominators the next one divides by:
@@ -197,4 +197,5 @@ bench/start_binding_run.sh     # arms a launchd job, then quit Terminal
   This one is silent rather than loud: it would have moved the fp64 anchor that every error is measured against, and the continuity anchor cannot catch it because the standing measure never takes the chunked path.
 - An ensemble member called per record re-dequantizes the whole weight matrix per call.
   `ENSEMBLE[name](x, artefact)` takes the quantized artefact and unpacks it internally, so checking five members across 32 lm_head records is 160 independent 1.5 GB dequantizations; a derived-column generator written that way reached 29 GB and was killed by its own watchdog, while the same work through the harness's hoisted evaluators holds ~16 GB steady with transients to ~23.
-  `bench/calibrate_quant_serving.py` already solved this - `ArtefactHoists` plus `eval_pairwise` / `eval_lut` / `eval_serial_chunked` / `eval_factored_serial` / `eval_factored_groups` take the dequantized arrays, hoisted once per `(shape, draw, seed)` block - so any new analysis over the serving grid goes through those, never through `ENSEMBLE` directly.
+  `bench/calibrate_quant_serving.py` already solved this: `eval_pairwise` / `eval_lut` / `eval_serial_chunked` / `eval_factored_serial` / `eval_factored_groups` take the dequantized arrays instead of the artefact, hoisted once per `(shape, draw, seed)` block by `ArtefactHoists`.
+  Any new analysis over the serving grid goes through those evaluators, never through `ENSEMBLE` directly; reuse `ArtefactHoists` too unless the analysis needs a strict subset of what it allocates, and say which subset and why if so.

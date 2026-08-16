@@ -96,7 +96,22 @@ Every certificate whose tolerance model divides by the K_QUANT floor now states 
 
 ## Consequences
 
+> Two of the lines below are superseded by ADR 0016; see the 2026-08-16 amendment at the end of this file.
+
 - K = 4, the nine-name membership, C1's wording, the measured records and the in-contract stop-at-miss semantics are all unchanged.
 - ADR 0013's freeze line is amended by its own amendment pattern: reruns must reproduce the measured records bit-identically, and their interpretation follows this ADR; the exit-1 refusal was the pre-ruling reading.
 - The four-cell in-contract residual is open coordinator business; nothing here closes it.
 - The inert-fp16-floor repair and the optional B16 mechanism demonstration are recorded in TODOS.md.
+
+## Amendment (2026-08-16): both Consequences lines above are superseded by ADR 0016
+
+Two lines in the Consequences section were true when written and are not true now.
+The merge review of the contract lane found them; they are corrected here rather than edited in place, so the record of what this ADR concluded stays readable.
+
+"The four-cell in-contract residual is open coordinator business; nothing here closes it."
+ADR 0016 closes it.
+The residual was never a K or membership gap: the CPU member `factored-groups` summed each group with numpy's pairwise reduction, which is EXACT on a constant row, so the leave-one-out floor was too tight in exactly the regime the four cells lived in and a correct device kernel read as a demand above K.
+Under the repaired member the four cells read 1.022, 1.052, 0.941 and 0.915, recomputable from `bench/results/quant_serving_repaired_member.json` on every test run.
+
+"reruns must reproduce the measured records bit-identically"
+That freeze line no longer holds as stated, for the same reason ADR 0013's own third amendment narrows it: ADR 0016 deliberately changed the `factored-groups` column, so reruns reproduce every column bit-identically EXCEPT that one, and everything derived from it moves with it by design.

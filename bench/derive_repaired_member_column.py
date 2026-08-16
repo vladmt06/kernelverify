@@ -14,11 +14,17 @@ caught the asymmetry. This script closes it.
 WHAT IS DERIVED, NOT MEASURED. Nothing here touches the GPU or the measured
 records. The evidence is `bench/results/quant_serving_adequacy.json`, hash-checked
 on read; the inputs are rebuilt from the harness's own pinned rng stream; the
-output holds ONE column plus the identity of each record it belongs to. The five
-untouched CPU members and the three device members are re-derived too and
-asserted bit-identical against the evidence - that assertion IS the continuity
-invariant, checked here on all 1,536 records rather than the 64-record sample
-`tests/test_quant_contract_members.py` can afford.
+output holds ONE column plus the identity of each record it belongs to.
+
+EXACTLY WHAT THE CONTINUITY CHECK COVERS, because the distinction is the whole
+value of the artifact. The five untouched CPU members are re-derived here and
+asserted bit-identical against the evidence, on all 1,536 records rather than on
+the 64-record sample `tests/test_quant_contract_members.py` can afford. The three
+DEVICE members are NOT re-derived and cannot be: they need a Metal GPU, and
+nothing here touches one. Their values are carried through from the evidence
+unchanged, which preserves them but verifies nothing about them. A claim that
+this file re-derives them would be false, and would be the same shape of hollow
+assurance the artifact exists to replace.
 
 MEMORY, and the mistake this docstring exists to stop anyone repeating. The
 first version called `ENSEMBLE[name](x, artefact)` per member per record. Each
@@ -36,7 +42,8 @@ log, under a footprint watchdog.
 
     .venv/bin/python -u bench/derive_repaired_member_column.py
 
-Takes about 14 minutes, almost all of it the seven lm_head blocks.
+Takes about 70 minutes, almost all of it the eight lm_head blocks of the 48, and
+peaked at 24.3 GB on the run that produced the committed artifact.
 """
 from __future__ import annotations
 
@@ -53,11 +60,14 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "bench"))
 
 from kernelverify.schemas.quant_contract import (  # noqa: E402
+    ENSEMBLE,
     QuantContract,
     canonical_quantize,
     dequantize,
 )
+from machine_state import MeasurementLock  # noqa: E402
 from calibrate_quant_serving import (  # noqa: E402
+    EXIT_LOCK_HELD,
     dequant_chunk_rows,
     dequant_chunked,
     eval_factored_groups,
@@ -83,6 +93,11 @@ GRID_BATCHES = (1, 2, 8, 16)
 GRID_MODES = ("unit", "corpus-scale", "near-zero", "constant-rows")
 GRID_DTYPES = ("float32", "float16")
 REPAIRED = "factored-groups"
+# Present in the evidence and copied into nothing: these three are measured on a
+# Metal GPU, so this CPU-only derivation can preserve their values but cannot
+# check them. Named here so the artifact can say so rather than imply otherwise.
+DEVICE_CARRIED = ("device-dequant-loop", "device-dequant-simd",
+                  "device-factored-simd")
 
 # The modules a derived value passes through. A change to any of them changes
 # the column, so the artifact names their identity the way
@@ -142,6 +157,11 @@ def derive(records: list) -> dict:
     for n, ((shape, draw, seed), idxs) in enumerate(sorted(blocks.items()), 1):
         artefact, xs = block_inputs(shape, draw, seed)
         # Hoisted once per block, never per record: the whole reason this fits.
+        # Built here rather than with the harness's `ArtefactHoists` because that
+        # class also builds `w16_32` eagerly for the fp16 boundary, which nothing
+        # here evaluates - a spare 1.5 GB at lm_head, against a run whose first
+        # version died on exactly that kind of surplus. The evaluators below are
+        # the harness's own, so only the allocation list differs.
         w32 = dequant_chunked(artefact, np.float32)
         w_lut32 = lut_gather_chunked(artefact)
         rows, cols = artefact.q.shape
@@ -187,8 +207,12 @@ def derive(records: list) -> dict:
             "code_sha256": code_identity(),
             "adr": "ADR 0016",
             "member": REPAIRED,
-            "continuity": ("every other CPU member and every device member "
-                           "re-derived bit-identical on all 1,536 records"),
+            "cpu_members_rederived": sorted(m for m in ENSEMBLE if m != REPAIRED),
+            "device_members_carried_through_unverified": sorted(DEVICE_CARRIED),
+            "continuity": ("the five untouched CPU members re-derived "
+                           "bit-identical on all 1,536 records; the three "
+                           "device members carried through from the evidence, "
+                           "not re-derived (they need a GPU)"),
         },
         "records": [
             [r["shape"], r["batch"], r["draw"], r["seed"], r["mode"], r["dtype"], v]
@@ -198,12 +222,25 @@ def derive(records: list) -> dict:
 
 
 def main() -> int:
-    records = load_evidence()
-    print(f"deriving the {REPAIRED} column over {len(records)} committed records")
-    derived = derive(records)
-    OUT_PATH.write_text(json.dumps(derived))
-    print(f"\nderived artifact: {OUT_PATH}")
-    return 0
+    # 70 minutes at ~16 GB steady and 24.3 GB peak is a heavy measurement by any
+    # reading, so it takes the machine lock like every other one: co-firing with
+    # the serving harness is what put this machine into a Jetsam kill three times.
+    lock = MeasurementLock("derive_repaired_member_column")
+    acquired, detail = lock.acquire()
+    if not acquired:
+        print(f"REFUSAL (exit {EXIT_LOCK_HELD}): machine measurement lock "
+              f"{detail}; one heavy run per machine, and a refused run "
+              f"touches nothing")
+        return EXIT_LOCK_HELD
+    try:
+        records = load_evidence()
+        print(f"deriving the {REPAIRED} column over {len(records)} committed records")
+        derived = derive(records)
+        OUT_PATH.write_text(json.dumps(derived))
+        print(f"\nderived artifact: {OUT_PATH}")
+        return 0
+    finally:
+        lock.release()
 
 
 if __name__ == "__main__":
