@@ -239,9 +239,11 @@ def test_registered_zone_refuses_a_boundary_that_moved_at_one_shape(
     shape = (2560, 4096)
     moved[shape] = moved[shape] | frozenset({11})
     monkeypatch.setattr(serve_sub4bit, "PINNED_ZONE", moved)
-    with pytest.raises(SystemExit) as exc:
+    # A typed refusal, not SystemExit(2): a moved boundary is permanent, so
+    # the detached runner must give up rather than wait for a quiet machine,
+    # and 2 belongs to the interpreter (memory_guard's exit table).
+    with pytest.raises(serve_sub4bit.PreconditionFailed):
         serve_sub4bit.require_pinned_zone()
-    assert exc.value.code == 2
     out = capsys.readouterr().out
     assert "1 of 5" in out and "2560x4096" in out
 
@@ -458,3 +460,447 @@ def test_perplexity_refuses_a_short_stream():
     with pytest.raises(RuntimeError):
         serve_sub4bit.perplexity(model, list(range(10)), window=8,
                                  n_windows=3)
+
+
+# ---------------------------------------------------------------------------
+# the refusal machine: one lock, one budget, one memory gate, typed exits
+#
+# Every test here drives main() rather than the mode functions, because the
+# ORDER is the property: a gate that fires after the first model is already
+# resident protects nothing. `_never_load` is the proof of order in each one.
+# ---------------------------------------------------------------------------
+TIMED = pytest.mark.parametrize("mode", ["--ab", "--mde"])
+
+
+def _never_load(*a, **k):
+    raise AssertionError("a model was loaded before the gate refused")
+
+
+def _raise(exc):
+    def _f(*a, **k):
+        raise exc
+    return _f
+
+
+def _pins_ok(monkeypatch):
+    monkeypatch.setattr(serve_sub4bit, "verify_pins",
+                        lambda *a, **k: {"pins": "ok"})
+
+
+def _lock_granted(monkeypatch):
+    monkeypatch.setattr(serve_sub4bit.MeasurementLock, "acquire",
+                        lambda self: (True, "acquired"))
+    monkeypatch.setattr(serve_sub4bit.MeasurementLock, "release",
+                        lambda self: None)
+
+
+@TIMED
+def test_timed_modes_refuse_when_the_machine_lock_is_held(monkeypatch, mode):
+    _pins_ok(monkeypatch)
+    monkeypatch.setattr(serve_sub4bit.MeasurementLock, "acquire",
+                        lambda self: (False, "held by pid 1 (test)"))
+    monkeypatch.setattr(serve_sub4bit, "load_model", _never_load)
+    assert serve_sub4bit.main([mode]) == serve_sub4bit.EXIT_LOCK_HELD
+
+
+def test_smoke_never_takes_the_lock(monkeypatch):
+    _pins_ok(monkeypatch)
+
+    def _boom(self):
+        raise AssertionError("smoke must not take the machine lock")
+
+    monkeypatch.setattr(serve_sub4bit.MeasurementLock, "acquire", _boom)
+    monkeypatch.setattr(serve_sub4bit, "smoke", lambda: 0)
+    assert serve_sub4bit.main(["--smoke"]) == 0
+
+
+@TIMED
+def test_permanent_preconditions_exit_with_their_own_code(monkeypatch, mode):
+    monkeypatch.setattr(serve_sub4bit, "verify_pins",
+                        _raise(RuntimeError("hash mismatch")))
+    assert serve_sub4bit.main([mode]) == serve_sub4bit.EXIT_PRECONDITION
+    _pins_ok(monkeypatch)
+    _lock_granted(monkeypatch)
+    monkeypatch.setattr(serve_sub4bit, "require_idle",
+                        lambda label: {"idle": True})
+    monkeypatch.setattr(serve_sub4bit, "require_pinned_zone",
+                        _raise(serve_sub4bit.PreconditionFailed(
+                            "zone disagrees")))
+    monkeypatch.setattr(serve_sub4bit, "load_model", _never_load)
+    assert serve_sub4bit.main([mode]) == serve_sub4bit.EXIT_PRECONDITION
+
+
+@TIMED
+def test_a_busy_machine_is_transient(monkeypatch, mode):
+    _pins_ok(monkeypatch)
+    _lock_granted(monkeypatch)
+    monkeypatch.setattr(serve_sub4bit, "require_idle",
+                        _raise(serve_sub4bit.NotIdle("WindowServer at 30%")))
+    monkeypatch.setattr(serve_sub4bit, "load_model", _never_load)
+    assert serve_sub4bit.main([mode]) == serve_sub4bit.EXIT_NOT_IDLE
+
+
+@TIMED
+def test_timed_modes_refuse_when_the_budget_is_crossed(monkeypatch, mode):
+    _pins_ok(monkeypatch)
+    _lock_granted(monkeypatch)
+    monkeypatch.setattr(serve_sub4bit, "require_idle",
+                        lambda label: {"idle": True})
+    monkeypatch.setattr(serve_sub4bit, "require_pinned_zone", lambda: None)
+    monkeypatch.setattr(serve_sub4bit.BudgetGuard, "check",
+                        lambda self, cell: (_ for _ in ()).throw(
+                            serve_sub4bit.BudgetExceeded(cell, 30.0, 24.0)))
+    monkeypatch.setattr(serve_sub4bit, "load_model", _never_load)
+    assert serve_sub4bit.main([mode, "--budget-gb", "24"]) == \
+        serve_sub4bit.EXIT_BUDGET_REFUSAL
+
+
+@TIMED
+def test_timed_modes_refuse_a_machine_with_no_room(monkeypatch, mode):
+    """The budget bounds THIS process; the memory gate bounds the machine.
+    Both must refuse before a model lands, and with different codes."""
+    _pins_ok(monkeypatch)
+    _lock_granted(monkeypatch)
+    monkeypatch.setattr(serve_sub4bit, "require_idle",
+                        lambda label: {"idle": True})
+    monkeypatch.setattr(serve_sub4bit, "require_pinned_zone", lambda: None)
+    monkeypatch.setattr(serve_sub4bit.BudgetGuard, "check",
+                        lambda self, cell: 1.0)
+    monkeypatch.setattr(serve_sub4bit, "require_available_memory",
+                        _raise(serve_sub4bit.LowMemoryRefusal("cell", 1.0,
+                                                              23.0)))
+    monkeypatch.setattr(serve_sub4bit, "load_model", _never_load)
+    assert serve_sub4bit.main([mode]) == serve_sub4bit.EXIT_LOW_MEMORY
+
+
+def test_the_exit_vocabulary_is_the_shared_one(monkeypatch):
+    """serve_sub4bit numbers nothing itself: every refusal code is
+    memory_guard's, which is what stops two harnesses meaning different
+    things by the same number (the 03:29 collapse's root)."""
+    import memory_guard
+
+    assert serve_sub4bit.EXIT_PRECONDITION is memory_guard.EXIT_PRECONDITION
+    assert serve_sub4bit.EXIT_NOT_IDLE is memory_guard.EXIT_NOT_IDLE
+    assert serve_sub4bit.EXIT_LOCK_HELD is memory_guard.EXIT_LOCK_HELD
+    assert {memory_guard.EXIT_PRECONDITION,
+            memory_guard.EXIT_NOT_IDLE} == {8, 9}
+    assert 2 not in {memory_guard.EXIT_BUDGET_REFUSAL,
+                     memory_guard.EXIT_LOCK_HELD,
+                     memory_guard.EXIT_LOW_MEMORY,
+                     memory_guard.EXIT_CHILD_DEATH,
+                     memory_guard.EXIT_NO_DEVICE,
+                     memory_guard.EXIT_PRECONDITION,
+                     memory_guard.EXIT_NOT_IDLE}
+
+
+def test_require_idle_raises_the_transient_refusal(monkeypatch, capsys):
+    monkeypatch.setattr(serve_sub4bit.machine_state, "idle_check",
+                        lambda *a, **k: {"idle": False,
+                                         "blockers": ["WindowServer 30%"]})
+    with pytest.raises(serve_sub4bit.NotIdle):
+        serve_sub4bit.require_idle("before")
+    assert "NOT QUIET" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# the decision surface
+#
+# primary_verdict and composed_attribution ARE the experiment: every number
+# the A/B prints is read through them, and they had no test at all. The losing
+# branches come first on purpose - wide_qmv is a measured loss at batch 1-3
+# (ADR 0015), so those are the branches M2 will actually take, and a decision
+# function whose losing branches were never executed is not a decision
+# function. This is the check this repo learned to write after G1.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("prim, noise, expected", [
+    (-3.0, 1.0, "regression"),   # the branch wide_qmv is expected to hit at B = 1..3
+    (-0.5, 1.0, "null"),         # a loss inside the noise floor is NOT a regression
+    (0.5, 1.0, "null"),          # nor is a gain inside it a win
+    (3.0, 1.0, "win"),
+    (1.0, 1.0, "null"),          # the boundary belongs to null: a gap the noise could produce proves nothing
+    (-1.0, 1.0, "null"),
+])
+def test_primary_verdict_reads_section_6(prim, noise, expected):
+    assert serve_sub4bit.primary_verdict(prim, noise) == expected
+
+
+@pytest.mark.parametrize("comp, base, noise, expected", [
+    (-3.0, 0.0, 1.0, "negative"),        # composed loses outright
+    (-0.5, 0.0, 1.0, "inconclusive"),    # inside the floor
+    (3.0, 2.5, 1.0, "artifact-alone"),   # arm 2 already beat arm 3 beyond noise
+    (3.0, 0.5, 1.0, "joint"),            # arm 2 did not; the kernel unlocked it
+    (0.0, 5.0, 1.0, "inconclusive"),     # comp inside the floor: base is never consulted
+])
+def test_composed_attribution_reads_section_6(comp, base, noise, expected):
+    assert serve_sub4bit.composed_attribution(comp, base, noise) == expected
+
+
+def test_the_verdict_can_say_loss():
+    """A decision function that can only confirm is not a decision. Both
+    losing outcomes must be reachable."""
+    assert serve_sub4bit.primary_verdict(-10.0, 0.1) == "regression"
+    assert serve_sub4bit.composed_attribution(-10.0, 0.0, 0.1) == "negative"
+
+
+# ---------------------------------------------------------------------------
+# the pre-registered rules the code derived and then dropped
+# ---------------------------------------------------------------------------
+def _mde_deciders(tmp_path, cells, manifest=None):
+    path = tmp_path / "serve_mde.json"
+    serve_sub4bit.write_mde(manifest or {"pins": "ok"}, cells, path)
+    return path
+
+
+def test_the_ab_refuses_when_no_mde_record_exists(tmp_path):
+    """Section 5's non-decider rule decides which cells the A/B may be read
+    as evidence for, so an A/B with no MDE behind it has no such reading.
+    Defaulting every cell to "decider" is the failure this refuses."""
+    with pytest.raises(serve_sub4bit.PreconditionFailed):
+        serve_sub4bit.load_mde({"pins": "ok"}, tmp_path / "absent.json")
+
+
+def test_the_ab_refuses_an_mde_record_from_different_artifacts(tmp_path):
+    path = _mde_deciders(tmp_path, {6: True}, manifest={"pins": "old"})
+    with pytest.raises(serve_sub4bit.PreconditionFailed):
+        serve_sub4bit.load_mde({"pins": "new"}, path)
+
+
+def test_the_mde_record_round_trips_its_cells(tmp_path):
+    path = _mde_deciders(tmp_path, {5: True, 6: False, 8: True})
+    assert serve_sub4bit.load_mde({"pins": "ok"}, path) == {5: True, 6: False,
+                                                            8: True}
+
+
+def _arms(one=100.0, two=100.0, three=100.0, four=100.0):
+    return {"1": [one] * 5, "2": [two] * 5, "3": [three] * 5, "4": [four] * 5}
+
+
+def test_a_non_decider_cell_is_labelled_in_its_ab_row(tmp_path):
+    path = _mde_deciders(tmp_path, {5: True, 6: False})
+    deciders = serve_sub4bit.load_mde({"pins": "ok"}, path)
+    row, code = serve_sub4bit.ab_row(6, _arms(one=110.0), ["1024x2560"],
+                                     10, 10, {}, deciders[6])
+    assert row["decider"] is False
+    assert code == 0                      # not an error: an unreadable win
+    assert row["primary_verdict"] == "win"
+    decided, _ = serve_sub4bit.ab_row(5, _arms(one=110.0), ["1024x2560"],
+                                      10, 10, {}, deciders[5])
+    assert decided["decider"] is True
+
+
+def test_every_ab_row_carries_the_decider_label_even_when_invalid():
+    """A cell that never produced a verdict still says whether it could
+    have: a reader must not have to infer it from the absence of one."""
+    invalid, code = serve_sub4bit.ab_row(6, _arms(), ["1024x2560"], 9, 10,
+                                         {"dtype-x": 3}, False)
+    assert invalid["decider"] is False and code == 1
+    assert invalid["verdict"].startswith("INVALID")
+    withheld, code = serve_sub4bit.ab_row(
+        6, {"1": [100.0] * 5, "2": [100.0, 200.0, 100.0, 100.0, 100.0],
+            "3": [100.0] * 5, "4": [100.0] * 5}, ["1024x2560"], 10, 10, {},
+        True)
+    assert code == 1 and withheld["verdict"].startswith("WITHHELD")
+    assert withheld["decider"] is True
+
+
+def test_the_summary_line_names_the_non_decider_cells():
+    line = serve_sub4bit.non_decider_line({5: True, 6: False, 8: False})
+    assert "B=6" in line and "B=8" in line and "B=5" not in line
+    assert "NON-DECIDER" in line
+    assert "every" in serve_sub4bit.non_decider_line({5: True})
+
+
+# --- the MDE's own row: the comparison it printed and never made -----------
+def _probe_row(shape="2560x4096", routed=True, spread=1.0):
+    return {"shape": shape, "count": 1, "routed": routed,
+            "stock_us": 100.0, "fused_us": 90.0, "stock_spread_pct": spread}
+
+
+def test_a_cell_whose_gain_is_under_its_noise_floor_is_a_non_decider():
+    """Section 5, verbatim: "a cell whose expected gain is below its noise
+    floor is a pre-declared non-decider". The two numbers were printed
+    adjacently and never compared."""
+    under = serve_sub4bit.mde_row(6, [_probe_row()], i_ms=0.0, saving_ms=0.1,
+                                  t_step_ms=10.0, noise_floor_pct=2.0)
+    assert under["expected_gain_pct"] == 1.0 and under["decider"] is False
+    over = serve_sub4bit.mde_row(6, [_probe_row()], i_ms=0.0, saving_ms=0.5,
+                                 t_step_ms=10.0, noise_floor_pct=2.0)
+    assert over["expected_gain_pct"] == 5.0 and over["decider"] is True
+
+
+def test_an_expected_loss_is_a_non_decider_not_a_verdict():
+    row = serve_sub4bit.mde_row(1, [_probe_row()], i_ms=1.0, saving_ms=0.0,
+                                t_step_ms=10.0, noise_floor_pct=2.0)
+    assert row["expected_gain_pct"] == -10.0 and row["decider"] is False
+
+
+def test_the_mde_withholds_a_cell_whose_reference_arm_disagreed():
+    """AGENTS.md: reject any round whose reference samples exceed the class
+    spread limit. _op_probe measured that spread, reported it, and nothing
+    read it - so a saving built on an unstable stock arm fed the gain."""
+    row = serve_sub4bit.mde_row(
+        6, [_probe_row(spread=serve_sub4bit.MAX_SPREAD_PCT + 0.1)],
+        i_ms=0.0, saving_ms=5.0, t_step_ms=10.0, noise_floor_pct=2.0)
+    assert row["verdict"].startswith("WITHHELD")
+    assert "2560x4096" in row["verdict"]
+    assert row["decider"] is False
+    assert "expected_gain_pct" not in row, \
+        "a gain derived from a rejected round is not a number"
+
+
+def test_an_unrouted_shapes_spread_cannot_withhold_a_cell():
+    """A shape the table does not route at this B contributes no saving, so
+    its stock arm's spread says nothing about this cell."""
+    row = serve_sub4bit.mde_row(
+        6, [{"shape": "2560x4096", "count": 1, "routed": False}],
+        i_ms=0.0, saving_ms=5.0, t_step_ms=10.0, noise_floor_pct=2.0)
+    assert "verdict" not in row and row["decider"] is True
+
+
+# --- the corpus pin --------------------------------------------------------
+def test_the_ppl_mode_refuses_a_corpus_that_is_not_the_registered_one(
+        tmp_path, monkeypatch):
+    """Section 7 registers the corpus by sha256. ppl() computed the digest,
+    printed it and never compared it, so any text at that path would have
+    been scored and recorded under the registered hash's authority."""
+    _pins_ok(monkeypatch)
+    _lock_granted(monkeypatch)
+    monkeypatch.setattr(serve_sub4bit, "load_model", _never_load)
+    wrong = tmp_path / "ppl.txt"
+    wrong.write_text("not the wikitext-2 test split")
+    assert serve_sub4bit.main(["--ppl", "--corpus", str(wrong)]) == \
+        serve_sub4bit.EXIT_PRECONDITION
+
+
+def test_the_registered_corpus_digest_is_the_one_in_the_findings_doc():
+    doc = (Path(serve_sub4bit.__file__).resolve().parents[1] / "docs"
+           / "research" / "2026-08-15-sub4bit-serve-findings.md").read_text()
+    assert serve_sub4bit.PPL_CORPUS_SHA256 in doc
+
+
+def test_the_round_count_is_the_registered_one():
+    """Section 3 registers 5 rounds per cell; _op_probe took 7."""
+    doc = (Path(serve_sub4bit.__file__).resolve().parents[1] / "docs"
+           / "research" / "2026-08-15-sub4bit-serve-findings.md").read_text()
+    assert f"Rounds: {serve_sub4bit.ROUNDS} per B cell" in doc
+    import inspect
+    src = inspect.getsource(serve_sub4bit._op_probe)
+    assert "range(ROUNDS)" in src and "range(7)" not in src
+
+
+# ---------------------------------------------------------------------------
+# the registration and the code say the same thing
+#
+# Each of these is a degree of freedom the harness always had and section 4
+# never named. A measurement harness's freedoms are registered in writing or
+# removed from the code; an unregistered one is a knob nobody agreed to.
+# ---------------------------------------------------------------------------
+def _findings_doc() -> str:
+    return (Path(serve_sub4bit.__file__).resolve().parents[1] / "docs"
+            / "research" / "2026-08-15-sub4bit-serve-findings.md").read_text()
+
+
+def test_the_whitelist_matches_the_registration():
+    """One spelling of the rule, in the doc, checked against the code. Two
+    spellings is how the doc came to say `prefill-*` and `m-*-outside-
+    dispatch` while the code whitelisted any `m-` reason plus forced-stock."""
+    import ast
+    import re
+
+    found = re.search(r"WHITELIST_PREFIXES = (\([^)]*\))", _findings_doc())
+    assert found, "the findings doc must register the whitelist verbatim"
+    assert ast.literal_eval(found.group(1)) == \
+        serve_sub4bit._WHITELIST_PREFIXES
+
+
+def test_the_only_m_reason_is_the_routing_table_declining_the_cell():
+    """The registration whitelists the `m-` prefix, which is wider than the
+    one reason that exists. This is what keeps the widening honest: no other
+    `m-` reason may appear and be absorbed without anyone deciding it."""
+    import re
+
+    a = make_holder()
+    with patched(a) as patch:
+        for m in B_GRID:
+            mx.eval(a(x_rows(m)))
+        m_reasons = [r for r in patch.fallbacks if r.startswith("m-")]
+    assert m_reasons, "the grid must exercise the outside-dispatch branch"
+    for reason in m_reasons:
+        assert re.fullmatch(r"m-\d+-outside-dispatch-\d+x\d+", reason), reason
+
+
+def test_a_bias_term_falls_back_and_invalidates_the_round():
+    """The kernel has no bias path, so a biased layer must run stock - and
+    because `bias-term` is deliberately NOT whitelisted, a round in which it
+    happened is invalid rather than quietly part-stock."""
+    holder = Holder()
+    holder.proj = nn.QuantizedLinear(D_IN, D_OUT, bits=BITS, group_size=64,
+                                     bias=True)
+    holder.set_dtype(mx.float16)
+    mx.eval(holder.parameters())
+    with patched(holder) as patch:
+        mx.eval(holder(x_rows(dispatched_m())))
+        assert patch.calls == 0
+        assert patch.fallbacks.get("bias-term") == 1
+        assert patch.hard_fallbacks() == {"bias-term": 1}
+    assert "bias-term" in _findings_doc()
+
+
+def test_the_fp16_cast_of_both_checkpoints_is_registered():
+    """load_model casts every parameter of both artifacts to fp16, which is
+    what makes arm 1 eligible at all; it is applied to every arm equally and
+    the doc has to say the numbers describe the cast checkpoints."""
+    import inspect
+
+    assert "set_dtype(mx.float16)" in inspect.getsource(
+        serve_sub4bit.load_model)
+    assert "set_dtype" in _findings_doc()
+
+
+def test_the_corpus_location_is_recorded():
+    """bench/.corpus is gitignored, so the file exists per worktree and the
+    doc is the only place that can say where it comes from."""
+    assert "`bench/.corpus/` is gitignored" in _findings_doc()
+
+
+# ---------------------------------------------------------------------------
+# one copy of the timing discipline
+#
+# AGENTS.md: "One copy of the discipline, so a timing rule amended in one gate
+# cannot silently stay old in another." _op_probe had its own MIN_SAMPLE_MS,
+# its own spread_pct and its own calibrate-and-batch loop, all of which
+# bench/interleave.py and bench/machine_state.py already own.
+# ---------------------------------------------------------------------------
+def test_the_harness_owns_no_second_copy_of_the_timing_rules():
+    import inspect
+
+    src = inspect.getsource(serve_sub4bit)
+    assert "def spread_pct" not in src
+    assert "MIN_SAMPLE_MS =" not in src
+    assert serve_sub4bit.spread_pct is serve_sub4bit.machine_state.spread_pct
+
+
+def test_the_op_probe_times_through_the_shared_engine(monkeypatch):
+    """Counted, not read off the source: the probe must calibrate once and
+    then sample both arms ROUNDS times through interleave.dispatch."""
+    calls = []
+
+    def _fake_dispatch(build_one, copies):
+        calls.append(copies)
+        return 0.010                      # already past MIN_SAMPLE_MS
+
+    monkeypatch.setattr(serve_sub4bit.interleave, "dispatch", _fake_dispatch)
+    probe = serve_sub4bit._op_probe(BITS, d_in=128, d_out=64, m=1)
+    assert len(calls) == 1 + 2 * serve_sub4bit.ROUNDS
+    assert set(calls) == {8}, "one calibration, then every sample at that size"
+    assert probe["stock_spread_pct"] == 0.0
+
+
+def test_the_expected_gain_is_labelled_as_the_cross_pass_composition():
+    """_op_probe's saving and arm 2's per-step time come from separate
+    passes minutes apart, which is the composition interleaving exists to
+    forbid; the row says so rather than reading as a single measurement."""
+    row = serve_sub4bit.mde_row(6, [_probe_row()], i_ms=0.0, saving_ms=0.5,
+                                t_step_ms=10.0, noise_floor_pct=2.0)
+    assert row["composition"] == "cross-pass"
+    assert "cross-pass" in _findings_doc()

@@ -47,6 +47,10 @@ Both quantized 3-bit arms and the control share one pinned 3-bit artifact; arm 3
 - Rounds: 5 per B cell, arms interleaved [1, 2, 3, 4] inside every round; separate passes measure the clock, not the kernels (AGENTS.md).
 - Canary and withholding: arm 2 is the round canary; any cell whose arm-2 spread exceeds `machine_state.MAX_SPREAD_PCT` (10%) is withheld, not published.
 - Quiet window: timing modes refuse to run unless `machine_state.idle_check` is clean before and after, and T8 rules that no timing is recorded outside a coordinated quiet window.
+  A busy machine is a TRANSIENT refusal and exits `EXIT_NOT_IDLE` (9), so a detached runner waits and comes back; a pin mismatch, a moved dispatch boundary and a corpus that is not the registered one are PERMANENT and exit `EXIT_PRECONDITION` (8), which no amount of waiting heals.
+- Machine discipline, registered 2026-08-16 (task I1 of the audit-amendments plan): every timing mode and the perplexity mode take the one machine-wide `machine_state.MeasurementLock` before they sample anything or load anything, and the timed modes additionally carry a `phys_footprint` budget (`--budget-gb`, default 24.0 decimal GB) and the machine-wide available-memory gate, both checked at the start of every B cell and after every arm.
+  Smoke stays lock-free because it times nothing.
+  Every refusal code is `bench/memory_guard.py`'s, shared with the serving calibration and the boundary-pricing probe rather than numbered here: per-harness numbering is what let two "protected" runs collapse the machine on 2026-08-15.
 - Artifact integrity: every non-hidden file in each model directory must appear in `PINNED-HASHES.txt` and hash-match before any mode runs; a mismatch or an unlisted file is a refusal, not a warning, because an unlisted tokenizer or config would load unverified while the numbers claim to bind to the manifest.
 - Smoke never dispatches a shape outside the registered zone: any grid cell where the pack's boundary disagrees with the pinned zone at any intercepted shape is skipped loudly until the two agree, and smoke is rerun after any change that moves either side.
 - Sampling is argmax; all streams share one prompt, so decode cost is shape-determined and identical streams change nothing the clock can see.
@@ -86,8 +90,33 @@ It is now summed per wrapped site instead of multiplied out as one whole-model n
   For eligible calls the batch M is the product of the leading dimensions, and the routing question is delegated entirely to `should_dispatch(M)`.
 - Eligibility beyond shape: affine mode, bits in `SUPPORTED_BITS`, group size 64, fp16 activations and scales, d_in divisible by 64.
   Every fallback is counted by reason; the only whitelisted reasons are `prefill-*` and `m-*-outside-dispatch`, and any other fallback in a fused round invalidates the round.
+  That whitelist is superseded by the 2026-08-16 amendment at the end of this section and is left standing here because it is what this pre-registration actually claimed.
 - Exclusions, applied to every arm equally: the embedding and the tied lm_head stay stock (they are not `QuantizedLinear` modules, and the vocab-sized output shape sits outside the pack gate's verified sweep); attention stays stock (the KV cache is fp16 and no KV kernel is under test here).
 - The expected dispatch count is exact: 36 layers x 7 wrapped projections = 252 fused calls per decode step when B is in the zone, 0 when it is not; smoke asserts equality, not positivity.
+
+### Amendment, 2026-08-16: three degrees of freedom the code always had and this section never named
+
+Found by the merge gate on the `metal-runner` branch and written before any A/B timing exists, under the same rule the win-zone amendment above followed: a measurement harness's freedoms are registered in writing or removed from the code, never left implicit.
+None of the three is new; all three are in the harness as merged, and this amendment is the registration that was missing.
+
+**The bias-term exclusion.**
+`_RoutedLinear._ineligible` returns the reason `bias-term` when the wrapped layer carries a bias, so that layer runs stock in every arm.
+It is there because the kernel computes x @ W.T and has no bias path at all, so routing a biased layer would silently drop the bias and produce a wrong answer; it is a correctness limit, not a tuning choice.
+What it could bias: nothing in this experiment, because all seven of Qwen3-4B's wrapped projections are bias-free and the counter stays at zero.
+It would matter for a model whose projections carry biases, and the protection there is that `bias-term` is deliberately NOT whitelisted below, so a round in which it fired is INVALID rather than a quietly part-stock arm 1.
+
+**The whitelisted fallback reasons.**
+This section originally said the only whitelisted reasons are `prefill-*` and `m-*-outside-dispatch`, and the code whitelists a wider set.
+The registration is now the code's tuple, spelled once, here, and `tests/test_serve_sub4bit.py` reads this line: WHITELIST_PREFIXES = ("prefill-", "m-", "forced-stock").
+`forced-stock` has to be whitelisted or arm 4 - the control arm section 2 requires - would invalidate every round it ever ran; that is a necessity of the four-arm design this section simply failed to carry over.
+The `m-` prefix is wider than `m-*-outside-dispatch`, and the reason the older spelling stopped matching is the per-shape routing amendment above: the reason string became `m-{M}-outside-dispatch-{d_out}x{d_in}`, which no longer ends where the old pattern expected.
+What the widening could bias: a future eligibility reason beginning with `m-` would be whitelisted without anyone deciding it should be, and arm 1 could then be part-stock inside a published round.
+The check that keeps it honest is a test asserting that the wrapper emits no `m-` reason other than the routing table declining the cell.
+
+**The fp16 cast of both checkpoints.**
+`load_model` calls `model.set_dtype(mx.float16)` on both pinned artifacts.
+It is there because the artifacts are bf16-headed while the kernel, the eligibility check (`x.dtype != mx.float16`) and the frozen contract are all fp16: without the cast arm 1 would route nothing and the arms would not share a lane width.
+What it could bias: not the comparison, since the same cast is applied to all four arms and both artifacts, but it does mean every number this harness reports - timings and the section 7 perplexity pair alike - describes an fp16 cast of the pinned checkpoints rather than the checkpoints as stored.
 
 ## 5. The minimum detectable effect, derived before the A/B
 
@@ -105,6 +134,21 @@ Every quantity below is per decode step, never per token: at B > 1 a step produc
 - Expected fractional gain at B: gain(B) = (saving(B) - i) / t_step(B), where t_step(B) is arm 2's measured per-step time; the same fraction applies to the aggregate and the per-stream metric because they share the denominator.
 - Noise floor: arm 2's round-to-round per-step spread at that B.
 - Decision rule, pre-stated: a cell whose expected gain is below its noise floor is a pre-declared non-decider; if every in-zone cell is a non-decider and the reshaping arithmetic (longer G, more rounds) cannot bring the floor under the effect, the honest report is that the arithmetic answers the question, and the A/B runs as confirmation only.
+
+### Amendment, 2026-08-16: the decision rule is now enforced, and the MDE is an upper bound for a second reason
+
+Two things about this section, written before any MDE number exists.
+
+The decision rule above was derived and never applied.
+`--mde` printed the expected gain and the noise floor one line apart and compared them nowhere, so every A/B cell read as evidence whatever the arithmetic said.
+From this amendment the comparison is made per cell, recorded as `decider` in the MDE's own row, carried to `--ab` through `bench/.cache/serve_mde.json` under the pins it was derived on, and stamped on every A/B row the run publishes - valid, invalid or withheld alike.
+`--ab` refuses to start when that record is absent or was derived against different artifacts, because defaulting a cell to "decider" is the reading this rule exists to prevent.
+A routed shape whose stock arm's own round-to-round spread exceeds `machine_state.MAX_SPREAD_PCT` withholds its whole cell and the cell publishes no expected gain at all; that spread was measured and reported from the first version of the harness and nothing read it.
+
+The known residual above named one reason the expected gain is an upper bound.
+There is a second: `saving(B)` comes from `_op_probe`'s own interleaved rounds and `t_step(B)` from a separate decode pass minutes later, so the ratio composes two numbers measured across passes - the composition interleaving exists to forbid, because a power-state excursion between them moves the denominator without touching the numerator.
+It is labelled rather than hidden: every MDE row carries `"composition": "cross-pass"`, and the number is to be read as an upper bound for this reason as well.
+Computing it from a single interleaved pass would be a redesign of the MDE and is not made silently here.
 
 Measured inputs to the derivation (from `bench/serve_sub4bit.py --mde`, quiet window only):
 
@@ -145,6 +189,9 @@ Corpus record, written before either perplexity number exists:
 
 - File: `/Users/vlad/kernelverify/bench/.corpus/ppl.txt`, the wikitext-2-raw-v1 test split (`wiki.test.raw` from the dataset author's mirror at wikitext.smerity.com), 1,290,590 bytes.
 - sha256: `173c87a53759e0201f33e0ccf978e510c2042d7f2cb78229d9a50d79b9e7dd08`.
+- `bench/.corpus/` is gitignored, the same convention as `bench/.models/`, so the file never travels through a merge and each worktree that scores perplexity holds its own copy.
+  That is exactly why the harness checks the digest rather than the path (registered 2026-08-16, task I1): the path is per worktree and only the content identifies the corpus.
+  A file that does not hash to the sha256 above is refused with `EXIT_PRECONDITION` before either model is loaded.
 - Both artifacts tokenize it identically: 299,078 tokens against the 98,304 the 96 registered windows need.
 - A plumbing check ran before this record: tokenizer identity plus a 2-window scoring pass on the 3-bit model only; the 4-bit side was deliberately not computed, so no preview of the registered pair exists.
 
