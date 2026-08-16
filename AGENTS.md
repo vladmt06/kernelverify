@@ -13,21 +13,37 @@ Vlad's global instructions still apply; this file adds the project's layout, how
 - The core reframing: escape is a property of the pair (bug, test case), not of a bug alone.
   The differentiator: test policies are scored by mutation against a synthesised fault population that provably contains the published corpus faults.
 - The current battery covers three axes: shape and dtype, input scale, and structured input modes (opposed signs, near zero, constant rows).
-  The shipped policy is boundary coverage of single features, then feature pairs, then random exploration; it catches 100% of the viable fault population at 16 evaluations per operator.
+  The shipped policy is boundary coverage of single features, then feature pairs, then random exploration.
+  Its 100% claim belongs to ADR 0008 and is exact there: zero misses over 40 seeded runs at 16 evaluations per operator, scored against the 49 viable faults of the 56-entry catalogue ADR 0008 measured.
+  The catalogue has since grown to 65 entries and no committed record re-scores the policy against the enlarged population, so the claim holds at ADR 0008's population and nowhere else.
 
 ## Layout
 
 - `kernelverify/reference/kernels.py` - parameterised kernels, correct by default; keyword seams introduce faults.
   Single source for both the corpus ports and the mutation catalogue, so the synthetic fault space provably contains the published faults.
-- `kernelverify/mutation/catalogue.py` - the fault catalogue (45 entries), corpus faults marked `from_corpus`.
+- `kernelverify/mutation/catalogue.py` - the fault catalogue (65 entries), corpus faults marked `from_corpus`.
 - `kernelverify/tolerance/contract.py` - the admissible-implementation contract: the class of kernels the verifier promises never to flag, plus the generator that samples it.
   Read the module docstring before changing any tolerance; the exclusions are what keep precision faults faults.
 - `kernelverify/tolerance/floor.py` - the shipped conditioning-aware tolerance.
   Its ensemble is a prefix of the contract population, not a hand-written list.
+- `kernelverify/battery/` - case selection: which cases run, and the verdicts every scoring run reads.
+  `core.py` owns the case space, the input modes and the verdict cache with its fingerprint; `policies.py` holds the shipped boundary-then-pairs-then-random policy and the rivals it is scored against.
+- `kernelverify/schemas/native_ops.py` - the native operator registry: per-operator schema, fp64 reference, tolerance and augmentation, so native operators run through the same battery machinery as the corpus ports.
+  Its standing rule is that every native reference is cross-checked in tests against an independent implementation, MLX's own where one exists.
+- `kernelverify/pack/` - the three hand-written Metal kernels and the dispatch decision in front of them.
+  Only `wide_qmv.py` is live, and its routing table starts at M = 5, so it routes nothing at batch 1.
+  `kv_attention.py` is demoted: the end-to-end A/B in `docs/research/2026-08-15-mlx-e2e-findings.md` measured it losing 1-2% of decode tokens/s at every cell and recommended against shipping it.
+  `moe_dispatch.py` is unused on the target model: the Qwen3-4B geometry recorded in `bench/calibrate_quant_serving.py` is dense (`model_type` qwen3, seven per-layer projections, no experts).
 - `kernelverify/pack/wide_qmv.py` - the wide-tile quantized GEMV kernel and its dispatch decision.
   `should_dispatch(m, bits, d_out, d_in)` consults the routing table; it never carries a default window of its own.
 - `kernelverify/pack/routed_windows.py` - the routing table, derived at import from the committed pricing recording and pinned to that recording's sha256, the kernel source's sha256 and the launch config it was priced at.
   Nothing here is hand-written except the exclusions and the pins, so shipped routing and recorded evidence cannot drift apart.
+- `kernelverify/runners/` - the backends that execute a candidate kernel and hand its output to the oracle.
+  `metal.py` compiles and dispatches raw Metal shading language inside a worker process the candidate cannot take down with it; `device.py` holds the buffer pool whose absence was the per-case allocation leak; `specialize.py` is template substitution, the door a generated candidate would enter through.
+  Importing the package does not import Metal, so a machine without a GPU can still load the harness.
+- `kernelverify/extraction/` - captures the final MSL that MLX actually runs, and validates the capture.
+  A certificate about "the kernel MLX runs" is worthless if it describes the template instead, so the capture worker rebinds file descriptor 1 itself and one process serves exactly one specialization.
+- `kernelverify/report/` - `certificate.py` says what a kernel's verification proves, splitting byte-bound hashes (what was verified) from protocol-bound assertions (what reproduces); `matrix.py` is the per-chip matrix that decides which measured rows a reader is allowed to believe, and says why for the ones it refuses.
 - `bench/cpu_ports.py` - corpus kernel name to parameterisation mapping, plus each buggy kernel's correct control.
 - `bench/measure_escape.py` - escape-rate measurement against the vendored corpus.
   Frozen: reruns must reproduce the ADR 0001 tables exactly.
@@ -54,6 +70,12 @@ Vlad's global instructions still apply; this file adds the project's layout, how
 - `bench/memory_guard.py` - the footprint budget, the phys_footprint reader, the available-memory gate and the numbered refusal exits, shared by every harness that can be Jetsam-killed.
   Extracted from `calibrate_quant_serving.py` on 2026-08-15 so the pricing probe enforces the same budget by the same code, not by a second copy with its own numbering.
 - `bench/pack_wide_qmv.py` - the kernel pack's correctness gate: the shared sampler, the E2E dispatch shapes, and per-shape coverage at exactly the tile widths the pack routes to each of them.
+- `bench/pack_kv_attention.py` and `bench/pack_moe_dispatch.py` - the other two pack gates, in the same verify-then-time order and under the same interleaving discipline.
+  Both arms are verified before either is timed, so a ratio compares two contract-passing implementations rather than one that merely happens to be faster.
+- `bench/emit_pack_certificates.py` - one certificate per specialization: it runs the pack gates' `verify()`, captures the generated translation unit in a fresh process, behaviourally validates it against the live MLX arm, and hashes what it certified.
+  It writes into `bench/.certificates/` beside a `MANIFEST.md`, and makes no performance claim.
+- `bench/serve_sub4bit.py` - the four-arm end-to-end serving A/B on 3-bit weights (ours-routed, stock 3-bit, stock 4-bit, and a forced-stock control that evaluates eligibility and discards it), pre-registered in `docs/research/2026-08-15-sub4bit-serve-findings.md`.
+  Built and never run: sections 9 and 10 of that document are still empty placeholders.
 - `bench/price_qmv_boundary.py` - the routing-boundary pricing probe (verify-then-time, interleaved arms, refusal-gated), with its pre-registered rule in the module docstring: what makes a cell WIN, and the only way a routed window may widen.
   ADR 0015 is the reading of its 2026-08-15 run.
 - `bench/calibrate_k.py` - measures what the admissible-implementation contract demands of K, and how many ensemble members it takes to represent that contract.
@@ -83,7 +105,8 @@ Vlad's global instructions still apply; this file adds the project's layout, how
   Read these before changing any method.
 - `vendor/gpuemu-corpus/` - vendored unmodified at the commit pinned in `vendor/PINNED.txt`.
   Never edit anything under `vendor/`.
-- Empty packages (`battery`, `detectors`, `runners`, ...) are planned components, not dead code.
+- Empty packages: `corpus`, `detectors` - placeholders for planned components, not dead code.
+  Every other package under `kernelverify/` carries real modules and is described above.
 
 ## Running
 
@@ -94,9 +117,11 @@ cd /Users/vlad/kernelverify
 .venv/bin/python bench/calibrate_k.py --n-random 24   # instant warm, ~20 min cold, must reproduce ADR 0005
 .venv/bin/python bench/calibrate_quant_bits.py        # ~3 min, must reproduce ADR 0009
 .venv/bin/python bench/calibrate_quant_device.py      # ~7 min, needs the Metal GPU, must reproduce ADR 0016
-.venv/bin/python bench/calibrate_quant_serving.py     # ~45 min, needs the Metal GPU and the pinned artifact, reproduces ADR 0013 except the factored-groups column (ADR 0016)
+.venv/bin/python bench/calibrate_quant_serving.py     # ~45 min, needs the Metal GPU and the pinned artifact, must reproduce ADR 0013's records; interpretation per ADR 0014/0016
 .venv/bin/python -u bench/derive_repaired_member_column.py   # ~70 min, CPU only, ~16 GB steady but budget 30 GB: see below; rewrites ADR 0016's committed column
 .venv/bin/python -u bench/derive_prerepair_device_records.py # ~7 min, needs the Metal GPU; rewrites ADR 0016's detection-price "before" records
+.venv/bin/python bench/emit_pack_certificates.py      # needs the Metal GPU; rewrites bench/.certificates/ and its MANIFEST.md
+.venv/bin/python -u bench/serve_sub4bit.py --ab       # needs the Metal GPU and both pinned artifacts; fills sections 9-10 of the sub4bit findings doc
 ```
 
 - `derive_repaired_member_column.py` is derived, not measured: it re-reads the committed ADR 0013 records with the repaired `factored-groups` column recomputed, and every ADR 0016 number comes from its output.
@@ -111,8 +136,9 @@ cd /Users/vlad/kernelverify
 - The environment needs `torch`, which only `gelu[variant=erf]` uses; a worktree venv created without it fails part-way through a verdict build.
 - It also needs `mlx==0.32.0` and `mlx-lm==0.31.3`, pinned across worktrees so binding comparisons stay on one toolchain.
   Without mlx, the mlx-dependent test modules are skipped whole or fail to collect, so the suite under-reports badly.
-  Skipped modules hide their contents rather than their count, so quote test counts from a fully equipped venv only; main passes 787 in 81 s as of 2026-08-16.
-  Fully equipped means `pyobjc` as well as `mlx`: without the Metal bindings the runner-backed pack tests fail rather than skip, so a venv with mlx alone reports 468 passed and 30 skipped and is not a count anyone should quote.
+  Skipped modules hide their contents rather than their count, so quote test counts from a fully equipped venv only; `.venv/bin/python -m pytest -q` reported 810 passed in 82 s warm on 2026-08-16, and 107 s on the first cold run of the session.
+  There is no fast subset yet: the repository has no pytest configuration file and no test carries a `slow` or `gpu` marker, so `-m "not slow"` deselects nothing and the full suite is the only time worth quoting.
+  Fully equipped means `pyobjc` as well as `mlx`: without the Metal bindings the runner-backed pack tests fail rather than skip, so a venv with mlx alone reports a partial count nobody should quote.
 
 The machine baseline, in this order, because each step writes the denominators the next one divides by:
 
@@ -143,6 +169,8 @@ bench/start_binding_run.sh     # arms a launchd job, then quit Terminal
 
 - Every method change needs a measurement behind it and an ADR entry recording what forced it.
   Pre-register the next upgrade and adopt it only when a measured miss demands it, the way ADR 0002 pre-registered pairwise coverage and ADR 0003 adopted it.
+- One heavy measurement on this machine at a time, and the harness takes the lock rather than the caller: `machine_state.MeasurementLock` is a single `fcntl.flock` on a fixed path that every heavy harness acquires for itself.
+  Long runs go detached so no interactive session competes with them (ADR 0010), but `bench/start_binding_run.sh` is wired to one harness only - it arms `bench/detached_run.py`, whose `HARNESS` constant is `bench/measure_baselines.py` - so every other long harness is started by hand in a quiet window until that is generalised.
 - Never cite the corpus's `benchmark_verdict` fields as evidence; they are hardcoded "pass" and were never computed.
 - Any 100% claim must be backed by exact miss counts, not by a rounded table cell.
 - Grow the fault catalogue faster than the policy adapts; the numbers stay honest only while the population outpaces the tuning.
@@ -199,6 +227,9 @@ bench/start_binding_run.sh     # arms a launchd job, then quit Terminal
 - A K derived on one harness's shapes is not the shipped K.
   The device harness derives K from three synthetic shapes and prints `shipped K`; the serving grid's six real shapes are not among them, and on 2026-08-15 the two disagreed (2.766 against 3.120 at 2560x9728), so taking the printed line would have shipped a K the next serving run refuses through its own DEMAND MISS branch (ADR 0016).
   Read every committed record set before moving K, and remember that passing gates are not the check: they passed at the K that would have refused.
+- RSS is not the number Jetsam kills on; phys_footprint is.
+  `bench/memory_guard.py` budgets and refuses on phys_footprint, and `footprint_line()` leads with it, but `bench/calibrate_quant_serving.py` still narrates progress through `rss_line()` at seven print sites, the last of which is labelled `peak footprint:` and prints RSS.
+  Read a progress line's footprint, never its RSS, until those call sites move.
 - A cache keyed on member NAMES cannot see a member's arithmetic change.
   The verdict cache and `contract_k.pkl` fingerprint the ensemble by label; the ADR 0016 repair kept the label and moved the floor, and `score_oracles` would have reported the pairwise member's verdicts as the chained member's; `QUANT_ENSEMBLE_VERSION` in `kernelverify/schemas/quant_contract.py` exists to be bumped for exactly that, the way `CONTRACT_VERSION` already was for the unquantized contract.
 - `mx.quantize` packs one contiguous little-endian bit stream per row, not 32 // bits values per word; the two agree only when bits divides 32.
