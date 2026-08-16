@@ -287,6 +287,39 @@ pre-ruling reading). The committed evidence lives at
 ``bench/reinterpret_serving_adequacy.py`` derives the ruled reading from it
 without touching it.
 
+AMENDMENT, 2026-08-16 (fifth): the child's lifetime is bound to the parent's
+---------------------------------------------------------------------------
+The second amendment built the isolation boundary and left one hole in it,
+recorded at the time as a TODO rather than fixed: a parent killed mid-child
+(Jetsam, or a coordinator stopping a lane) left the child running with the
+GPU and its whole footprint, while the machine-wide lock the parent held was
+released by that same death - so the next harness acquired the freed lock and
+started measuring beside the orphan. That is the two-large-Pythons failure
+this harness exists to prevent, reached from the opposite direction, and it
+defeats the lock rather than the budget.
+
+Two halves, and neither is sufficient alone:
+
+1. The child captures ``os.getppid()`` before any work and re-reads it where
+   it already re-reads the budget, between records. When the parent dies the
+   child is reparented (to launchd on macOS), so the captured value stops
+   being true - a free signal at a point where stopping is still cheap. It
+   stops with EXIT_ORPHANED, its own number, because exit 1 already means
+   measured-and-stopped and would read as the opposite of what happened.
+
+2. The parent spawns with ``start_new_session=True`` and sweeps the child's
+   process group in a ``finally``. This is the path for a parent that merely
+   STOPS - a raised refusal, a KeyboardInterrupt, a wall-cap timeout - where
+   the child never sees a reparenting because the parent never died. It also
+   repairs a behaviour the Popen switch introduced: ``subprocess.run`` killed
+   its child on timeout, ``proc.wait(timeout=)`` does not.
+
+The session flag is a PRECONDITION of the group sweep, not a companion to it,
+so the reaper reads the group back and compares before signalling: with the
+flag dropped the child sits in the parent's group, its pid names no group,
+and ``killpg`` would raise ESRCH into the swallow that every reaper needs for
+the child that legitimately just exited. The hole would be silent.
+
 Machine discipline
 ------------------
 One measuring lane at a time: the full run executes only in the
@@ -687,17 +720,17 @@ def footprint_line() -> str:
     return f"footprint {current:.2f} GB (peak {peak:.2f} GB); {rss_line()}"
 
 
-def summary_line(meta: dict) -> str:
+def summary_line(footprint_peak_gb: float, rss_peak_gb: float) -> str:
     """The closing line of a run, from an explicit reading rather than a call.
 
     It used to be `print(f"peak footprint: {rss_line()}")`, which labelled
     itself `peak footprint` and printed `ru_maxrss` - the one number in the
     whole log that a reader is most likely to trust and least able to act on.
-    Taking a dict makes the two peaks nameable and the line testable without
-    allocating 22 GB to produce one.
+    Taking the two peaks as arguments names them at the call site and makes the
+    line testable without allocating 22 GB to produce one.
     """
-    return (f"peak footprint: {meta['footprint_peak_gb']:.2f} GB; "
-            f"rss {meta['rss_peak_gb']:.2f} GB")
+    return (f"peak footprint: {footprint_peak_gb:.2f} GB; "
+            f"rss {rss_peak_gb:.2f} GB")
 
 
 # The modules a measured record's value passes through: the harness itself,
@@ -793,6 +826,7 @@ from memory_guard import (  # noqa: E402
     EXIT_LOCK_HELD,
     EXIT_LOW_MEMORY,
     EXIT_NO_DEVICE,
+    EXIT_ORPHANED,
     BudgetExceeded,
     BudgetGuard,
     LowMemoryRefusal,
@@ -907,34 +941,55 @@ def _child_death_reason(returncode: int) -> str:
 
 
 def _reap(proc) -> None:
-    """Leave no child behind, and never signal our own group doing it.
+    """Leave no child behind, and no descendant of it either.
 
     The child's getppid check is the backstop for a parent that dies without
     running this; this is the path for a parent that merely STOPS - a raised
     refusal, a KeyboardInterrupt, a wall-cap timeout - where the child would
     otherwise keep the GPU and keep allocating against a lock that no longer
-    exists.
-
-    The pgid passed to killpg is the child's own pid, never os.getpgid(pid).
-    Reading the group back would return OUR group if start_new_session were
-    ever dropped, and the kill would then take out the parent, its siblings
-    and the foreground job. The assertion makes that failure loud and inert
-    rather than lethal.
+    exists. SIGTERM first so the child can unwind, SIGKILL five seconds later
+    if it did not.
     """
     if proc.poll() is not None:
         return
-    if proc.pid == os.getpgrp():
-        return  # inconceivable, and not worth being wrong about
+    _signal_child(proc, signal.SIGTERM)
     try:
-        os.killpg(proc.pid, signal.SIGTERM)
         proc.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        _signal_child(proc, signal.SIGKILL)
+
+
+def _signal_child(proc, signum) -> None:
+    """The child's whole process group when it leads one, the child alone when
+    it does not.
+
+    The group is the target because anything the child spawns inherits it, and
+    the pgid naming that group is the child's own pid - true only because
+    start_new_session made the child a group leader. That flag is a
+    PRECONDITION, so it is read back and compared rather than assumed: drop it
+    and the child sits in OUR group, its pid names no group at all, and killpg
+    raises ESRCH - which a reaper must swallow, because the child it is chasing
+    may legitimately have just exited. The hole would therefore be silent, and
+    it is the exact hole this reaper exists to close.
+
+    Comparing the group is safe. PASSING the read-back value to killpg is the
+    lethal version, because with the flag dropped it names the parent's own
+    group and takes out the parent, its siblings and the foreground job.
+    """
+    try:
+        leads_own_group = os.getpgid(proc.pid) == proc.pid
+    except (ProcessLookupError, PermissionError):
+        return
+    try:
+        if leads_own_group:
+            os.killpg(proc.pid, signum)
+        else:
+            print(f"  reaper: child {proc.pid} does not lead its own process "
+                  f"group - start_new_session was dropped, so only the child "
+                  f"itself can be stopped", flush=True)
+            os.kill(proc.pid, signum)
     except (ProcessLookupError, PermissionError):
         pass
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
 
 
 def spawn_measurement(cell: str, task: dict, budget_gb: float,
@@ -1043,6 +1098,13 @@ def child_main(args) -> int:
     except BudgetExceeded as exc:
         print(f"  child {cell}: BUDGET REFUSAL - {exc}", flush=True)
         return EXIT_BUDGET_REFUSAL
+    except Orphaned as exc:
+        # Named and numbered like every other refusal. Without this branch the
+        # orphan stop leaves a traceback and exit 1, and 1 already means
+        # measured-and-stopped - the coordinator would read the one condition
+        # that means "nothing was measured" as the one that means it was.
+        print(f"  child {cell}: ORPHAN STOP - {exc}", flush=True)
+        return EXIT_ORPHANED
     current, peak = phys_footprint_gb()
     write_child_result(Path(args.child_out), {
         "payload": payload,
@@ -2163,8 +2225,8 @@ def _run_measured_steps(args, shapes, spawn, saved, steps, resumed,
         "records": records,
     }, default=float))
     print(f"\nrecords: {OUT_PATH}")
-    print(summary_line({"footprint_peak_gb": phys_footprint_gb()[1],
-                        "rss_peak_gb": rss_gb()[1]}))
+    print(summary_line(footprint_peak_gb=phys_footprint_gb()[1],
+                       rss_peak_gb=rss_gb()[1]))
     if resumed:
         print(f"RESUMED steps (not re-measured in this process): {resumed}; "
               f"ADR 0013 must say so")

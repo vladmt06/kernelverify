@@ -10,6 +10,7 @@ gate reads it.
 
 import ast
 import inspect
+import json
 import math
 import os
 import struct
@@ -28,6 +29,7 @@ from calibrate_quant_serving import (
     EXIT_LOCK_HELD,
     EXIT_LOW_MEMORY,
     EXIT_NO_DEVICE,
+    EXIT_ORPHANED,
     BudgetExceeded,
     BudgetGuard,
     LowMemoryRefusal,
@@ -93,12 +95,19 @@ def test_no_progress_line_prints_rss_alone():
                 offenders.append(node.lineno)
     assert offenders == [], offenders
 
-    # and the demotion is real, not a rename: rss_line still has exactly one
-    # caller, footprint_line, which is what keeps RSS visible as a second number
-    callers = [n.lineno for n in ast.walk(tree)
-               if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-               and n.func.id == "rss_line"]
-    assert len(callers) == 1, callers
+    # and the demotion is real rather than a rename: the ONE surviving caller is
+    # footprint_line, which is what keeps RSS visible as a second number. Named
+    # rather than counted, because a count of 1 would also be satisfied by the
+    # call moving somewhere RSS leads again.
+    callers = set()
+    for outer in ast.walk(tree):
+        if not isinstance(outer, ast.FunctionDef):
+            continue
+        for inner in ast.walk(outer):
+            if (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
+                    and inner.func.id == "rss_line"):
+                callers.add(outer.name)
+    assert callers == {"footprint_line"}, callers
 
 
 def test_footprint_line_still_carries_rss_second():
@@ -113,7 +122,7 @@ def test_footprint_line_still_carries_rss_second():
 def test_the_final_summary_reports_the_footprint_peak_not_ru_maxrss():
     """The closing line was labelled `peak footprint:` and printed ru_maxrss -
     a mislabel, and the single most misleading number in the whole log."""
-    line = harness.summary_line({"footprint_peak_gb": 22.4, "rss_peak_gb": 2.4})
+    line = harness.summary_line(footprint_peak_gb=22.4, rss_peak_gb=2.4)
     assert line.startswith("peak footprint: 22.4")
     assert "rss 2.4" in line
     assert line.index("footprint") < line.index("rss")
@@ -152,6 +161,56 @@ def test_a_child_stops_at_the_next_record_once_its_parent_is_gone():
     assert "lm_head" in str(exc.value), "the cell it died on must be named"
 
 
+def test_an_orphaned_child_stops_through_child_main_and_writes_nothing(
+        tmp_path, monkeypatch, capsys):
+    """The whole orphan path, not just the guard that starts it.
+
+    The guard's own test proves Orphaned is RAISED; this proves child_main
+    CATCHES it. Until it did, the exception propagated out of child_main and
+    the run ended in a traceback and exit 1 - and 1 already means
+    measured-and-stopped, so the one code meaning "nothing was measured" read
+    as the one meaning it was.
+    """
+    measured = []
+
+    def _grid(name, d_out, d_in, draw, seed, batches, session, guard, verbose):
+        for cell in ("record-0", "record-1", "record-2"):
+            guard.check(cell)
+            measured.append(cell)
+        return {"records": measured}
+
+    # The parent dies after the first record: getppid stops returning the pid
+    # captured at startup, which is precisely what reparenting looks like from
+    # inside the child. Call 1 is child_main's own capture, call 2 clears the
+    # first record, call 3 is the death.
+    real_getppid, calls = os.getppid, []
+
+    def _getppid():
+        calls.append(None)
+        return real_getppid() if len(calls) <= 2 else 1
+
+    monkeypatch.setattr(harness, "DeviceMemberSession", lambda: object())
+    monkeypatch.setattr(harness, "grid_iteration", _grid)
+    monkeypatch.setattr(harness.os, "getppid", _getppid)
+
+    task_path, out_path = tmp_path / "task.json", tmp_path / "out.json"
+    task_path.write_text(json.dumps({
+        "kind": "grid", "name": "tiny", "d_out": 8, "d_in": 64,
+        "draw": "normal-0.02", "seed": 0, "batches": [1], "budget_gb": 24.0,
+        "cell": "grid tiny 8x64 normal-0.02 s0"}))
+
+    class _Args:
+        child_task = str(task_path)
+        child_out = str(out_path)
+
+    assert harness.child_main(_Args()) == EXIT_ORPHANED
+    assert measured == ["record-0"], "it kept measuring after it was orphaned"
+    assert not out_path.exists(), "an orphaned child must leave no result behind"
+    out = capsys.readouterr().out
+    assert "ORPHAN STOP" in out and "record-1" in out, (
+        "the stop must name itself and the cell it died on")
+
+
 def test_a_child_whose_parent_is_alive_keeps_going():
     guard = BudgetGuard(24.0, reader=lambda: (1.0, 1.0), parent_pid=os.getppid())
     assert guard.check("grid lm_head normal-0.02 s0") == 1.0
@@ -167,8 +226,8 @@ def test_the_parent_side_guard_has_no_parent_to_lose():
 
 def test_refusal_exit_codes_are_distinct_and_leave_the_existing_ones_alone():
     codes = {EXIT_BUDGET_REFUSAL, EXIT_LOCK_HELD, EXIT_LOW_MEMORY,
-             EXIT_CHILD_DEATH, EXIT_NO_DEVICE}
-    assert len(codes) == 5
+             EXIT_CHILD_DEATH, EXIT_NO_DEVICE, EXIT_ORPHANED}
+    assert len(codes) == 6
     assert not codes & {0, 1, 2}, (
         "0 and 1 already mean attested/measured-and-stopped, and 2 is "
         "argparse's own exit - a gate sharing it is unreadable")
@@ -666,50 +725,72 @@ def test_child_exit_zero_without_result_is_a_death(child_dir):
     assert "no result" in exc.value.reason
 
 
-def test_the_child_is_spawned_into_its_own_session(child_dir, monkeypatch):
-    """start_new_session is what makes the group kill target the child alone.
-
-    Pinned because the two halves are strictly ordered: without the session,
-    the child shares the parent's process group and `killpg(child.pid)` would
-    resolve to the parent's own group. Dropping this flag would not fail
-    loudly - it would make the reaper lethal.
-    """
-    seen = {}
+@pytest.fixture
+def popen_spy(monkeypatch):
+    """Every child the harness spawns: the kwargs it asked for and the process
+    it got back. Neither is reachable from spawn_measurement's return value,
+    and both are what the child-lifetime tests are about."""
+    seen = {"kwargs": [], "procs": []}
     real_popen = harness.subprocess.Popen
 
     def spy(argv, **kwargs):
-        seen.update(kwargs)
-        return real_popen(argv, **kwargs)
+        seen["kwargs"].append(kwargs)
+        proc = real_popen(argv, **kwargs)
+        seen["procs"].append(proc)
+        return proc
 
     monkeypatch.setattr(harness.subprocess, "Popen", spy)
+    return seen
+
+
+def test_the_child_is_spawned_into_its_own_session(child_dir, popen_spy):
+    """start_new_session is what makes the group kill target the child alone.
+
+    Pinned because the two halves are strictly ordered: without the session,
+    the child shares the parent's process group, its pid names no group, and
+    the reaper falls back to signalling the one process - so anything the
+    child spawned would survive it.
+    """
     harness.spawn_measurement("cell", {"kind": "noop"}, 24.0,
                               command=_cmd(_WRITES_RESULT % "3.5"))
-    assert seen.get("start_new_session") is True
+    assert [kw.get("start_new_session") for kw in popen_spy["kwargs"]] == [True]
 
 
-def test_the_reaper_never_signals_the_parents_own_group(monkeypatch):
+def test_the_reaper_will_not_killpg_a_child_that_does_not_lead_its_group(
+        monkeypatch):
     """The one line that could kill the whole foreground job.
 
-    os.getpgid(child) would return OUR group if the session flag were ever
-    dropped, so the reaper passes the child's own pid and refuses to signal a
-    pgid equal to our own. Asserted directly, because the only other way to
-    learn it is to lose the session.
+    killpg(child.pid) names the child's group only while the child LEADS one.
+    Drop start_new_session and the child sits in our group instead, its pid
+    naming no group at all - so the reaper reads the group back, sees the
+    child is not its leader, and signals that one process rather than a pgid
+    nobody meant.
+
+    The child here is a real process spawned without the flag, because that is
+    a real kernel state; the earlier version of this test fabricated a proc
+    whose pid equalled our own pgid, which the kernel cannot produce (a pgid
+    is reserved while its group has members, and we are a member of ours), so
+    it certified the guard from a state production could never enter.
     """
-    killed = []
+    killed_groups = []
     monkeypatch.setattr(harness.os, "killpg",
-                        lambda pgid, sig: killed.append(pgid))
-
-    class _Ours:
-        pid = os.getpgrp()          # pretend the child leads OUR group
-        def poll(self): return None
-        def wait(self, timeout=None): return 0
-
-    harness._reap(_Ours())
-    assert killed == [], "the reaper signalled the group it is standing in"
+                        lambda pgid, sig: killed_groups.append(pgid))
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert os.getpgid(proc.pid) != proc.pid, (
+            "this child must share OUR group for the test to mean anything")
+        harness._reap(proc)
+        assert killed_groups == [], "the reaper signalled a group it does not lead"
+        assert proc.poll() is not None, (
+            "refusing to killpg must not mean refusing to stop the child")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
 
 
 def test_a_parent_that_stops_does_not_leave_the_child_running(child_dir,
-                                                              monkeypatch):
+                                                              popen_spy):
     """The hole itself. A child outliving its parent keeps the GPU and keeps
     allocating, while the machine lock the parent held was released by its
     death - so the next harness starts on top of it.
@@ -718,20 +799,12 @@ def test_a_parent_that_stops_does_not_leave_the_child_running(child_dir,
     .run` killed its child on timeout, `proc.wait(timeout=)` does not. Without
     the reaper the wall-cap path would leak a live child on every refusal.
     """
-    spawned = []
-    real_popen = harness.subprocess.Popen
-
-    def spy(argv, **kwargs):
-        proc = real_popen(argv, **kwargs)
-        spawned.append(proc)
-        return proc
-
-    monkeypatch.setattr(harness.subprocess, "Popen", spy)
     with pytest.raises(harness.ChildRefusal):
         harness.spawn_measurement("cell", {"kind": "noop"}, 24.0,
                                   command=_cmd("import time\ntime.sleep(60)\n"),
                                   wall_cap_s=0.5)
 
+    spawned = popen_spy["procs"]
     assert len(spawned) == 1
     assert spawned[0].poll() is not None, (
         "the wall-capped child is still running: the refusal returned and "

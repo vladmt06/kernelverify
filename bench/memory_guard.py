@@ -48,6 +48,11 @@ EXIT_NO_DEVICE = 7        # no usable Metal device: nothing can be measured
 # while 9 is the machine being busy and is exactly what waiting fixes.
 EXIT_PRECONDITION = 8     # a permanent precondition failed (pins, pinned zone)
 EXIT_NOT_IDLE = 9         # the machine is not quiet: transient, come back
+# Its own number rather than a reuse of 6: 6 is what a PARENT reports when a
+# child died under it, and an orphan has no parent left to report anything.
+# Reading 10 in a log says the child stopped itself for the one reason a dead
+# parent creates, which 6 would blur into every other way a child can die.
+EXIT_ORPHANED = 10        # the child outlived the parent that owned the lock
 
 
 def machine_ram_gb() -> float:
@@ -105,6 +110,29 @@ class BudgetExceeded(RuntimeError):
         self.budget_gb = budget_gb
 
 
+class Orphaned(RuntimeError):
+    """This measurement child outlived the parent that launched it.
+
+    The parent owns the machine lock, the checkpoint and the results file, and
+    its death releases the lock immediately - so an orphaned child holds the
+    GPU and keeps allocating while the NEXT harness starts on top of it, which
+    is two heavy measurements on one machine with nothing left to notice.
+
+    getppid() is the signal and it costs nothing: when the parent dies the
+    child is reparented (to launchd on macOS), so the value captured at startup
+    stops being true. Checked between records, where the budget is already
+    checked, because that is the last point at which stopping is still cheap.
+    """
+
+    def __init__(self, cell: str, launching_pid: int, now_pid: int):
+        super().__init__(
+            f"orphaned at {cell}: launched by pid {launching_pid}, now "
+            f"reparented to {now_pid}; the parent that owned the lock is gone")
+        self.cell = cell
+        self.launching_pid = launching_pid
+        self.now_pid = now_pid
+
+
 class BudgetGuard:
     """The footprint cutoff, checked between cells and (per child) between
     records. ``reader`` is injectable so the refusal path is testable without
@@ -127,29 +155,6 @@ class BudgetGuard:
         if current > self.budget_gb:
             raise BudgetExceeded(cell, current, self.budget_gb)
         return current
-
-
-class Orphaned(RuntimeError):
-    """This measurement child outlived the parent that launched it.
-
-    The parent owns the machine lock, the checkpoint and the results file, and
-    its death releases the lock immediately - so an orphaned child holds the
-    GPU and keeps allocating while the NEXT harness starts on top of it, which
-    is two heavy measurements on one machine with nothing left to notice.
-
-    getppid() is the signal and it costs nothing: when the parent dies the
-    child is reparented (to launchd on macOS), so the value captured at startup
-    stops being true. Checked between records, where the budget is already
-    checked, because that is the last point at which stopping is still cheap.
-    """
-
-    def __init__(self, cell: str, launching_pid: int, now_pid: int):
-        super().__init__(
-            f"orphaned at {cell}: launched by pid {launching_pid}, now "
-            f"reparented to {now_pid}; the parent that owned the lock is gone")
-        self.cell = cell
-        self.launching_pid = launching_pid
-        self.now_pid = now_pid
 
 
 class LowMemoryRefusal(RuntimeError):

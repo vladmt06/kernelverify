@@ -95,16 +95,6 @@
 - Context: raised in the 2026-08-15 merge review of branch phase0 as a latent defect, explicitly not a live one; the review's own framing was "if records ever grow to include them".
 - Depends on / blocked by: nothing; do it whenever a record gains a non-float numeric field.
 
-## A parent killed mid-child orphans that child
-
-- What: `spawn_measurement` runs each measurement iteration with `subprocess.run`, so a SIGKILL to the parent (Jetsam, or a coordinator stopping a lane) leaves the child running with the GPU and its whole footprint, and the machine-wide measurement lock is released by the dead parent while the orphan keeps measuring.
-  The work is to bind the child's lifetime to the parent's: a new process group plus a kill on parent exit, or the child watching for its parent's death (`getppid()` change) between records.
-- Why: the failure mode is the one this harness was hardened against - two large Pythons on a 36 GB machine - reached from the opposite direction, and it defeats the lock rather than the budget: the next run acquires the freed lock and starts measuring beside the orphan.
-- Pros: the child already checks its own budget between records, so a parent-death check has an obvious place to live and costs nothing; the isolation design is otherwise complete.
-- Cons: process-group signalling has its own edge cases (a child that spawns nothing is easy, but the kill must not race a normal exit), and the window is small - the parent does almost nothing while a child runs.
-- Context: raised in the 2026-08-15 merge review of branch phase0; nothing in the three Jetsam kills is known to have hit it, and it stays a hypothesis about a kill landing on the parent rather than the child.
-- Depends on / blocked by: nothing.
-
 ## Extend the memory budget + lock pattern to the pricing and A/B harnesses
 
 - What: apply the survival pattern that `bench/calibrate_quant_serving.py` now carries to `bench/price_qmv_boundary.py` (the pack boundary-pricing harness) and the four-arm `bench/serve_sub4bit.py` (the serving A/B harness): the phys_footprint budget guard with its distinct refusal exit (ctypes `proc_pid_rusage`, since Jetsam kills on footprint while RSS under-reads it by an order of magnitude), `machine_state.MeasurementLock` (the ONE machine-wide lock, imported not copied - a per-harness lock is what let the 03:29 collapse happen), and the `kern.memorystatus_level` available-memory refusal before each large cell.

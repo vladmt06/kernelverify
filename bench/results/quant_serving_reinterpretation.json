@@ -2,7 +2,7 @@
  "derived_from": {
   "evidence_path": "bench/results/quant_serving_adequacy.json",
   "evidence_sha256": "54d0ad5ca4f28f00a401f0481a8b1c69c42cadcc01e3c4a21cca7728ced01833",
-  "interpretation_code_sha256": "0011327b113ee2ea13b3b792dc84e56e08ce1b019ef7b29c1dd59730d820e705",
+  "interpretation_code_sha256": "a1f9e65d9c2e4be96f077ac2561024b699c6c6254397666c16ec65692196bbcb",
   "eligibility_version": 1,
   "adr": "ADR 0014",
   "mlx_version_ruled": "0.32.0",
