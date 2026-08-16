@@ -305,3 +305,41 @@ def test_the_shipped_verifier_flags_no_correct_kernel_after_the_repair(evidence)
                      "device-dequant-loop"):
             ratio = record["members"][name] / tol
             assert ratio < 1.0, (name, ratio, record["shape"], record["mode"])
+
+
+# ---------------------------------------------------------------------------
+# The verdict-cache fingerprint: names alone never vouch for a floor
+#
+# The first of these two was deleted by a7b269f while that commit rewrote the
+# tests around it, so the guard on the one change a label-keyed cache cannot
+# see went missing from main. It is restored here, and the same guard is
+# extended to the two native ensembles that never had one.
+# ---------------------------------------------------------------------------
+def test_verdict_cache_fingerprint_sees_the_ensemble_version():
+    from kernelverify.battery.core import _oracle_member_labels
+    from kernelverify.schemas.quant_contract import QUANT_ENSEMBLE_VERSION
+
+    labels = _oracle_member_labels()
+    assert "quant:factored-groups" in labels, "the label is still there ..."
+    assert f"quant-ensemble={QUANT_ENSEMBLE_VERSION}" in labels, (
+        "... but the label alone cannot see that its arithmetic changed")
+    assert QUANT_ENSEMBLE_VERSION != "quant-ensemble-v1", (
+        "v1 named the pairwise member; the chained member needs its own")
+
+
+def test_verdict_cache_fingerprint_versions_every_native_ensemble():
+    from kernelverify.battery.core import _oracle_member_labels
+    from kernelverify.schemas.native_ops import (
+        KV_ENSEMBLE_VERSION,
+        KV_MEMBERS,
+        MOE_ENSEMBLE_VERSION,
+        MOE_MEMBERS,
+    )
+
+    labels = _oracle_member_labels()
+    assert f"kv-ensemble={KV_ENSEMBLE_VERSION}" in labels
+    assert f"moe-ensemble={MOE_ENSEMBLE_VERSION}" in labels
+    assert all(name in labels for name in MOE_MEMBERS), (
+        "moe labels are derived, not literals")
+    assert all(name in labels for name in KV_MEMBERS), (
+        "kv labels are derived, not literals")

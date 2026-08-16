@@ -231,6 +231,11 @@ MOE_MEMBERS = {
     "moe:reversed-slots": _moe_member_reversed,
 }
 
+# Bumped whenever a member's ARITHMETIC changes under an unchanged name, the
+# way QUANT_ENSEMBLE_VERSION was for the factored-groups repair: the verdict
+# cache keys on labels, so a same-name change is exactly what it cannot see.
+MOE_ENSEMBLE_VERSION = "moe-ensemble-v1"
+
 
 def moe_tolerance(case, inputs, ref) -> float:
     floor = max(_max_err(fn(inputs), ref) for fn in MOE_MEMBERS.values())
@@ -350,6 +355,11 @@ KV_MEMBERS = {
     "kv:serial-combine": dict(scores_order="pairwise", combine_order="serial"),
     "kv:reversed-combine": dict(scores_order="pairwise", combine_order="reversed"),
 }
+
+# Same discipline as MOE_ENSEMBLE_VERSION above. This ensemble shares
+# `_kv_member` and `_cache_dequant` with the reference, so a change to either
+# moves every member at once under four unchanged names.
+KV_ENSEMBLE_VERSION = "kv-ensemble-v1"
 
 
 def kv_tolerance(case, inputs, ref) -> float:
