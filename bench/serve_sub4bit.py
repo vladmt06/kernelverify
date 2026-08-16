@@ -44,6 +44,13 @@ Modes:
             and only after the coordinator's go (T8).
   --ppl     the T5 quality pair: both artifacts, stock, one corpus,
             one number pair. Not a timing; never concurrent with one.
+
+Exit vocabulary, all of it memory_guard's and none of it this module's:
+0 attested, 1 measured-and-stopped, 3/4/5 the memory refusals (budget, lock
+held, machine out of room), 8 a permanent precondition (pins, pinned zone,
+corpus digest) that retrying cannot heal, 9 the machine not being quiet,
+which is transient and is exactly what waiting fixes. 2 is left to the
+interpreter, where argparse and a failed import already put it.
 """
 
 from __future__ import annotations
@@ -65,6 +72,24 @@ import machine_state  # noqa: E402
 import mlx.core as mx  # noqa: E402
 import mlx.nn as nn  # noqa: E402
 
+from machine_state import MeasurementLock  # noqa: E402
+
+# The refusal vocabulary, single-sourced: this harness numbers nothing itself,
+# because per-harness numbering is how two "protected" runs collapsed the
+# machine at 03:29 on 2026-08-15 (memory_guard's docstring has the dissection).
+from memory_guard import (  # noqa: E402
+    EXIT_BUDGET_REFUSAL,
+    EXIT_LOCK_HELD,
+    EXIT_LOW_MEMORY,
+    EXIT_NOT_IDLE,
+    EXIT_PRECONDITION,
+    BudgetExceeded,
+    BudgetGuard,
+    LowMemoryRefusal,
+    budget_gb_arg,
+    require_available_memory,
+)
+
 from kernelverify.pack.wide_qmv import (  # noqa: E402
     SUPPORTED_BITS,
     build,
@@ -76,7 +101,20 @@ MODELS_ROOT = Path("/Users/vlad/kernelverify/bench/.models")
 MODEL_3BIT = "qwen3-4b-3bit-g64"
 MODEL_4BIT = "qwen3-4b-4bit-g64"
 CORPUS = Path("/Users/vlad/kernelverify/bench/.corpus/ppl.txt")
+# The corpus is registered by CONTENT, not by path (findings doc, sections 7
+# and 8): the file is gitignored and lives per worktree, so only the digest
+# can say that two runs scored the same text.
+PPL_CORPUS_SHA256 = ("173c87a53759e0201f33e0ccf978e510"
+                     "c2042d7f2cb78229d9a50d79b9e7dd08")
 GROUP_SIZE = 64
+
+# One name for the one machine-wide lock this harness takes.
+LOCK_NAME = "serve_sub4bit"
+# The same number the serving calibration budgets at, and deliberately its own
+# literal rather than an import: the two harnesses describe different
+# allocations and a shared symbol would tie one's budget to the other's
+# measurements.
+AB_BUDGET_GB = 24.0
 
 # Pre-registered measurement parameters (findings doc, section 3).
 PROMPT_T = 512
@@ -416,12 +454,47 @@ def provenance(manifest: dict) -> dict:
             "pins": manifest, "machine": machine_state.fingerprint()}
 
 
+class NotIdle(RuntimeError):
+    """The machine is not quiet. TRANSIENT: the same run on the same code
+    succeeds once whatever is busy stops, so a detached runner waits."""
+
+
+class PreconditionFailed(RuntimeError):
+    """A precondition that waiting cannot heal: the artifacts do not hash to
+    their pins, the pack's boundary has moved off its registration, the
+    corpus is not the registered one. PERMANENT: a runner gives up and a
+    human re-registers or re-pins."""
+
+
+class ServeGuard:
+    """This run's memory checks, in the order price_qmv_boundary takes them.
+
+    Two different quantities, and both are needed: the budget bounds THIS
+    process's phys_footprint (the number Jetsam kills on), while the memory
+    gate bounds the MACHINE's remaining room against the headroom this run may
+    still legitimately grow into - budget minus current, never the whole
+    budget, or our own growth would make the check refuse a healthy run.
+    """
+
+    def __init__(self, budget_gb: float):
+        self.budget = BudgetGuard(budget_gb)
+        self.peak_gb = 0.0
+
+    def __call__(self, cell: str) -> float:
+        current = self.budget.check(cell)
+        self.peak_gb = max(self.peak_gb, current)
+        require_available_memory(max(self.budget.budget_gb - current, 0.0),
+                                 cell)
+        return current
+
+
 def require_idle(label: str) -> dict:
     state = machine_state.idle_check()
     if not state["idle"]:
         print(f"NOT QUIET ({label}): " + "; ".join(state["blockers"]))
         print("Timing refused (T8): rerun inside a coordinated quiet window.")
-        raise SystemExit(2)
+        raise NotIdle(f"machine not quiet {label}: "
+                      + "; ".join(state["blockers"]))
     return state
 
 
@@ -450,7 +523,9 @@ def require_pinned_zone():
               "boundary needs a re-registration, not a run")
         for line in disagreements:
             print(f"  {line}")
-        raise SystemExit(2)
+        raise PreconditionFailed(
+            f"pack dispatch zone disagrees with the registration at "
+            f"{len(disagreements)} of {len(PINNED_ZONE)} shapes")
 
 
 def check_idle_after(exit_code: int) -> int:
@@ -639,12 +714,11 @@ def _op_probe(bits: int, d_in: int, d_out: int, m: int) -> dict:
             "stock_spread_pct": round(spread_pct(b_s), 1)}
 
 
-def mde(manifest: dict) -> int:
+def mde(manifest: dict, guard) -> int:
     """The numbers section 5 of the findings doc is filled from: the
     interception cost via arm 4 at B=1, per-op times at the true shapes,
     arm-2 per-step times and noise floors per in-zone B."""
-    require_idle("before")
-    require_pinned_zone()
+    guard("mde-start")          # before the first model, or it guards nothing
     print(json.dumps(provenance(manifest)))
     model3, tok = load_model(MODEL_3BIT)
     n_layers = len(model3.layers)
@@ -671,6 +745,7 @@ def mde(manifest: dict) -> int:
 
     # Per-op savings at the true shapes, then the expected gain per B.
     for b in zone:
+        guard(f"B={b}")
         saving_us = 0.0
         rows = []
         for d_in, d_out, count in PROJ_SHAPES:
@@ -727,17 +802,17 @@ def composed_attribution(comp_pct: float, base_pct: float,
     return "joint"
 
 
-def ab(manifest: dict) -> int:
+def ab(manifest: dict, guard) -> int:
     """The pre-registered four-arm grid (doc, sections 3 and 6): arms
     interleaved [1, 2, 3, 4] in every round, arm 2 the canary, cells over
     the spread limit withheld, dispatch counts asserted exact."""
-    require_idle("before")
-    require_pinned_zone()
+    guard("ab-start")           # before the first model, or it guards nothing
     print(json.dumps(provenance(manifest)))
     model3, tok = load_model(MODEL_3BIT)
     model4, _ = load_model(MODEL_4BIT)
     exit_code = 0
     for b in B_GRID:
+        guard(f"B={b}")
         prompts = make_prompts(tok, PROMPT_T, b)
         arms: dict[str, list[float]] = {"1": [], "2": [], "3": [], "4": []}
         calls_want = calls_got = 0
@@ -760,18 +835,22 @@ def ab(manifest: dict) -> int:
             for k, v in patch.hard_fallbacks().items():
                 hard[k] = hard.get(k, 0) + v
             patch.uninstall()
+            guard(f"B={b} arm1")
 
             dt, steps = decode_window(model3, prompts, GEN_TOKENS)
             arms["2"].append(steps / dt)
+            guard(f"B={b} arm2")
 
             dt, steps = decode_window(model4, prompts, GEN_TOKENS)
             arms["3"].append(steps / dt)
+            guard(f"B={b} arm3")
 
             patch = install_patch(model3)
             patch.mode = "stock"
             dt, steps = decode_window(model3, prompts, GEN_TOKENS)
             arms["4"].append(steps / dt)
             patch.uninstall()
+            guard(f"B={b} arm4")
 
         med = {k: statistics.median(v) for k, v in arms.items()}
         routed = routed_shapes(patch, b)
@@ -815,17 +894,25 @@ def ppl(corpus: Path) -> int:
     """The T5 pair. Stock models only; the corpus hash is printed first
     so the findings doc records it before either number is read."""
     if not corpus.exists():
-        print(f"REFUSED: no corpus at {corpus}; the findings doc pins its "
-              "sha256 before any number is read")
-        return 2
+        print(f"REFUSED (exit {EXIT_PRECONDITION}): no corpus at {corpus}; "
+              "the findings doc pins its sha256 before any number is read")
+        return EXIT_PRECONDITION
     text = corpus.read_text()
     digest = hashlib.sha256(text.encode()).hexdigest()
+    # Before a model is loaded, not after: printing a digest and scoring
+    # whatever was there is how a quality pair ends up bound to the wrong
+    # text (findings doc section 7 registers the content, not the path).
+    if digest != PPL_CORPUS_SHA256:
+        print(f"REFUSED (exit {EXIT_PRECONDITION}): corpus at {corpus} "
+              f"hashes {digest}, not the registered {PPL_CORPUS_SHA256}")
+        return EXIT_PRECONDITION
     model3, tok3 = load_model(MODEL_3BIT)
     model4, tok4 = load_model(MODEL_4BIT)
     ids3, ids4 = tok3.encode(text), tok4.encode(text)
     if ids3 != ids4:
-        print("REFUSED: the two artifacts tokenize the corpus differently")
-        return 2
+        print(f"REFUSED (exit {EXIT_PRECONDITION}): the two artifacts "
+              "tokenize the corpus differently")
+        return EXIT_PRECONDITION
     print(json.dumps({"corpus": str(corpus), "sha256": digest,
                       "tokens": len(ids3), "window": PPL_WINDOW,
                       "windows": PPL_WINDOWS}))
@@ -843,20 +930,62 @@ def main(argv=None) -> int:
     mode.add_argument("--ab", action="store_true")
     mode.add_argument("--ppl", action="store_true")
     parser.add_argument("--corpus", type=Path, default=CORPUS)
+    parser.add_argument("--budget-gb", type=budget_gb_arg,
+                        default=AB_BUDGET_GB,
+                        help="phys_footprint budget in decimal GB; crossing "
+                             f"it refuses and exits {EXIT_BUDGET_REFUSAL} "
+                             f"(default {AB_BUDGET_GB})")
     args = parser.parse_args(argv)
 
+    # Pins first, before the lock: a hash mismatch is permanent, so holding
+    # the machine while discovering it would deny the slot to a run that
+    # could have used it.
     try:
         manifest = verify_pins(MODELS_ROOT, [MODEL_3BIT, MODEL_4BIT])
     except RuntimeError as e:
-        print(f"REFUSED: {e}")
-        return 2
+        print(f"REFUSED (exit {EXIT_PRECONDITION}): {e}")
+        return EXIT_PRECONDITION
     if args.smoke:
-        return smoke()
-    if args.mde:
-        return mde(manifest)
-    if args.ppl:
-        return ppl(args.corpus)
-    return ab(manifest)
+        return smoke()          # wiring only, no timing: takes no lock
+
+    # The ONE machine-wide lock, taken before anything else samples the
+    # machine: two heavy harnesses whose idle gates co-fired is the 03:29
+    # collapse itself, so even the idle gate waits behind the lock.
+    lock = MeasurementLock(LOCK_NAME)
+    acquired, detail = lock.acquire()
+    if not acquired:
+        print(f"REFUSAL (exit {EXIT_LOCK_HELD}): machine measurement lock "
+              f"{detail}; one heavy measurement at a time")
+        return EXIT_LOCK_HELD
+    try:
+        # Perplexity is not a timing, so it skips the idle gate by section
+        # 7's own rule - but it loads both artifacts, and the same section
+        # forbids it running beside a timing mode, which is what the lock
+        # above enforces.
+        if args.ppl:
+            return ppl(args.corpus)
+        require_idle("before")
+        require_pinned_zone()
+        guard = ServeGuard(args.budget_gb)
+        return mde(manifest, guard) if args.mde else ab(manifest, guard)
+    except NotIdle as e:
+        print(f"REFUSAL (exit {EXIT_NOT_IDLE}): {e}")
+        return EXIT_NOT_IDLE
+    except PreconditionFailed as e:
+        print(f"REFUSAL (exit {EXIT_PRECONDITION}): {e}")
+        return EXIT_PRECONDITION
+    except BudgetExceeded as e:
+        print(f"REFUSAL (exit {EXIT_BUDGET_REFUSAL}): {e}")
+        print("run discarded; nothing measured under a crossed budget is a "
+              "claim")
+        return EXIT_BUDGET_REFUSAL
+    except LowMemoryRefusal as e:
+        print(f"REFUSAL (exit {EXIT_LOW_MEMORY}): {e}")
+        print("another process is eating the machine; free it and re-arm "
+              "the slot")
+        return EXIT_LOW_MEMORY
+    finally:
+        lock.release()
 
 
 if __name__ == "__main__":

@@ -43,6 +43,11 @@ EXIT_LOCK_HELD = 4        # another heavy measurement holds the machine lock
 EXIT_LOW_MEMORY = 5       # machine-wide available memory too low for a cell
 EXIT_CHILD_DEATH = 6      # a measurement child died; its cell is named
 EXIT_NO_DEVICE = 7        # no usable Metal device: nothing can be measured
+# The two halves of "this run cannot start", split because a detached runner
+# has to treat them oppositely: 8 can never heal, so waiting is wasted time,
+# while 9 is the machine being busy and is exactly what waiting fixes.
+EXIT_PRECONDITION = 8     # a permanent precondition failed (pins, pinned zone)
+EXIT_NOT_IDLE = 9         # the machine is not quiet: transient, come back
 
 
 def machine_ram_gb() -> float:

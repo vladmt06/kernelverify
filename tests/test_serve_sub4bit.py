@@ -239,9 +239,11 @@ def test_registered_zone_refuses_a_boundary_that_moved_at_one_shape(
     shape = (2560, 4096)
     moved[shape] = moved[shape] | frozenset({11})
     monkeypatch.setattr(serve_sub4bit, "PINNED_ZONE", moved)
-    with pytest.raises(SystemExit) as exc:
+    # A typed refusal, not SystemExit(2): a moved boundary is permanent, so
+    # the detached runner must give up rather than wait for a quiet machine,
+    # and 2 belongs to the interpreter (memory_guard's exit table).
+    with pytest.raises(serve_sub4bit.PreconditionFailed):
         serve_sub4bit.require_pinned_zone()
-    assert exc.value.code == 2
     out = capsys.readouterr().out
     assert "1 of 5" in out and "2560x4096" in out
 
@@ -458,3 +460,143 @@ def test_perplexity_refuses_a_short_stream():
     with pytest.raises(RuntimeError):
         serve_sub4bit.perplexity(model, list(range(10)), window=8,
                                  n_windows=3)
+
+
+# ---------------------------------------------------------------------------
+# the refusal machine: one lock, one budget, one memory gate, typed exits
+#
+# Every test here drives main() rather than the mode functions, because the
+# ORDER is the property: a gate that fires after the first model is already
+# resident protects nothing. `_never_load` is the proof of order in each one.
+# ---------------------------------------------------------------------------
+TIMED = pytest.mark.parametrize("mode", ["--ab", "--mde"])
+
+
+def _never_load(*a, **k):
+    raise AssertionError("a model was loaded before the gate refused")
+
+
+def _raise(exc):
+    def _f(*a, **k):
+        raise exc
+    return _f
+
+
+def _pins_ok(monkeypatch):
+    monkeypatch.setattr(serve_sub4bit, "verify_pins",
+                        lambda *a, **k: {"pins": "ok"})
+
+
+def _lock_granted(monkeypatch):
+    monkeypatch.setattr(serve_sub4bit.MeasurementLock, "acquire",
+                        lambda self: (True, "acquired"))
+    monkeypatch.setattr(serve_sub4bit.MeasurementLock, "release",
+                        lambda self: None)
+
+
+@TIMED
+def test_timed_modes_refuse_when_the_machine_lock_is_held(monkeypatch, mode):
+    _pins_ok(monkeypatch)
+    monkeypatch.setattr(serve_sub4bit.MeasurementLock, "acquire",
+                        lambda self: (False, "held by pid 1 (test)"))
+    monkeypatch.setattr(serve_sub4bit, "load_model", _never_load)
+    assert serve_sub4bit.main([mode]) == serve_sub4bit.EXIT_LOCK_HELD
+
+
+def test_smoke_never_takes_the_lock(monkeypatch):
+    _pins_ok(monkeypatch)
+
+    def _boom(self):
+        raise AssertionError("smoke must not take the machine lock")
+
+    monkeypatch.setattr(serve_sub4bit.MeasurementLock, "acquire", _boom)
+    monkeypatch.setattr(serve_sub4bit, "smoke", lambda: 0)
+    assert serve_sub4bit.main(["--smoke"]) == 0
+
+
+@TIMED
+def test_permanent_preconditions_exit_with_their_own_code(monkeypatch, mode):
+    monkeypatch.setattr(serve_sub4bit, "verify_pins",
+                        _raise(RuntimeError("hash mismatch")))
+    assert serve_sub4bit.main([mode]) == serve_sub4bit.EXIT_PRECONDITION
+    _pins_ok(monkeypatch)
+    _lock_granted(monkeypatch)
+    monkeypatch.setattr(serve_sub4bit, "require_idle",
+                        lambda label: {"idle": True})
+    monkeypatch.setattr(serve_sub4bit, "require_pinned_zone",
+                        _raise(serve_sub4bit.PreconditionFailed(
+                            "zone disagrees")))
+    monkeypatch.setattr(serve_sub4bit, "load_model", _never_load)
+    assert serve_sub4bit.main([mode]) == serve_sub4bit.EXIT_PRECONDITION
+
+
+@TIMED
+def test_a_busy_machine_is_transient(monkeypatch, mode):
+    _pins_ok(monkeypatch)
+    _lock_granted(monkeypatch)
+    monkeypatch.setattr(serve_sub4bit, "require_idle",
+                        _raise(serve_sub4bit.NotIdle("WindowServer at 30%")))
+    monkeypatch.setattr(serve_sub4bit, "load_model", _never_load)
+    assert serve_sub4bit.main([mode]) == serve_sub4bit.EXIT_NOT_IDLE
+
+
+@TIMED
+def test_timed_modes_refuse_when_the_budget_is_crossed(monkeypatch, mode):
+    _pins_ok(monkeypatch)
+    _lock_granted(monkeypatch)
+    monkeypatch.setattr(serve_sub4bit, "require_idle",
+                        lambda label: {"idle": True})
+    monkeypatch.setattr(serve_sub4bit, "require_pinned_zone", lambda: None)
+    monkeypatch.setattr(serve_sub4bit.BudgetGuard, "check",
+                        lambda self, cell: (_ for _ in ()).throw(
+                            serve_sub4bit.BudgetExceeded(cell, 30.0, 24.0)))
+    monkeypatch.setattr(serve_sub4bit, "load_model", _never_load)
+    assert serve_sub4bit.main([mode, "--budget-gb", "24"]) == \
+        serve_sub4bit.EXIT_BUDGET_REFUSAL
+
+
+@TIMED
+def test_timed_modes_refuse_a_machine_with_no_room(monkeypatch, mode):
+    """The budget bounds THIS process; the memory gate bounds the machine.
+    Both must refuse before a model lands, and with different codes."""
+    _pins_ok(monkeypatch)
+    _lock_granted(monkeypatch)
+    monkeypatch.setattr(serve_sub4bit, "require_idle",
+                        lambda label: {"idle": True})
+    monkeypatch.setattr(serve_sub4bit, "require_pinned_zone", lambda: None)
+    monkeypatch.setattr(serve_sub4bit.BudgetGuard, "check",
+                        lambda self, cell: 1.0)
+    monkeypatch.setattr(serve_sub4bit, "require_available_memory",
+                        _raise(serve_sub4bit.LowMemoryRefusal("cell", 1.0,
+                                                              23.0)))
+    monkeypatch.setattr(serve_sub4bit, "load_model", _never_load)
+    assert serve_sub4bit.main([mode]) == serve_sub4bit.EXIT_LOW_MEMORY
+
+
+def test_the_exit_vocabulary_is_the_shared_one(monkeypatch):
+    """serve_sub4bit numbers nothing itself: every refusal code is
+    memory_guard's, which is what stops two harnesses meaning different
+    things by the same number (the 03:29 collapse's root)."""
+    import memory_guard
+
+    assert serve_sub4bit.EXIT_PRECONDITION is memory_guard.EXIT_PRECONDITION
+    assert serve_sub4bit.EXIT_NOT_IDLE is memory_guard.EXIT_NOT_IDLE
+    assert serve_sub4bit.EXIT_LOCK_HELD is memory_guard.EXIT_LOCK_HELD
+    assert {memory_guard.EXIT_PRECONDITION,
+            memory_guard.EXIT_NOT_IDLE} == {8, 9}
+    assert 2 not in {memory_guard.EXIT_BUDGET_REFUSAL,
+                     memory_guard.EXIT_LOCK_HELD,
+                     memory_guard.EXIT_LOW_MEMORY,
+                     memory_guard.EXIT_CHILD_DEATH,
+                     memory_guard.EXIT_NO_DEVICE,
+                     memory_guard.EXIT_PRECONDITION,
+                     memory_guard.EXIT_NOT_IDLE}
+
+
+def test_require_idle_raises_the_transient_refusal(monkeypatch, capsys):
+    monkeypatch.setattr(serve_sub4bit.machine_state, "idle_check",
+                        lambda *a, **k: {"idle": False,
+                                         "blockers": ["WindowServer 30%"]})
+    with pytest.raises(serve_sub4bit.NotIdle):
+        serve_sub4bit.require_idle("before")
+    assert "NOT QUIET" in capsys.readouterr().out
