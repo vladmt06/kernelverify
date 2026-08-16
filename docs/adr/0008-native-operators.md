@@ -58,3 +58,16 @@ The axis therefore stays deferred, with its justification bar unchanged: a fault
 The pack's kernels have their verification substrate: MoE dispatch kernels verify against the pinned Qwen3-class routing contract today, quantized kernels against the Phase 0 contract, and the first pack kernel (the wide-batch quantized matvec, 1.2-1.4x verified win at batch 6-10) already used it.
 KV-cache attention follows the same registry path next.
 The sales table strengthens: a single-shape harness holds at 79.6% against the enlarged population while the boundary-pairs battery holds exact 100% at 16 evaluations per operator, now including fault classes no published corpus contains.
+
+## Amendment (2026-08-16): the 100% claim rests on a committed record of the current population
+
+This ADR scored 56 faults, 49 viable.
+The catalogue has grown since to 65 entries, and the audit of 2026-08-15 asked whether the headline was still borrowing the older population's number.
+It was not, but the record that proved so lived only in a gitignored cache log, so the claim was true and unverifiable at once.
+
+The rerun of 2026-08-15 is now committed at `bench/results/score_oracles-2026-08-15.txt`, and it scored the population as it stands: 65 synthesised, 58 viable, 7 undetectable anywhere in the input space, with the same 10 corpus-seeded faults inside the viable set.
+The shipped policy (boundary pairs then random) holds 96.6% / 98.3% / 100.0% / 100.0% at B = 4 / 8 / 16 / 32 over the 58 viable faults, and the two 100.0% cells are exact: zero misses over the seeded runs, the log's own words being "B=16: none, every viable fault caught in every run".
+On the corpus subset alone it holds 100% from B = 4.
+The single-shape fp32 harness that stands in for a benchmark-shipped test reads 82.8% at every budget, up from this ADR's 79.6% only because the population's mix moved, not because that harness improved.
+
+`tests/test_docs.py::test_the_battery_100_percent_claim_has_a_committed_record` reads that file and asserts the B = 16 line, so the next time the catalogue grows past what the record scored, the claim goes stale in a way the suite can see.

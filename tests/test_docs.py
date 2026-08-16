@@ -43,18 +43,6 @@ def test_agents_md_empty_packages_list_is_true():
     assert claimed == actual, (claimed, actual)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "H2 of the 2026-08-16 audit-amendments plan is blocked: the source of this "
-        "record is bench/.cache/score_oracles_rerun_20260815.log, and bench/.cache/ "
-        "is gitignored and per-worktree, so the log does not exist in the hygiene "
-        "worktree and no lane may fabricate it. The test is written now so the "
-        "obligation is in the suite rather than in someone's memory. It is STRICT "
-        "on purpose: the moment the record is committed this goes XPASS and turns "
-        "the suite red, which is the signal to delete this marker."
-    ),
-)
 def test_the_battery_100_percent_claim_has_a_committed_record():
     rec = ROOT / "bench/results/score_oracles-2026-08-15.txt"
     assert rec.exists()

@@ -1,0 +1,119 @@
+catalogue changed since the cache was built; rebuilding verdicts
+  [ 1/65] gelu[leading_scale=1.0]                              detectable at 396/440 cases
+  [ 2/65] gelu[leading_scale=0.25]                             detectable at 396/440 cases
+  [ 3/65] gelu[kappa=1.0]                                      detectable at 266/440 cases
+  [ 4/65] gelu[kappa=0.8]                                      detectable at 163/440 cases
+  [ 5/65] gelu[coeff=0.0447]                                   detectable at 0/440 cases
+  [ 6/65] gelu[coeff=0.5]                                      detectable at 313/440 cases
+  [ 7/65] silu[beta=2.0]                                       detectable at 344/440 cases
+  [ 8/65] silu[beta=0.5]                                       detectable at 352/440 cases
+  [ 9/65] silu[beta=1.702]                                     detectable at 344/440 cases
+  [10/65] leaky_relu[alpha=0.1]                                detectable at 292/440 cases
+  [11/65] leaky_relu[alpha=0.2]                                detectable at 333/440 cases
+  [12/65] leaky_relu[alpha=0.0]                                detectable at 289/440 cases
+  [13/65] leaky_relu[alpha=0.011]                              detectable at 203/440 cases
+  [14/65] rmsnorm[use_sqrt=False]                              detectable at 440/440 cases
+  [15/65] rmsnorm[eps=0.0]                                     detectable at 149/440 cases
+  [16/65] rmsnorm[eps=0.001]                                   detectable at 223/440 cases
+  [17/65] rmsnorm[divisor_offset=-1]                           detectable at 310/440 cases
+  [18/65] l2norm[use_sqrt=False]                               detectable at 431/440 cases
+  [19/65] l2norm[eps=1e-06]                                    detectable at 49/440 cases
+  [20/65] softmax[pad_fill=0.0]                                detectable at 117/440 cases
+  [21/65] softmax[pad_fill=-1000000000.0]                      detectable at 0/440 cases
+  [22/65] softmax[subtract_max=False]                          detectable at 0/440 cases
+  [23/65] softmax_padded[mask_tail=False]                      detectable at 200/440 cases
+  [24/65] softmax_padded[mask_tail=False, block=64]            detectable at 200/440 cases
+  [25/65] softmax_padded[mask_tail=False, block=256]           detectable at 200/440 cases
+  [26/65] matmul[accumulate=False]                             detectable at 224/360 cases
+  [27/65] matmul[k_offset=-1]                                  detectable at 222/360 cases
+  [28/65] attention[scale_power=0.0]                           detectable at 215/440 cases
+  [29/65] attention[scale_power=-1.0]                          detectable at 234/440 cases
+  [30/65] attention[scale_power=-0.25]                         detectable at 210/440 cases
+/Users/vlad/kernelverify/kernelverify/reference/kernels.py:253: RuntimeWarning: overflow encountered in exp
+  e = np.exp(shifted)
+/Users/vlad/kernelverify/kernelverify/reference/kernels.py:254: RuntimeWarning: invalid value encountered in divide
+  out = (e / e.sum(axis=1, keepdims=True)) @ vf
+/Users/vlad/kernelverify/.venv/lib/python3.12/site-packages/numpy/_core/_methods.py:49: RuntimeWarning: overflow encountered in reduce
+  return umr_sum(a, axis, dtype, out, keepdims, initial, where)
+  [31/65] attention[subtract_max=False]                        detectable at 180/440 cases
+  [32/65] flash_attention[rescale_acc=False]                   detectable at 206/620 cases
+  [33/65] flash_attention[rescale_norm=False]                  detectable at 203/620 cases
+  [34/65] flash_attention[scale_power=0.0]                     detectable at 315/620 cases
+  [35/65] flash_attention[scale_power=-1.0]                    detectable at 361/620 cases
+  [36/65] gelu[variant=erf]                                    detectable at 168/440 cases
+  [37/65] softmax[exp_base2=True]                              detectable at 181/440 cases
+  [38/65] softmax[read_past_row=True]                          detectable at 107/440 cases
+  [39/65] matmul[accum_dtype=float16]                          detectable at 142/360 cases
+/Users/vlad/kernelverify/kernelverify/reference/kernels.py:305: RuntimeWarning: invalid value encountered in divide
+  return (acc / normaliser[:, None]).astype(q.dtype)
+  [40/65] flash_attention[init_max_zero=True]                  detectable at 72/620 cases
+  [41/65] attention[post_scale=True]                           detectable at 376/440 cases
+  [42/65] rmsnorm[eps_outside=True]                            detectable at 149/440 cases
+  [43/65] l2norm[eps=0.0]                                      detectable at 0/440 cases
+  [44/65] leaky_relu[boundary_ge=True]                         detectable at 0/440 cases
+  [45/65] attention[scores_dtype=float16]                      detectable at 103/440 cases
+  [46/65] quantized_matmul[scales_rotated=True]                detectable at 414/560 cases
+  [47/65] quantized_matmul[nibble_swapped=True]                detectable at 448/560 cases
+  [48/65] quantized_matmul[bias_dropped=True]                  detectable at 560/560 cases
+  [49/65] quantized_matmul[group_size_halved=True]             detectable at 448/560 cases
+  [50/65] quantized_matmul[dequant_dtype=float16]              detectable at 280/560 cases
+  [51/65] quantized_matmul[accum_dtype=float16]                detectable at 280/560 cases
+  [52/65] quantized_matmul[accum_dtype=float16-seq]            detectable at 472/560 cases
+  [53/65] kv_attention[scores_dtype=float16]                   detectable at 177/400 cases
+  [54/65] kv_attention[accum_dtype=float16]                    detectable at 259/400 cases
+  [55/65] kv_attention[accum_dtype=float16-seq]                detectable at 259/400 cases
+  [56/65] kv_attention[k_scales_rotated=True]                  detectable at 132/400 cases
+  [57/65] kv_attention[v_bias_dropped=True]                    detectable at 372/400 cases
+  [58/65] kv_attention[new_entry_skipped=True]                 detectable at 339/400 cases
+  [59/65] kv_attention[dhead_scale_dropped=True]               detectable at 366/400 cases
+  [60/65] moe_dispatch[renormalize=False]                      detectable at 287/320 cases
+  [61/65] moe_dispatch[expert_offset=1]                        detectable at 320/320 cases
+  [62/65] moe_dispatch[gate_dtype=float16]                     detectable at 149/320 cases
+  [63/65] moe_dispatch[k_offset=-1]                            detectable at 302/320 cases
+  [64/65] moe_dispatch[tie_high=True]                          detectable at 0/320 cases
+  [65/65] moe_dispatch[softmax_topk_order=True]                detectable at 0/320 cases
+
+fault population: 65 synthesised, 58 viable, 7 undetectable anywhere in the space
+  excluded as equivalent: gelu[coeff=0.0447]                               truncated the cubic coefficient
+  excluded as equivalent: softmax[pad_fill=-1000000000.0]                  padding lanes load a large negative not -inf
+  excluded as equivalent: softmax[subtract_max=False]                      dropped the max subtraction
+  excluded as equivalent: l2norm[eps=0.0]                                  dropped the epsilon
+  excluded as equivalent: leaky_relu[boundary_ge=True]                     x >= 0 instead of x > 0
+  excluded as equivalent: moe_dispatch[tie_high=True]                      tie-break to the higher index (expresses only where logits tie)
+  excluded as equivalent: moe_dispatch[softmax_topk_order=True]            softmax after top-k instead of renormalising
+of the viable faults, 10 are the ones the corpus seeds by hand
+
+======================================================================
+FAULT DETECTION RATE, all 58 viable synthetic faults
+B = kernel evaluations allowed per operator
+======================================================================
+test policy                             B=4      B=8     B=16     B=32
+----------------------------------------------------------------------
+single shape, fp32 (benchmark)       82.8%    82.8%    82.8%    82.8% 
+random schema (corpus fuzzer)        88.8%    92.3%    93.3%    94.5% 
+random schema + both scales          89.2%    93.4%    95.9%    96.9% 
+random schema + all input modes      91.0%    97.2%    99.6%    99.9% 
+boundary singles + random (ADR 0002)   96.6%    97.5%    99.4%    99.9% 
+boundary pairs + random (ours)       96.6%    98.3%   100.0%   100.0% 
+----------------------------------------------------------------------
+
+======================================================================
+SAME POLICIES, only the 10 faults published in the corpus
+======================================================================
+test policy                             B=4      B=8     B=16     B=32
+----------------------------------------------------------------------
+single shape, fp32 (benchmark)       80.0%    80.0%    80.0%    80.0% 
+random schema (corpus fuzzer)        94.5%    99.2%   100.0%   100.0% 
+random schema + both scales          95.7%    99.2%   100.0%   100.0% 
+random schema + all input modes      96.8%    99.8%    99.8%   100.0% 
+boundary singles + random (ADR 0002)  100.0%   100.0%   100.0%   100.0% 
+boundary pairs + random (ours)      100.0%   100.0%   100.0%   100.0% 
+======================================================================
+
+exact misses by our policy at each budget, over 40 runs
+(a 100.0% table cell above is honest only if its budget shows none here):
+  B= 4: missed in 40/40 runs  l2norm[eps=1e-06]                                detectable at 11.1% of cases
+  B= 4: missed in 40/40 runs  flash_attention[init_max_zero=True]              detectable at 11.6% of cases
+  B= 8: missed in 40/40 runs  l2norm[eps=1e-06]                                detectable at 11.1% of cases
+  B=16: none, every viable fault caught in every run
+  B=32: none, every viable fault caught in every run

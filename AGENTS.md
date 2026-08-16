@@ -14,8 +14,8 @@ Vlad's global instructions still apply; this file adds the project's layout, how
   The differentiator: test policies are scored by mutation against a synthesised fault population that provably contains the published corpus faults.
 - The current battery covers three axes: shape and dtype, input scale, and structured input modes (opposed signs, near zero, constant rows).
   The shipped policy is boundary coverage of single features, then feature pairs, then random exploration.
-  Its 100% claim belongs to ADR 0008 and is exact there: zero misses over 40 seeded runs at 16 evaluations per operator, scored against the 49 viable faults of the 56-entry catalogue ADR 0008 measured.
-  The catalogue has since grown to 65 entries and no committed record re-scores the policy against the enlarged population, so the claim holds at ADR 0008's population and nowhere else.
+  Its 100% claim is exact and current: ADR 0008 measured it on 49 viable faults of a 56-entry catalogue, and the committed rerun of 2026-08-15 (`bench/results/score_oracles-2026-08-15.txt`, ADR 0008's amendment) re-scores it on today's 65-entry catalogue - 58 viable, 7 undetectable anywhere - with zero misses at B = 16 and B = 32.
+  `tests/test_docs.py` reads that record, so the claim goes visibly stale the next time the catalogue grows past what it scored.
 
 ## Layout
 
