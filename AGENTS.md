@@ -37,9 +37,12 @@ Vlad's global instructions still apply; this file adds the project's layout, how
 - `bench/calibrate_quant_bits.py` - per-bits ensemble adequacy for the quantization contract, with its pre-registered rule in the module docstring.
   Prints both the pre-amendment and post-amendment reading of every width, which ADR 0009 relies on; do not remove either.
 - `bench/calibrate_quant_device.py` - the device-arithmetic membership calibration: trigger, membership-before-K repair order, K re-derivation, with its pre-registered rule in the module docstring.
-  ADR 0012 is the reading of its run; reruns must reproduce its tables.
+  ADR 0012 was the reading of its first run; ADR 0016 is the reading of its 2026-08-15 re-run under the chained `factored-groups` member, and reruns must reproduce ADR 0016's tables (ADR 0012's no longer reproduce, by design).
+  Its records are committed at `bench/results/quant_device_adequacy.json`; the harness overwrites its own cache on every run, so copy the records there after any run an ADR reads.
 - `bench/calibrate_quant_serving.py` - 3-bit adequacy at the Qwen3-4B E2E serving shapes, with its pre-registered rule in the module docstring: continuity anchor against the ADR 0012 cache, per-shape G0, the batch-regime probe with direct-match coverage, per-cell K demand against the shipped K = 4, and gates under width-pooled fault equivalence.
-  ADR 0013 is the reading of its run; reruns must reproduce its tables.
+  ADR 0013 is the reading of its run, and its interpretation follows ADR 0014 and ADR 0016 (the exit-1 refusal ADR 0013 recorded was the pre-ruling reading).
+  Reruns reproduce every column bit-identically EXCEPT `factored-groups`, which ADR 0016 deliberately changed: that column moves and everything derived from it moves with it, by design, the same amendment ADR 0012's freeze line carries.
+  Amended 2026-08-15 (fourth, ADR 0014): STEP 4/5 read under per-cell held-out eligibility from `kernelverify/schemas/heldout_eligibility.py` - out-of-contract cells are labelled with their numbers, never a DEMAND MISS; the miss branch fires on the admissible-only demand; the shipped-tolerance overshoot is printed beside `k_demand`, both-readings style.
   Amended 2026-08-15 after three SIGKILLs in step 2: per-shape and per-implementation progress lines carrying an RSS self-report, a per-step checkpoint at `bench/.cache/quant_serving_partial.json` (atomic write, `--resume` at step granularity only), and row-chunked dequantization so the lm_head weights stop paying a 3x whole-matrix transient.
   The amendment and its bit-equality proof are in the module docstring.
   Amended again the same night (memory-truthfulness): a phys_footprint budget with a distinct refusal exit (never a shrunk grid), a machine-global single-instance lock plus an available-memory gate, and child-process isolation per measurement iteration; the root leak was per-case Metal buffer allocation, fixed by the buffer pool in `kernelverify/runners/device.py`.
@@ -73,7 +76,9 @@ Vlad's global instructions still apply; this file adds the project's layout, how
 - `bench/OPERATOR-CARD.md` - the one-card instruction for starting a binding run and reading its outcome.
 - `bench/mlx_info.py` - the MLX safetensors equivalent of `gguf_info`, so both stacks get modelled bytes rather than file size.
 - `bench/.baselines/SCHEMA.md` - the row contract the per-chip matrix renderer consumes. The producer validates against it on every write.
-- `bench/results/` - the recorded baselines, committed. ADR 0007 is the reading of them.
+- `bench/reinterpret_serving_adequacy.py` - the ADR 0014 reading of the committed ADR 0013 evidence: a pure CPU re-read (sha256-checked) that writes a separate derived artifact and refuses to write if any in-contract quantity drifts from the recorded tables.
+- `kernelverify/schemas/heldout_eligibility.py` - which held-out implementations are admissible in which (batch, dtype) cells: versioned contract data, each exclusion hash-guarded against the MLX kernel source it was ruled on, failing loudly on mismatch so an MLX fix is never waved through on a stale label.
+- `bench/results/` - the recorded baselines, the committed serving-adequacy evidence plus its derived reinterpretation, the device-grid records, and the qmv boundary pricing recording. ADR 0007 is the reading of the baselines, ADR 0013/0014/0016 of the serving records, ADR 0016 of the device grid, ADR 0015 of the pricing recording.
 - `docs/adr/` - decisions with the measurements that forced them.
   Read these before changing any method.
 - `vendor/gpuemu-corpus/` - vendored unmodified at the commit pinned in `vendor/PINNED.txt`.
@@ -88,9 +93,17 @@ cd /Users/vlad/kernelverify
 .venv/bin/python bench/score_oracles.py    # ~1 min warm, ~10 min after a catalogue or ensemble change
 .venv/bin/python bench/calibrate_k.py --n-random 24   # instant warm, ~20 min cold, must reproduce ADR 0005
 .venv/bin/python bench/calibrate_quant_bits.py        # ~3 min, must reproduce ADR 0009
-.venv/bin/python bench/calibrate_quant_device.py      # ~7 min, needs the Metal GPU, must reproduce ADR 0012
-.venv/bin/python bench/calibrate_quant_serving.py     # ~45 min, needs the Metal GPU and the pinned artifact, must reproduce ADR 0013
+.venv/bin/python bench/calibrate_quant_device.py      # ~7 min, needs the Metal GPU, must reproduce ADR 0016
+.venv/bin/python bench/calibrate_quant_serving.py     # ~45 min, needs the Metal GPU and the pinned artifact, reproduces ADR 0013 except the factored-groups column (ADR 0016)
+.venv/bin/python -u bench/derive_repaired_member_column.py   # ~70 min, CPU only, ~16 GB steady but budget 30 GB: see below; rewrites ADR 0016's committed column
+.venv/bin/python -u bench/derive_prerepair_device_records.py # ~7 min, needs the Metal GPU; rewrites ADR 0016's detection-price "before" records
 ```
+
+- `derive_repaired_member_column.py` is derived, not measured: it re-reads the committed ADR 0013 records with the repaired `factored-groups` column recomputed, and every ADR 0016 number comes from its output.
+  Budget it at 30 GB, not less: the steady state is a flat ~16 GB, but the lm_head blocks transient by ~2.5 GB run to run, and observed peaks across three runs were 24.26, 23.66 and 26.02 GB.
+  A 26 GB ceiling looks generous against a 16 GB steady state and is not - it killed a correct run on block 15 of 48, an hour in.
+  `tests/test_repaired_member_artifact.py` compares the committed header against the live code identity, so ANY edit to `quant_contract.py`, `phase0_contract_k.py`, `calibrate_quant_serving.py` or the generator itself obliges a re-run before that test is green again.
+  The hash is deliberately whole-file rather than per-function: it can only over-fire, and over-firing costs an hour of compute and says so, while under-firing is the failure this repo has already had (a committed derived file that named code which had since moved twice, behind a check that compared the file to itself).
 
 - Verdicts are cached at `bench/.cache/verdicts.pkl`, fingerprinted by mutation names, input modes, K and every ensemble member's label; any catalogue, mode or oracle change rebuilds automatically.
 - Contract measurements are cached at `bench/.cache/contract_k.pkl` under the same discipline, fingerprinted by the contract version and sample size as well.
@@ -98,7 +111,7 @@ cd /Users/vlad/kernelverify
 - The environment needs `torch`, which only `gelu[variant=erf]` uses; a worktree venv created without it fails part-way through a verdict build.
 - It also needs `mlx==0.32.0` and `mlx-lm==0.31.3`, pinned across worktrees so binding comparisons stay on one toolchain.
   Without mlx, the mlx-dependent test modules are skipped whole or fail to collect, so the suite under-reports badly.
-  Skipped modules hide their contents rather than their count, so quote test counts from a fully equipped venv only; the suite passes 716 on main as of 2026-08-15.
+  Skipped modules hide their contents rather than their count, so quote test counts from a fully equipped venv only; main passes 787 in 81 s as of 2026-08-16.
   Fully equipped means `pyobjc` as well as `mlx`: without the Metal bindings the runner-backed pack tests fail rather than skip, so a venv with mlx alone reports 468 passed and 30 skipped and is not a count anyone should quote.
 
 The machine baseline, in this order, because each step writes the denominators the next one divides by:
@@ -180,13 +193,28 @@ bench/start_binding_run.sh     # arms a launchd job, then quit Terminal
 - Count ensemble members by comparing their output, not by counting their names.
   `lut-gather` and `dequant-pairwise` in the quant contract are bit-identical at every bit width, so the six-member ensemble is five.
   `device-dequant-loop` is bit-identical to `dequant-pairwise` too (ADR 0012): the dequant step is exactly representable so it must match, and this Metal compiler's vectorization of the sequential loop happens to round like the CPU matmul, so the nine-name device-joined ensemble is seven.
+- A member that stands for a class of kernels must round the way that class rounds, not better.
+  `factored-groups` formed its per-group sums with numpy's pairwise reduction, which is EXACT on a constant row (64 identical values halve down a power-of-two tree with no rounding), while every real int-accumulate kernel chains the group and rounds 63 times; the member was therefore most accurate exactly where the device kernels are least accurate, the floor was too tight there, and the shipped tolerance flagged a correct device kernel on 10 of 1,536 serving records (ADR 0016).
+  Vectorized numpy reductions are pairwise by default; a member whose realism depends on its rounding sequence has to spell the sequence out.
+- A K derived on one harness's shapes is not the shipped K.
+  The device harness derives K from three synthetic shapes and prints `shipped K`; the serving grid's six real shapes are not among them, and on 2026-08-15 the two disagreed (2.766 against 3.120 at 2560x9728), so taking the printed line would have shipped a K the next serving run refuses through its own DEMAND MISS branch (ADR 0016).
+  Read every committed record set before moving K, and remember that passing gates are not the check: they passed at the K that would have refused.
+- A cache keyed on member NAMES cannot see a member's arithmetic change.
+  The verdict cache and `contract_k.pkl` fingerprint the ensemble by label; the ADR 0016 repair kept the label and moved the floor, and `score_oracles` would have reported the pairwise member's verdicts as the chained member's; `QUANT_ENSEMBLE_VERSION` in `kernelverify/schemas/quant_contract.py` exists to be bumped for exactly that, the way `CONTRACT_VERSION` already was for the unquantized contract.
 - `mx.quantize` packs one contiguous little-endian bit stream per row, not 32 // bits values per word; the two agree only when bits divides 32.
   Reading it the wrong way is silent rather than loud, because `verify_canonical_against_mlx` falls back to treating MLX's output as canonical whenever the comparison fails.
 - An A/B timing comparison in separate passes measures the clock, not the kernels: GPU power-state drift moved one fixed shape's time from 131.7 to 93.1 us minutes apart, reversing a comparison's sign completely at every point.
   Batching dispatches past 5 ms did NOT prevent this; interleaving the arms within each round is independently load-bearing.
   Interleaving is necessary and NOT sufficient: it equalizes a clock excursion across arms but cannot detect one, so the reference arm's own spread is the detector - reject any round whose reference samples exceed the class spread limit (1.5x max-to-min for kernel arms, tighter for steadier quantities).
   Interleave every comparative measurement, always, even when each dispatch is ms-scale.
+- A `k_demand` reading is a K demand, not an error magnitude.
+  At fp16 activations every contract member rounds its output to the storage dtype, so the ensemble floor collapses to the output's own rounding, the shipped tolerance's floor term goes inert (base_tol wins in 768/768 fp16 records), and `e / floor` explodes: a 12.4x overshoot of the actual tolerance was read as a demand of 195 (ADR 0014).
+  Report the shipped-tolerance overshoot beside the demand, always, and treat a floor that all implementations saturate identically as measuring nothing about class spread.
 - Row-partitioning a matmul is NOT bit-exact, however plainly the arithmetic says each output element's dot product is untouched by it.
   Measured on numpy 2.5.2 over Accelerate: cutting the output-row dimension of `x @ w.T` changes dgemm's blocking and moves fp64 results by up to 2e-14, at chunk sizes 1, 7 and 3276 and at shapes from (5, 128, 96) to (16, 2560, 20000).
   Chunk the dequantization instead, which is elementwise per row and therefore exact by construction, and leave every matmul whole.
   This one is silent rather than loud: it would have moved the fp64 anchor that every error is measured against, and the continuity anchor cannot catch it because the standing measure never takes the chunked path.
+- An ensemble member called per record re-dequantizes the whole weight matrix per call.
+  `ENSEMBLE[name](x, artefact)` takes the quantized artefact and unpacks it internally, so checking five members across 32 lm_head records is 160 independent 1.5 GB dequantizations; a derived-column generator written that way reached 29 GB and was killed by its own watchdog, while the same work through the harness's hoisted evaluators holds ~16 GB steady with transients to ~23.
+  `bench/calibrate_quant_serving.py` already solved this: `eval_pairwise` / `eval_lut` / `eval_serial_chunked` / `eval_factored_serial` / `eval_factored_groups` take the dequantized arrays instead of the artefact, hoisted once per `(shape, draw, seed)` block by `ArtefactHoists`.
+  Any new analysis over the serving grid goes through those evaluators, never through `ENSEMBLE` directly; reuse `ArtefactHoists` too unless the analysis needs a strict subset of what it allocates, and say which subset and why if so.

@@ -75,6 +75,48 @@ draw 100/101):
 Costs are grouped by spec from day one: one Metal compile per (member,
 activation dtype), every case after that a ~ms dispatch, which is what makes
 the full grid affordable (ADR 0006 measured ~180 ms fixed, ~1.4 ms marginal).
+
+AMENDMENT, 2026-08-15: re-run under the repaired `factored-groups`
+-----------------------------------------------------------------
+This harness is being re-run because one ensemble member changed. The
+`factored-groups` member formed its per-group sums with numpy's pairwise
+reduction, which is EXACT on a constant row, so it was most accurate exactly
+where a real int-accumulate kernel is least accurate; the floor it feeds was
+too tight there and the shipped tolerance flagged a correct in-contract device
+kernel on 10 of the 1,536 committed serving records. Both sums are now explicit
+fp32 chains.
+
+The rule above is unchanged and still binds. What this amendment fixes, before
+the numbers are seen, is what the re-run's outcomes MEAN, since a looser member
+can only move things in known directions:
+
+a. K is expected to FALL, not rise. The repaired member has larger error on
+   constant-rows cases, so the leave-one-out floor those cases produce is
+   larger and the ratios that set k_needed are smaller. A fall is the expected
+   reading and is adopted under step 3's own rule; K = 3 is the value the
+   review's analysis predicts.
+
+b. A FALL IS NOT AUTOMATICALLY SHIPPED. Step 4's gates decide. A smaller K
+   tightens every tolerance the verifier ships, so G1 (zero false positives on
+   held-out implementations, both draws) and G2 (every non-equivalent fault
+   caught at >= 10x margin) must both pass at the new K with full membership,
+   per width, exactly as before. If G1 or G2 fails at the re-derived K, the
+   shipped K stays where it is and the gap is reported, never papered over.
+
+c. K RISING is a stop. Nothing about lowering one member's accuracy can
+   legitimately demand a larger K; a rise means the repair did something other
+   than what it claims, and the run is read no further until that is explained.
+
+d. The detection price is the headline of step 6, not a footnote. The repair
+   raises the floor on constant-rows, so fault detection at the margin can only
+   weaken. Every cell of the fp16-dequant boundary table that flips
+   caught -> not-caught is named individually in ADR 0016 with its margin
+   before and after, whatever the count turns out to be.
+
+e. The five untouched CPU members must reproduce their committed values
+   bit-identically (tests/test_quant_contract_members.py pins this on a 64
+   record sample). Any other member moving means the environment moved, not
+   the repair, and this run's numbers describe neither.
 """
 
 from __future__ import annotations

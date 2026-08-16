@@ -118,6 +118,12 @@ def test_emission_happy_path_from_real_gate_evidence(qmv_evidence, tmp_path):
     assert "4-bit is unpriced" in boundary and "routes nowhere" in boundary
     assert "M >= 5" not in boundary
 
+    # The quant tolerance's own validity domain (ADR 0014): admissible
+    # class only, and the excluded MLX cells are named as evidence-free.
+    assert "admissible class only" in domain["tolerance_validity"]
+    assert "ADR 0014" in domain["tolerance_validity"]
+    assert "adequate-by-exclusion" in domain["tolerance_validity"]
+
     # Advisory block: fingerprints and margins, labeled not reproducible (D8).
     assert "NOT reproducible" in doc["advisory"]["_meaning"]
     assert len(doc["advisory"]["cases"]) == 2

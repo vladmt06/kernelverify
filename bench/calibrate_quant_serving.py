@@ -254,12 +254,46 @@ the harness is allowed to skip or share.
    file's creation and the pid's write call a LIVE holder stale and steal
    its lock.
 
+AMENDMENT, 2026-08-15 (fourth): interpretation under ADR 0014 eligibility
+-------------------------------------------------------------------------
+The renegotiation the step 4 rule demanded has been ruled (ADR 0014): the
+ADR 0013 DEMAND MISS was MLX's own batch-1 fp16 kernel violating contract
+clause C1 (a half-precision activation sub-sum in ``affine_qmv``/``_fast``),
+so the binding held-out is not an admissible implementation in that cell,
+and the batch-16 fp16 kernel (``affine_qmm_t``, threadgroup half tile)
+carries the same structural violation. K = 4 and the membership are
+unchanged. What this amendment changes is interpretation only, never a
+measured value:
+
+1. Held-out contributions at cells excluded by
+   ``kernelverify/schemas/heldout_eligibility.py`` (hash-guarded against
+   the ruled-on MLX kernel source) are WITHHELD from the demand and gate
+   readings and reported as out-of-contract labels with their numbers;
+   ``covered`` and the DEMAND MISS branch read the admissible-only demand,
+   so an out-of-contract cell is labelled, never a miss, while an
+   in-contract demand above K fires the branch exactly as pre-registered.
+
+2. ``k_demand`` keeps its definition (it IS the K demand and the shipped
+   K = 4 derivation chain depends on it); the shipped-tolerance overshoot
+   ``e / max(base, K * floor)`` is printed BESIDE it, both-readings style,
+   because at fp16 the floor collapses to output rounding and the demand
+   number is otherwise misread as an error magnitude (195.2 where the
+   true overshoot is 12.4x).
+
+Reruns must reproduce ADR 0013's measured records bit-identically;
+interpretation of them follows ADR 0014 (ADR 0013's exit-1 refusal was the
+pre-ruling reading). The committed evidence lives at
+``bench/results/quant_serving_adequacy.json`` and
+``bench/reinterpret_serving_adequacy.py`` derives the ruled reading from it
+without touching it.
+
 Machine discipline
 ------------------
 One measuring lane at a time: the full run executes only in the
 coordinator-granted GPU slot, after the pack lane's boundary pricing. The
 pre-slot allowance is the probe validated at (1024, 2560) plus unit-test
-smoke dispatches. Reruns must reproduce ADR 0013's tables.
+smoke dispatches. Reruns must reproduce ADR 0013's measured records; their
+interpretation follows ADR 0014.
 """
 
 from __future__ import annotations
@@ -405,6 +439,11 @@ def _f32(x: np.ndarray) -> np.ndarray:
 # to a block. Bit-identity is proven, not assumed, in tests/test_serving_adequacy.py.
 DEQUANT_CHUNK_BYTES = 1 << 27  # ~134 MB per row block of the working array
 
+# The int-domain chain's working block, measured rather than guessed: at
+# lm_head B16 the whole-width chain runs 24.5 s and ~1 MB blocks run 6.4 s,
+# with 16 MB blocks already back at 20 s.
+FACTORED_CHUNK_BYTES = 1 << 20
+
 
 def dequant_chunk_rows(d_in: int, itemsize: int) -> int:
     return max(1, DEQUANT_CHUNK_BYTES // max(1, d_in * itemsize))
@@ -549,13 +588,35 @@ def eval_serial_chunked(x: np.ndarray, w32: np.ndarray, chunk_rows: int,
 
 
 def eval_factored_groups(x: np.ndarray, qg32: np.ndarray, scales32: np.ndarray,
-                         biases32: np.ndarray) -> np.ndarray:
-    """member_factored_groups with the code tensor and parameters hoisted."""
+                         biases32: np.ndarray,
+                         chunk_rows: int | None = None) -> np.ndarray:
+    """member_factored_groups with the code tensor and parameters hoisted.
+
+    The member's per-group code-dot is an explicit fp32 chain over 64 steps,
+    and at lm_head each step touches a 389 MB working array, so the whole-width
+    chain spends 25 GB of traffic per record. Running the chain in output-row
+    BLOCKS keeps a block in cache and costs a quarter of the time. The block is
+    sound where the row-chunked matmul of the memory amendment was not: the
+    chain is elementwise in the row index with no reduction and no BLAS across
+    it, so every block computes the same bits the whole width computes, at
+    every block size (test_chunked_factored_groups_is_bit_identical). The
+    cross-group tail - and in particular ``xs @ biases32.T``, which IS a BLAS
+    call whose output-row dimension must never be partitioned - runs whole.
+    """
     batch, cols = x.shape
-    groups, g = qg32.shape[1], qg32.shape[2]
+    rows, groups, g = qg32.shape
+    if chunk_rows is None:
+        chunk_rows = max(1, FACTORED_CHUNK_BYTES // max(1, batch * groups * 4))
     xg = _f32(x).reshape(batch, groups, g)
-    xq = np.einsum("bgk,rgk->brg", xg, qg32, optimize=True)
-    xs = xg.sum(axis=2)
+    xq = np.empty((batch, rows, groups), dtype=np.float32)
+    for start, stop in _row_blocks(rows, chunk_rows):
+        block = np.zeros((batch, stop - start, groups), dtype=np.float32)
+        for k in range(g):
+            block += xg[:, None, :, k] * qg32[None, start:stop, :, k]
+        xq[:, start:stop] = block
+    xs = np.zeros((batch, groups), dtype=np.float32)
+    for k in range(g):
+        xs += xg[:, :, k]
     out = (xq * scales32[None, :, :]).sum(axis=2)
     out += xs @ biases32.T
     return out.astype(x.dtype)
@@ -1005,7 +1066,8 @@ def weak_prefix_cover(matrix: np.ndarray, grid_batches) -> list:
 # Step 5 machinery: per-cell gates under width-level fault equivalence
 # ---------------------------------------------------------------------------
 from calibrate_quant_bits import MARGIN_GATE  # noqa: E402
-from calibrate_quant_device import ALL_MEMBERS, gates as standing_gates  # noqa: E402
+from calibrate_quant_device import ALL_MEMBERS, HELDOUTS  # noqa: E402
+from calibrate_quant_device import gates as standing_gates  # noqa: E402
 from calibrate_quant_device import floor_of  # noqa: E402
 
 
@@ -1022,6 +1084,7 @@ from calibrate_quant_bits import (  # noqa: E402
 )
 from calibrate_quant_device import k_demand  # noqa: E402
 from calibrate_quant_device import measure as standing_measure  # noqa: E402
+from kernelverify.schemas.heldout_eligibility import exclusion_for  # noqa: E402
 from kernelverify.schemas.quant_device import (  # noqa: E402
     DEVICE_MEMBERS,
     DeviceMemberSession,
@@ -1335,17 +1398,55 @@ def width_equivalents(records: list, k: float) -> set:
     return equivalents
 
 
+def heldout_verdicts(records: list, k: float) -> tuple[list, list]:
+    """G1's held-out scan under per-cell eligibility (ADR 0014): an
+    ADMISSIBLE held-out over tolerance is a false positive; an excluded one
+    is the verifier flagging an implementation C1 entitles it to flag - an
+    out-of-contract flag, recorded with its numbers, never a gate failure.
+    The false-positive line format is exactly the standing one, so
+    in-contract cells stay string-identical to the recorded tables."""
+    fps, flags = [], []
+    for r in records:
+        tol = max(r["base_tol"], k * floor_of(r, ALL_MEMBERS))
+        for name in HELDOUTS:
+            e = r["heldout"][name]
+            if e <= tol:
+                continue
+            line = (f"heldout {name} @ {r['shape']} {r['mode']} {r['dtype']} "
+                    f"seed={r['seed']} ({e:.3g} > {tol:.3g})")
+            entry = exclusion_for(name, r["batch"], r["dtype"])
+            if entry is None:
+                fps.append(line)
+            else:
+                flags.append(f"{line} [out of contract at B{r['batch']}: "
+                             f"{entry.kernel}, {entry.adr}]")
+    return fps, flags
+
+
+def eligibility_gates(records: list, k: float) -> dict:
+    """The standing gates with the held-out scan partitioned by ADR 0014
+    eligibility; faults, classes and the boundary are untouched."""
+    report = standing_gates(records, k)
+    fps, flags = heldout_verdicts(records, k)
+    report["false_positives"] = fps
+    report["out_of_contract_flags"] = flags
+    report["gates"]["G1_no_false_positives"] = not fps
+    report["verdict"] = ("ADEQUATE" if all(report["gates"].values())
+                         else "INADEQUATE")
+    return report
+
+
 def cell_reports(records: list, k: float) -> dict:
-    """The standing gates per (shape, batch) cell, with fault equivalence
-    pinned at width level so a fault caught elsewhere cannot silently drop
-    out of one cell's G2."""
+    """The standing gates per (shape, batch) cell under held-out
+    eligibility, with fault equivalence pinned at width level so a fault
+    caught elsewhere cannot silently drop out of one cell's G2."""
     equivalents = width_equivalents(records, k)
     cells = {}
     for r in records:
         cells.setdefault((r["shape"], r["batch"]), []).append(r)
     reports = {}
     for cell, cell_records in cells.items():
-        report = standing_gates(cell_records, k)
+        report = eligibility_gates(cell_records, k)
         report["equivalent_faults"] = sorted(equivalents)
         scored = {n: f for n, f in report["faults"].items() if n not in equivalents}
         worst = min((f["worst_margin"] for f in scored.values()), default=0.0)
@@ -1360,37 +1461,142 @@ def cell_reports(records: list, k: float) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Step 4: per-cell and pooled K demand against the shipped K = 4
+# Step 4: per-cell and pooled K demand against the shipped K = 4, read
+# under ADR 0014's per-cell held-out eligibility, both-readings style
 # ---------------------------------------------------------------------------
+def _binding_label(kind: str, name: str, r: dict) -> str:
+    """Exactly the standing k_demand's binding format, so raw readings stay
+    string-identical to the tables ADR 0013 recorded."""
+    return (f"{kind} {name} @ {r['shape']} {r['draw']} "
+            f"s{r['seed']} {r['mode']} {r['dtype']}")
+
+
+def k_demand_eligible(records: list) -> tuple[float, str, list]:
+    """The standing k_demand over ADMISSIBLE contributions only (ADR 0014).
+
+    Same divisors, same base_tol gate, same maximization as
+    `calibrate_quant_device.k_demand` - bit-identical to it wherever no
+    exclusion applies, which the tests pin - except that a held-out
+    contribution at an excluded (heldout, batch, dtype) cell is WITHHELD
+    from the demand and returned beside it with its numbers, never silently
+    dropped. Members are never excluded: they are this repo's own code.
+    """
+    needed, binding, withheld = 0.0, "", []
+    for r in records:
+        base = r["base_tol"]
+        for name in ALL_MEMBERS:
+            e = r["members"][name]
+            others = max(r["members"][m] for m in ALL_MEMBERS if m != name)
+            if e > base and others > 0 and e / others > needed:
+                needed = e / others
+                binding = _binding_label("member", name, r)
+        full = floor_of(r, ALL_MEMBERS)
+        shipped = max(base, K_SHIP * full)
+        for name in HELDOUTS:
+            e = r["heldout"][name]
+            if e <= base or full <= 0:
+                continue
+            entry = exclusion_for(name, r["batch"], r["dtype"])
+            if entry is not None:
+                withheld.append({
+                    "heldout": name, "shape": r["shape"], "batch": r["batch"],
+                    "draw": r["draw"], "seed": r["seed"], "mode": r["mode"],
+                    "dtype": r["dtype"], "error": e,
+                    "k_reading": e / full, "overshoot": e / shipped,
+                    "kernel": entry.kernel, "adr": entry.adr,
+                })
+                continue
+            if e / full > needed:
+                needed = e / full
+                binding = _binding_label("heldout", name, r)
+    return needed, binding, withheld
+
+
+def tolerance_overshoot(records: list) -> tuple[float, str]:
+    """The second reading (ADR 0009's both-readings practice): the worst
+    e / max(base, K_SHIP * floor) over the contributions k_demand scores.
+
+    k_demand answers "what K would the floor need"; this answers "by how
+    much was the SHIPPED tolerance actually exceeded". At fp16 the floor
+    collapses to the output's own rounding, so k_demand can read 195 where
+    the shipped tolerance was exceeded 12.4x (ADR 0014); reporting both is
+    what keeps the demand number from being read as an error magnitude.
+    """
+    worst, binding = 0.0, ""
+    for r in records:
+        tol = max(r["base_tol"], K_SHIP * floor_of(r, ALL_MEMBERS))
+        if tol <= 0:
+            continue
+        for name in ALL_MEMBERS:
+            ratio = r["members"][name] / tol
+            if ratio > worst:
+                worst = ratio
+                binding = _binding_label("member", name, r)
+        for name in HELDOUTS:
+            ratio = r["heldout"][name] / tol
+            if ratio > worst:
+                worst = ratio
+                binding = _binding_label("heldout", name, r)
+    return worst, binding
+
+
+def cell_exclusion_labels(cell_records: list) -> list:
+    """The ADR 0014 exclusions applying anywhere in this cell, as labels: a
+    cell whose fp16 half has no admissible device held-out is labelled even
+    when nothing was withheld, because its attestation there is
+    adequate-by-exclusion either way."""
+    labels = set()
+    for r in cell_records:
+        for name in HELDOUTS:
+            entry = exclusion_for(name, r["batch"], r["dtype"])
+            if entry is not None:
+                labels.add(f"{name} {entry.dtype}: {entry.kernel} "
+                           f"({entry.adr})")
+    return sorted(labels)
+
+
+def _demand_cell(cell_records: list) -> dict:
+    cal = [r for r in cell_records if not r["heldout_draw"]]
+    indep = [r for r in cell_records if r["heldout_draw"]]
+    needed_cal, binding_cal = k_demand(cal)
+    needed_indep, binding_indep = k_demand(indep)
+    elig_cal, elig_cal_at, withheld_cal = k_demand_eligible(cal)
+    elig_indep, elig_indep_at, withheld_indep = k_demand_eligible(indep)
+    over_cal, over_cal_at = tolerance_overshoot(cal)
+    over_indep, over_indep_at = tolerance_overshoot(indep)
+    return {
+        # the standing reading, definition unchanged (ADR 0013's tables)
+        "k_needed_calibration": needed_cal, "k_binding": binding_cal,
+        "k_needed_independent": needed_indep,
+        "k_binding_independent": binding_indep,
+        # the overshoot reading, printed beside it (ADR 0014)
+        "overshoot_calibration": over_cal, "overshoot_binding": over_cal_at,
+        "overshoot_independent": over_indep,
+        "overshoot_binding_independent": over_indep_at,
+        # the admissible-only reading, which coverage is judged on
+        "k_eligible_calibration": elig_cal, "k_eligible_binding": elig_cal_at,
+        "k_eligible_independent": elig_indep,
+        "k_eligible_binding_independent": elig_indep_at,
+        "out_of_contract": withheld_cal + withheld_indep,
+        "excluded_heldouts": cell_exclusion_labels(cell_records),
+        "covered": max(elig_cal, elig_indep) <= K_SHIP,
+    }
+
+
 def demand_table(records: list) -> dict:
-    """k_demand per (shape, batch) cell and pooled, calibration and
-    independent draws SEPARATELY, each tested against K_SHIP."""
+    """Per (shape, batch) cell and pooled, calibration and independent draws
+    SEPARATELY, three readings each (both-readings, the ADR 0009 precedent):
+    the standing k_demand, the shipped-tolerance overshoot beside it, and
+    the admissible-only demand that `covered` - and therefore the DEMAND
+    MISS branch - is judged on. An out-of-contract contribution is labelled
+    with its numbers instead of firing the miss (ADR 0014); an in-contract
+    demand above K_SHIP still fires it exactly as before."""
     cells = {}
     for r in records:
         cells.setdefault((r["shape"], r["batch"]), []).append(r)
-    table = {}
-    for cell, cell_records in sorted(cells.items()):
-        cal = [r for r in cell_records if not r["heldout_draw"]]
-        indep = [r for r in cell_records if r["heldout_draw"]]
-        needed_cal, binding_cal = k_demand(cal)
-        needed_indep, binding_indep = k_demand(indep)
-        table[cell] = {
-            "k_needed_calibration": needed_cal, "k_binding": binding_cal,
-            "k_needed_independent": needed_indep,
-            "k_binding_independent": binding_indep,
-            "covered": max(needed_cal, needed_indep) <= K_SHIP,
-        }
-    pooled_cal, pooled_cal_at = k_demand([r for r in records
-                                          if not r["heldout_draw"]])
-    pooled_indep, pooled_indep_at = k_demand([r for r in records
-                                              if r["heldout_draw"]])
-    pooled = {
-        "k_needed_calibration": pooled_cal, "k_binding": pooled_cal_at,
-        "k_needed_independent": pooled_indep,
-        "k_binding_independent": pooled_indep_at,
-        "covered": max(pooled_cal, pooled_indep) <= K_SHIP,
-    }
-    return {"cells": table, "pooled": pooled}
+    table = {cell: _demand_cell(cell_records)
+             for cell, cell_records in sorted(cells.items())}
+    return {"cells": table, "pooled": _demand_cell(records)}
 
 
 # ---------------------------------------------------------------------------
@@ -1788,27 +1994,48 @@ def _run_measured_steps(args, shapes, spawn, saved, steps, resumed,
     steps.pop("grid_partial", None)
     checkpoint("grid", records)
 
-    # -- step 4: K demand ---------------------------------------------------
+    # -- step 4: K demand, three readings per cell (ADR 0014) ---------------
     demands = demand_table(records)
-    print(f"\nSTEP 4 K demand vs shipped K = {K_SHIP} "
-          f"(per cell; calibration / independent):")
+    print(f"\nSTEP 4 K demand vs shipped K = {K_SHIP} (per cell; calibration "
+          f"/ independent; k_demand | overshoot of shipped tol | admissible):")
     misses = []
     for (shape, batch), d in demands["cells"].items():
-        flag = "" if d["covered"] else "  <- DEMAND ABOVE SHIPPED K"
         if not d["covered"]:
             misses.append((shape, batch))
-        print(f"  {shape:>13} B{batch:<3} {d['k_needed_calibration']:6.3f} / "
-              f"{d['k_needed_independent']:6.3f}{flag}")
+            flag = "  <- DEMAND ABOVE SHIPPED K"
+        elif d["out_of_contract"]:
+            flag = "  [out-of-contract contributions withheld, ADR 0014]"
+        elif d["excluded_heldouts"]:
+            flag = "  [fp16 heldout excluded, ADR 0014]"
+        else:
+            flag = ""
+        print(f"  {shape:>13} B{batch:<3} "
+              f"{d['k_needed_calibration']:8.3f} / "
+              f"{d['k_needed_independent']:8.3f} | "
+              f"{d['overshoot_calibration']:6.2f}x / "
+              f"{d['overshoot_independent']:6.2f}x | "
+              f"{d['k_eligible_calibration']:6.3f} / "
+              f"{d['k_eligible_independent']:6.3f}{flag}")
+        for w in d["out_of_contract"]:
+            print(f"      withheld: {w['heldout']} {w['dtype']} {w['mode']} "
+                  f"s{w['seed']} error {w['error']:.3g} "
+                  f"(k reading {w['k_reading']:.1f}, overshoot "
+                  f"{w['overshoot']:.2f}x; {w['kernel']}, {w['adr']})")
     p = demands["pooled"]
-    print(f"  {'pooled':>13}      {p['k_needed_calibration']:6.3f} / "
-          f"{p['k_needed_independent']:6.3f}")
+    print(f"  {'pooled':>13}     "
+          f"{p['k_needed_calibration']:8.3f} / "
+          f"{p['k_needed_independent']:8.3f} | "
+          f"{p['overshoot_calibration']:6.2f}x / "
+          f"{p['overshoot_independent']:6.2f}x | "
+          f"{p['k_eligible_calibration']:6.3f} / "
+          f"{p['k_eligible_independent']:6.3f}")
     print(f"  pooled binding (calibration): {p['k_binding']}")
     print(f"  pooled binding (independent): {p['k_binding_independent']}")
 
     # -- step 5: gates at the shipped K -------------------------------------
     from calibrate_quant_device import CLASSES
     cells = cell_reports(records, K_SHIP)
-    pooled_gates = standing_gates(records, K_SHIP)
+    pooled_gates = eligibility_gates(records, K_SHIP)
     header = (f"{'cell':>18}{'records':>9}{'G1 FP':>7}{'G2 worst margin':>17}"
               f"{'G3 classes':>12}{'verdict':>13}")
     print()
@@ -1837,6 +2064,8 @@ def _run_measured_steps(args, shapes, spawn, saved, steps, resumed,
         print(f"  value-duplicate members: {line}")
     for line in pooled_gates["false_positives"]:
         print(f"  FP {line}")
+    for line in pooled_gates["out_of_contract_flags"]:
+        print(f"  OUT-OF-CONTRACT {line}")
     if pooled_gates["equivalent_faults"]:
         print(f"  width-level equivalent faults: "
               f"{pooled_gates['equivalent_faults']}")
@@ -1881,9 +2110,11 @@ def _run_measured_steps(args, shapes, spawn, saved, steps, resumed,
               f"ADR 0013 must say so")
 
     if misses:
-        print(f"DEMAND MISS at {misses}: per the pre-registered branch, "
-              f"interpretation STOPS here - membership before K, renegotiated "
-              f"with the coordinator, never resolved inside this harness")
+        print(f"DEMAND MISS at {misses} (in-contract; out-of-contract "
+              f"contributions are labelled above per ADR 0014, never a "
+              f"miss): per the pre-registered branch, interpretation STOPS "
+              f"here - membership before K, renegotiated with the "
+              f"coordinator, never resolved inside this harness")
         return 1
     print(f"VERDICT: {'K=4 COVERS THE SERVING SHAPES - attestation holds' if attested else 'INADEQUATE somewhere - see the tables'}")
     return 0 if attested else 1

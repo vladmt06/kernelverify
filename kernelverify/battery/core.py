@@ -41,12 +41,22 @@ CACHE_PATH = _REPO_ROOT / "bench" / ".cache" / "verdicts.pkl"
 def _oracle_member_labels() -> list:
     """Every ensemble member's identity, for the verdict-cache fingerprint."""
     from kernelverify.schemas.native_ops import KV_MEMBERS, MOE_MEMBERS
-    from kernelverify.schemas.quant_contract import ENSEMBLE as QUANT_ENSEMBLE
+    from kernelverify.schemas.quant_contract import (
+        ENSEMBLE as QUANT_ENSEMBLE,
+        QUANT_ENSEMBLE_VERSION,
+    )
     from kernelverify.tolerance.floor import ENSEMBLES, ensemble_labels
 
     labels = [f"floor:{op}:{name}"
               for op in sorted(ENSEMBLES) for name in ensemble_labels(op)]
     labels += [f"quant:{name}" for name in sorted(QUANT_ENSEMBLE)]
+    # A member's arithmetic can change under an unchanged name (factored-groups
+    # did, 2026-08-15); the version is bumped for exactly that, so the labels
+    # alone never vouch for a floor that has moved.
+    labels.append(f"quant-ensemble={QUANT_ENSEMBLE_VERSION}")
+    # Derived from MOE_MEMBERS, never restated as literals: the two sides of
+    # this merge each fixed a different half of this function, and a hardcoded
+    # label list is what lets the names drift away from the members.
     labels += sorted(MOE_MEMBERS)
     labels += sorted(KV_MEMBERS)
     return labels

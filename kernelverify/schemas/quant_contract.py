@@ -25,6 +25,15 @@ from dataclasses import dataclass
 
 import numpy as np
 
+# Bumped whenever a member's ARITHMETIC changes under an unchanged name. The
+# verdict cache fingerprints the ensemble by member label, and a label cannot
+# see that `factored-groups` now sums each group as a chain where it used to
+# reduce pairwise (2026-08-15): same name, different floor, so every cached
+# verdict computed against the old floor would be read back as if it were
+# current. This is the quantized counterpart of tolerance.contract's
+# CONTRACT_VERSION, which exists for exactly the same reason.
+QUANT_ENSEMBLE_VERSION = "quant-ensemble-v2"
+
 
 @dataclass(frozen=True)
 class QuantContract:
@@ -173,15 +182,30 @@ def member_lut_gather(x: np.ndarray, a: QuantArtefact) -> np.ndarray:
 def member_factored_groups(x: np.ndarray, a: QuantArtefact) -> np.ndarray:
     """Integer-domain accumulation: s * sum(x*q) + b * sum(x), per group.
 
-    Algebraically identical, numerically a different rounding sequence - the
-    shape of every int-accumulate quantized GEMV kernel.
+    Algebraically identical to the dequant-domain members, numerically a
+    different rounding sequence. Both per-group sums are EXPLICIT fp32 CHAINS,
+    accumulated left to right the way an int-accumulate GEMV kernel's inner
+    loop runs; only the cross-group combination stays vectorized (that is the
+    freedom `factored-serial` varies).
+
+    The chains are the member's whole point and were once its bug. Formed by a
+    pairwise reduction instead, the activation sum is EXACT on a constant row -
+    64 identical fp32 values halve down a power-of-two tree with no rounding at
+    all - so the member was most accurate exactly where a real kernel is least
+    accurate, the floor it feeds was too tight there, and the shipped tolerance
+    flagged a correct in-contract device kernel on 10 of 1,536 serving records
+    (worst 1.743x; ADR 0016, tests/test_quant_contract_members.py).
     """
     g = a.contract.group_size
     rows, cols = a.q.shape
-    xg = _f32(x).reshape(x.shape[0], cols // g, g)
-    qg = a.q.reshape(rows, cols // g, g).astype(np.float32)
-    xq = np.einsum("bgk,rgk->brg", xg, qg, optimize=True)
-    xs = xg.sum(axis=2)
+    groups = cols // g
+    xg = _f32(x).reshape(x.shape[0], groups, g)
+    qg = a.q.reshape(rows, groups, g).astype(np.float32)
+    xq = np.zeros((x.shape[0], rows, groups), dtype=np.float32)
+    xs = np.zeros((x.shape[0], groups), dtype=np.float32)
+    for k in range(g):
+        xq += xg[:, None, :, k] * qg[None, :, :, k]
+        xs += xg[:, :, k]
     out = (xq * a.scales.astype(np.float32)[None, :, :]).sum(axis=2)
     out += xs @ a.biases.astype(np.float32).T
     return out.astype(x.dtype)

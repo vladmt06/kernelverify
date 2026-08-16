@@ -1,5 +1,71 @@
 # TODOS
 
+## An fp16 cell at a batch the eligibility table never ruled on reads as in-contract
+
+- What: make `kernelverify/schemas/heldout_eligibility.py` refuse loudly when a record asks about an (heldout, batch, dtype) cell at float16 and batch > 1 that carries NO ruling, instead of returning "eligible" by absence; today the table keys the B16 exclusion on batch 16 exactly, while its own docstring says MLX dispatches `affine_qmm_t` at batch 12 and above.
+- Why: the grid's batches are 1/2/8/16, so nothing reaches the gap today, but the serving harness's own batch-regime probe put the arithmetic split at 11/12 for three shapes; the day a grid adds batch 12 or 14, a structurally out-of-contract MLX kernel would read as an admissible held-out and could fire a DEMAND MISS that ADR 0014 already ruled is not a membership gap.
+- Pros: absence of a ruling becomes a refusal rather than a silent "eligible", which is the same fail-loud discipline the kernel-source hash guard already applies in that module.
+- Cons: widening the key from 16 to ">= 12" instead would be the wrong fix and must NOT be done casually - ADR 0014's D2 bar requires a verified source reading showing a narrower intermediate on THAT cell's dispatch path, and only batch 1 and batch 16 have one; the refusal is the honest shape until someone reads the source for 12-15.
+- Context: `heldout_eligibility.py` lines 88-102 (the EXCLUSIONS dict) and its module docstring lines 8-10; ADR 0014's "the evidence bar is structural" section; surfaced by the merge gate's spec axis on 2026-08-16.
+- Depends on / blocked by: nothing.
+
+## Two corrections from the withdrawn companion-member plan never landed
+
+- What: (a) `kernelverify/schemas/quant_device.py`'s module docstring still says the device member has "the shape of MLX's own quantized matvec" - MLX chunks its accumulation at 8 elements while the member chains at 64, so the shapes differ in the one property the member exists to model; (b) record the emulation-fidelity note about ascending-butterfly ordering beside it.
+- Why: the plan that proposed the companion member was withdrawn, but it carried two corrections that were independent of the withdrawn idea and were meant to land regardless; a docstring that overstates the fidelity of a calibration instrument is how a reader concludes the member models something it does not.
+- Pros: two prose fixes, no behaviour change, no re-measurement.
+- Cons: none.
+- Context: the withdrawn plan is `~/.gstack/projects/kernelverify/vlad-companion-member-20260815.md` (tasks T3 and its notes); surfaced by the merge gate's spec axis on 2026-08-16.
+- Depends on / blocked by: nothing.
+
+## The drawn-sample ensemble and the Accelerate version are unbound
+
+- What: (a) rebuild the quantized ensemble as a DRAWN SAMPLE of the admissible-implementation contract rather than a hand-written dict of six functions, the way `kernelverify/tolerance/floor.py` derives its ensemble as a prefix of the generated contract population; (b) pin the Accelerate/BLAS version the fp64 references are computed against, and record it in the evidence headers.
+- Why: the verification-design audit found the quant ensemble is not drawn from any contract module - `kernelverify/tolerance/contract.py` has zero mentions of quantization - so "the floor represents the admissible class" rests on six hand-picked functions; and a macOS or numpy update that changes Accelerate's reduction order would move every committed fp64 reference with nothing recording that it happened.
+- Pros: (a) makes the floor a sample of a stated population instead of a curated list, which is the repo's own standard everywhere else; (b) makes an environment-driven drift loud instead of silent.
+- Cons: (a) is a contract-population design block with its own ADR, not a refactor - the quantized contract's clauses do not exist in code yet; (b) needs a decision about what to do when the pin no longer matches (refuse, or re-derive and record).
+- Context: audit of 2026-08-15 (verification design, questions 1 and 6); `quant_contract.ENSEMBLE` lines 214-221 vs `tolerance/floor.py`; surfaced again by the merge gate's spec axis.
+- Depends on / blocked by: the int-domain membership decision above, which touches the same population.
+
+## The shipped K is not derived over the shapes it must cover
+
+- What: make the quantized K derivation read every harness's records - the device grid's three synthetic shapes AND the serving grid's six Qwen3-4B shapes - and take the maximum demand, instead of each harness deriving a K from its own shapes and printing it as `shipped K`.
+- Why: on 2026-08-15 the device harness printed `shipped K: 3.0` from a peak demand of 2.766 over its three shapes, while the serving grid demanded 3.120 at 2560x9728; adopting the printed line would have shipped a K that the next serving run refuses through its own DEMAND MISS branch (ADR 0016).
+  Nothing in the code connects the two, so the safeguard today is a human noticing.
+- Pros: the number a harness prints becomes the number that ships; a new shape family (a second model, a new serving grid) automatically participates instead of silently sitting outside the derivation.
+- Cons: couples two harnesses that currently run independently; a third small script that reads both committed record sets and derives K once keeps them independent and is probably the better shape.
+- Context: ADR 0016's decision section has both readings and the cell that binds each; `bench/results/quant_device_adequacy.json` and `bench/results/quant_serving_adequacy.json` are both committed, so the inputs already exist.
+- Depends on / blocked by: nothing technical.
+
+## The int-domain class rests on one outlying member
+
+- What: decide whether the quantized contract's int-domain class needs a second member, and if so which real kernel it stands for; then re-derive K over the enlarged membership.
+- Why: the ADR 0016 repair moved `factored-groups` from the most accurate member on constant rows to the least, and its leave-one-out spread against the six-member shipped floor went from 4.076 to 7.561 while the next int-domain member, `factored-serial`, reads 1.692.
+  That is an adequacy statistic and not a live flag - the shipped floor contains the member, so a candidate rounding like it is judged against a floor holding its own error - but it says one member carries a whole class.
+- Pros: the standing repair order (membership before K) says this is the membership question to ask before any K move; a second int-domain member would also make the class's leave-one-class-out diagnostic meaningful.
+- Cons: a companion member was proposed for this class once and withdrawn, because it targeted the statistic while the false positives stayed live; those are now closed, so the same proposal has to be re-argued on its own merits rather than as a fix for something else.
+- Context: ADR 0016, section "The open question the repair exposes"; the numbers are in `tests/test_quant_contract_members.py::test_k_stays_four_and_the_member_now_carries_its_class_alone`.
+- Depends on / blocked by: nothing; it is a contract-population decision for the coordinator and Vlad.
+
+## The fp16 ensemble floor is inert: compute it before storage-dtype rounding
+
+- What: at float16 activations every quant contract member returns `.astype(x.dtype)`, so the output's own fp16 rounding dominates every internal difference and all eleven implementations report the identical max error; the floor then measures one common rounding step instead of class spread, `base_tol` wins in 768/768 fp16 serving records, and `k_demand`'s `e / floor` reported 195 where the shipped tolerance was exceeded 12.4x.
+  The repair is to compute the ensemble floor BEFORE the final storage-dtype rounding (members return their pre-rounding fp32 values to the floor computation, the verdict comparison unchanged), so the fp16 floor measures implementation diversity again and the demand metric points at the right cell size immediately.
+- Why: this inert floor is the root cause of the misread ADR 0013 number (a K demand read as an error magnitude), and the both-readings print ADR 0014 shipped is the label on the symptom, not the fix.
+- Pros: makes `k_demand` a real K demand at fp16; would have reported 12.4x instead of 195.2 and pointed at the B1 cell size on the first run; changes no verdict semantics.
+- Cons: redefines the floor half of the shipped tolerance, so the whole K derivation chain (ADR 0005, 0009, 0012) needs re-measurement under the new floor, which is a pre-registered calibration pass, not a patch.
+- Context: mechanism dissected in `bench/.cache/b1-cliff-investigation.md` (hypothesis 2, confirmed one level down) and recorded in ADR 0014's reporting clarification.
+- Depends on / blocked by: coordinator ruling plus a pre-registered rerun of the K calibration; must be planned through /plan-eng-review like every lane task.
+
+## B16 mechanism demonstration (optional corroboration for the ADR 0014 exclusion)
+
+- What: a bit-exact CPU emulation of `affine_qmm_t`'s threadgroup half tile, with the fp32-tile ablation, the way `bench/.cache/b1-cliff/qmv_emulate.py` proved the B1 mechanism; the B16 exclusion stands on the structural bar (verified source reading, D2) and this would add the mechanism proof at its measured strength.
+- Why: B16's numbers (1.9x the floor median, up to 5.3x at fp16, masked under `base_tol` at max 0.34x) are recorded without a mechanism decomposition, and a demonstrated mechanism would make the exclusion's corroboration symmetric with B1's.
+- Pros: CPU-only, no GPU slot, no measurement lock; the emulation harness pattern already exists beside the investigation.
+- Cons: pure corroboration - D2 makes it unnecessary for the exclusion to stand - so it should never displace lane work that moves a gate.
+- Context: ADR 0014 records the B16 exclusion and names this as the optional follow-up; the tile structure is quoted in `bench/.cache/b1-cliff-investigation.md` (loose ends).
+- Depends on / blocked by: nothing.
+
 ## llama.cpp batched-serving baseline (deferred by D6)
 
 - What: add llama.cpp n_parallel decode cells to `bench/measure_baselines.py`, so the serving matrix carries both stacks and the mlx-only `batch_decode` cells gain a cross-stack counterpart.
