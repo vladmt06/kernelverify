@@ -1,5 +1,32 @@
 # TODOS
 
+## An fp16 cell at a batch the eligibility table never ruled on reads as in-contract
+
+- What: make `kernelverify/schemas/heldout_eligibility.py` refuse loudly when a record asks about an (heldout, batch, dtype) cell at float16 and batch > 1 that carries NO ruling, instead of returning "eligible" by absence; today the table keys the B16 exclusion on batch 16 exactly, while its own docstring says MLX dispatches `affine_qmm_t` at batch 12 and above.
+- Why: the grid's batches are 1/2/8/16, so nothing reaches the gap today, but the serving harness's own batch-regime probe put the arithmetic split at 11/12 for three shapes; the day a grid adds batch 12 or 14, a structurally out-of-contract MLX kernel would read as an admissible held-out and could fire a DEMAND MISS that ADR 0014 already ruled is not a membership gap.
+- Pros: absence of a ruling becomes a refusal rather than a silent "eligible", which is the same fail-loud discipline the kernel-source hash guard already applies in that module.
+- Cons: widening the key from 16 to ">= 12" instead would be the wrong fix and must NOT be done casually - ADR 0014's D2 bar requires a verified source reading showing a narrower intermediate on THAT cell's dispatch path, and only batch 1 and batch 16 have one; the refusal is the honest shape until someone reads the source for 12-15.
+- Context: `heldout_eligibility.py` lines 88-102 (the EXCLUSIONS dict) and its module docstring lines 8-10; ADR 0014's "the evidence bar is structural" section; surfaced by the merge gate's spec axis on 2026-08-16.
+- Depends on / blocked by: nothing.
+
+## Two corrections from the withdrawn companion-member plan never landed
+
+- What: (a) `kernelverify/schemas/quant_device.py`'s module docstring still says the device member has "the shape of MLX's own quantized matvec" - MLX chunks its accumulation at 8 elements while the member chains at 64, so the shapes differ in the one property the member exists to model; (b) record the emulation-fidelity note about ascending-butterfly ordering beside it.
+- Why: the plan that proposed the companion member was withdrawn, but it carried two corrections that were independent of the withdrawn idea and were meant to land regardless; a docstring that overstates the fidelity of a calibration instrument is how a reader concludes the member models something it does not.
+- Pros: two prose fixes, no behaviour change, no re-measurement.
+- Cons: none.
+- Context: the withdrawn plan is `~/.gstack/projects/kernelverify/vlad-companion-member-20260815.md` (tasks T3 and its notes); surfaced by the merge gate's spec axis on 2026-08-16.
+- Depends on / blocked by: nothing.
+
+## The drawn-sample ensemble and the Accelerate version are unbound
+
+- What: (a) rebuild the quantized ensemble as a DRAWN SAMPLE of the admissible-implementation contract rather than a hand-written dict of six functions, the way `kernelverify/tolerance/floor.py` derives its ensemble as a prefix of the generated contract population; (b) pin the Accelerate/BLAS version the fp64 references are computed against, and record it in the evidence headers.
+- Why: the verification-design audit found the quant ensemble is not drawn from any contract module - `kernelverify/tolerance/contract.py` has zero mentions of quantization - so "the floor represents the admissible class" rests on six hand-picked functions; and a macOS or numpy update that changes Accelerate's reduction order would move every committed fp64 reference with nothing recording that it happened.
+- Pros: (a) makes the floor a sample of a stated population instead of a curated list, which is the repo's own standard everywhere else; (b) makes an environment-driven drift loud instead of silent.
+- Cons: (a) is a contract-population design block with its own ADR, not a refactor - the quantized contract's clauses do not exist in code yet; (b) needs a decision about what to do when the pin no longer matches (refuse, or re-derive and record).
+- Context: audit of 2026-08-15 (verification design, questions 1 and 6); `quant_contract.ENSEMBLE` lines 214-221 vs `tolerance/floor.py`; surfaced again by the merge gate's spec axis.
+- Depends on / blocked by: the int-domain membership decision above, which touches the same population.
+
 ## The shipped K is not derived over the shapes it must cover
 
 - What: make the quantized K derivation read every harness's records - the device grid's three synthetic shapes AND the serving grid's six Qwen3-4B shapes - and take the maximum demand, instead of each harness deriving a K from its own shapes and printing it as `shipped K`.

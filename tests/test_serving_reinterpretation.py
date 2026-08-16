@@ -192,6 +192,23 @@ def test_evidence_is_the_committed_record_and_hash_checked():
     load_evidence()  # raises on any byte drift
 
 
+def test_the_committed_artifact_was_regenerated_after_the_code_last_moved():
+    """The check the one above CANNOT make, and the reason this test exists.
+
+    `derived` recomputes the artifact in memory, so its header carries the LIVE
+    code identity and comparing the two is a tautology - it passed for a whole
+    branch while the file on disk named code that had since changed twice
+    (`f98c2e2`, `b0356bf` moved modules inside INTERPRETATION_PATHS). The
+    artifact's entire claim is "these readings came from THIS code", so the
+    committed bytes are what has to be checked. Regenerate with
+    `.venv/bin/python bench/reinterpret_serving_adequacy.py` when this fails.
+    """
+    committed = json.loads(OUT_PATH.read_text())["derived_from"]
+    assert committed["interpretation_code_sha256"] == interpretation_identity(), (
+        "the committed derived artifact predates the current interpretation code")
+    assert committed["evidence_sha256"] == EVIDENCE_SHA256
+
+
 def test_derived_header_names_its_source_code_and_ruling(derived):
     header = derived["derived_from"]
     assert header["evidence_sha256"] == EVIDENCE_SHA256

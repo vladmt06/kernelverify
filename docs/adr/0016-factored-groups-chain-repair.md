@@ -64,8 +64,23 @@ The four in-contract cells ADR 0014 recorded as still demanding more than K = 4,
 | 4096x2560 | 4.563 | 0.941 |
 | 2560x4096 | 4.001 | 0.915 |
 
-All four were bound by `device-factored-simd` on constant rows, and all four now sit at roughly 1, which is what a member that is one legitimate rounding order among several should read.
+All four were bound by `device-factored-simd` on constant rows at batch 1, and all four now sit at roughly 1, which is what a member that is one legitimate rounding order among several should read.
+
+That column is the SAME cell re-read, not a fresh maximum over the shape, and the difference matters enough to state.
+Re-maximising each shape after the repair gives 1.942, 1.804, 1.464, 3.120, 2.220 and 2.328, because the repair made `factored-groups` deliberately less accurate, so it rises as the device member falls and becomes the binding member almost everywhere.
+"Roughly 1" is therefore true of the four residual cells and not of the grid; the claim that holds for the grid is that every shape's demand is now far under K = 4.
+Both readings are pinned in `tests/test_repaired_member_artifact.py`.
+
 The admissible-only pooled demand over the whole serving grid falls from 6.973 to 3.120.
+
+### The evidence for every number in this ADR
+
+Every reading above is the committed ADR 0013 records with one column replaced, so the column is committed too: `bench/results/quant_serving_repaired_member.json`, written by `bench/derive_repaired_member_column.py`.
+It carries the repaired `factored-groups` value for each of the 1,536 records, the identity of the record it belongs to, and a header naming the evidence hash and the sha256 of the code that produced it.
+The generator re-derives the five untouched CPU members and the three device members on every record as it goes and raises if any one of them moved, so the continuity invariant is checked on the whole grid, not on the 64-record sample `tests/test_quant_contract_members.py` can afford.
+`tests/test_repaired_member_artifact.py` recomputes 1.743 -> 0.328 and 6.973 -> 3.120 from that file on every test run, and fails if the file predates the evidence or the code it names.
+Regenerating it takes about 70 minutes, holds roughly 16 GB and peaked at 24.3 GB on the run that produced the committed file, so it is a coordinator-run harness under a footprint watchdog, never a headless worker: `.venv/bin/python -u bench/derive_repaired_member_column.py`.
+Eight of its 48 blocks are lm_head and account for most of that time.
 
 ## The device grid, re-run
 

@@ -155,4 +155,14 @@ K = 4 and the membership stay unchanged, and no number in this ADR's tables chan
 
 This run's records are now a committed record at `bench/results/quant_serving_adequacy.json` (sha256 `54d0ad5ca4f28f00a401f0481a8b1c69c42cadcc01e3c4a21cca7728ced01833`), and `bench/reinterpret_serving_adequacy.py` derives the ruled reading from them into `bench/results/quant_serving_reinterpretation.json` without touching them.
 The freeze line accordingly narrows by this ADR's own amendment pattern: reruns must reproduce this ADR's MEASURED RECORDS bit-identically, and their interpretation follows ADR 0014 - per-cell held-out eligibility, out-of-contract cells labelled with their numbers, the DEMAND MISS branch judged on the admissible-only demand, and the tolerance overshoot printed beside `k_demand`.
-The exit-1 refusal this ADR recorded was the correct PRE-RULING reading; a rerun today still exits 1, through the same branch, on the four-cell in-contract residual ADR 0014 reports (the admissible-only demand of member `device-factored-simd` at fp32 constant-rows), which remains open coordinator business.
+The exit-1 refusal this ADR recorded was the correct PRE-RULING reading; at the time of this amendment a rerun still exited 1, through the same branch, on the four-cell in-contract residual ADR 0014 reports (the admissible-only demand of member `device-factored-simd` at fp32 constant-rows), which was then open coordinator business.
+
+## Amendment (2026-08-15, third): the residual is closed and the measured-records freeze line narrows once more
+
+ADR 0016 closed that residual.
+The four cells were not a membership gap: the CPU member `factored-groups` was summing each group with a pairwise reduction, which is EXACT on a constant row, so the floor those cells produced was too tight and `device-factored-simd` - a correct kernel - read as a demand above K.
+Under the repaired member the four cells read 1.022, 1.052, 0.941 and 0.915, and the ten records where the shipped tolerance actually flagged a correct kernel are closed.
+So a rerun today does NOT exit 1 on that residual.
+
+The measured-records freeze line narrows accordingly: reruns reproduce every column of this ADR's records bit-identically EXCEPT `factored-groups`, which ADR 0016 deliberately changed, and everything derived from that column moves with it.
+That is the same exception ADR 0012's freeze line carries, for the same reason.
