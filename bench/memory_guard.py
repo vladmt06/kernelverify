@@ -110,15 +110,46 @@ class BudgetGuard:
     records. ``reader`` is injectable so the refusal path is testable without
     allocating tens of GB."""
 
-    def __init__(self, budget_gb: float, reader=None):
+    def __init__(self, budget_gb: float, reader=None, parent_pid: int | None = None):
         self.budget_gb = budget_gb
         self._reader = phys_footprint_gb if reader is None else reader
+        # Children pass the pid that launched them; the parent's own in-process
+        # guard passes nothing, because a parent has no parent to lose and the
+        # check would fire on every detached run.
+        self.parent_pid = parent_pid
 
     def check(self, cell: str) -> float:
+        if self.parent_pid is not None:
+            now = os.getppid()
+            if now != self.parent_pid:
+                raise Orphaned(cell, self.parent_pid, now)
         current, _peak = self._reader()
         if current > self.budget_gb:
             raise BudgetExceeded(cell, current, self.budget_gb)
         return current
+
+
+class Orphaned(RuntimeError):
+    """This measurement child outlived the parent that launched it.
+
+    The parent owns the machine lock, the checkpoint and the results file, and
+    its death releases the lock immediately - so an orphaned child holds the
+    GPU and keeps allocating while the NEXT harness starts on top of it, which
+    is two heavy measurements on one machine with nothing left to notice.
+
+    getppid() is the signal and it costs nothing: when the parent dies the
+    child is reparented (to launchd on macOS), so the value captured at startup
+    stops being true. Checked between records, where the budget is already
+    checked, because that is the last point at which stopping is still cheap.
+    """
+
+    def __init__(self, cell: str, launching_pid: int, now_pid: int):
+        super().__init__(
+            f"orphaned at {cell}: launched by pid {launching_pid}, now "
+            f"reparented to {now_pid}; the parent that owned the lock is gone")
+        self.cell = cell
+        self.launching_pid = launching_pid
+        self.now_pid = now_pid
 
 
 class LowMemoryRefusal(RuntimeError):

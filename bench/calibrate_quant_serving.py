@@ -317,7 +317,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 BITS = 3
 BASE_BATCHES = (1, 2, 8, 16)
 PROBE_BATCH_MAX = 16
-K_SHIP = 4.0  # ADR 0012: the shipped K over the three-class nine-name floor
+# The shipped K, imported rather than copied: a literal here would be a second
+# source for a number the verifier already owns, and this harness's whole STEP 4
+# is "what does the grid demand of the K that ships" (ADR 0012, ADR 0016).
+from kernelverify.schemas.native_ops import K_QUANT as K_SHIP  # noqa: E402
 
 ARTIFACT_DIR = Path("/Users/vlad/kernelverify/bench/.models/qwen3-4b-3bit-g64")
 OUT_PATH = Path(__file__).with_name(".cache") / "quant_serving_adequacy.json"
@@ -684,6 +687,19 @@ def footprint_line() -> str:
     return f"footprint {current:.2f} GB (peak {peak:.2f} GB); {rss_line()}"
 
 
+def summary_line(meta: dict) -> str:
+    """The closing line of a run, from an explicit reading rather than a call.
+
+    It used to be `print(f"peak footprint: {rss_line()}")`, which labelled
+    itself `peak footprint` and printed `ru_maxrss` - the one number in the
+    whole log that a reader is most likely to trust and least able to act on.
+    Taking a dict makes the two peaks nameable and the line testable without
+    allocating 22 GB to produce one.
+    """
+    return (f"peak footprint: {meta['footprint_peak_gb']:.2f} GB; "
+            f"rss {meta['rss_peak_gb']:.2f} GB")
+
+
 # The modules a measured record's value passes through: the harness itself,
 # the runner that dispatches on the GPU, the device members and the contract
 # they implement, and the three standing bench modules whose functions this
@@ -780,6 +796,7 @@ from memory_guard import (  # noqa: E402
     BudgetExceeded,
     BudgetGuard,
     LowMemoryRefusal,
+    Orphaned,
     available_memory_gb,
     budget_gb_arg,
     machine_ram_gb,
@@ -889,6 +906,37 @@ def _child_death_reason(returncode: int) -> str:
     return f"died with exit {returncode}"
 
 
+def _reap(proc) -> None:
+    """Leave no child behind, and never signal our own group doing it.
+
+    The child's getppid check is the backstop for a parent that dies without
+    running this; this is the path for a parent that merely STOPS - a raised
+    refusal, a KeyboardInterrupt, a wall-cap timeout - where the child would
+    otherwise keep the GPU and keep allocating against a lock that no longer
+    exists.
+
+    The pgid passed to killpg is the child's own pid, never os.getpgid(pid).
+    Reading the group back would return OUR group if start_new_session were
+    ever dropped, and the kill would then take out the parent, its siblings
+    and the foreground job. The assertion makes that failure loud and inert
+    rather than lethal.
+    """
+    if proc.poll() is not None:
+        return
+    if proc.pid == os.getpgrp():
+        return  # inconceivable, and not worth being wrong about
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+        proc.wait(timeout=5.0)
+    except (ProcessLookupError, PermissionError):
+        pass
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
 def spawn_measurement(cell: str, task: dict, budget_gb: float,
                       wall_cap_s: float | None = None,
                       command: list | None = None) -> tuple[dict, dict]:
@@ -912,12 +960,20 @@ def spawn_measurement(cell: str, task: dict, budget_gb: float,
     argv = list(command) if command is not None else [
         sys.executable, str(Path(__file__).resolve())]
     argv += ["--child-task", str(task_path), "--child-out", str(result_path)]
+    # start_new_session makes the child a session and process-group leader, so
+    # its pgid IS its pid. That is a PRECONDITION for the kill below, not a
+    # companion to it: without it the child shares OUR group, and signalling
+    # "the child's group" would signal ourselves, every sibling, and in a
+    # foreground run the whole job. It also means a terminal SIGINT no longer
+    # reaches the child, which is precisely why the parent must now clean up.
+    proc = subprocess.Popen(argv, start_new_session=True)
     try:
-        proc = subprocess.run(argv, timeout=wall_cap_s)
+        proc.wait(timeout=wall_cap_s)
     except subprocess.TimeoutExpired:
         raise ChildRefusal(cell, EXIT_CHILD_DEATH,
                            f"hit the {wall_cap_s:.0f}s wall cap")
     finally:
+        _reap(proc)
         task_path.unlink(missing_ok=True)
     if proc.returncode == EXIT_BUDGET_REFUSAL:
         raise ChildRefusal(cell, EXIT_BUDGET_REFUSAL,
@@ -956,7 +1012,10 @@ def child_main(args) -> int:
     holds it), no checkpoint (the parent owns it), fresh DeviceMemberSession
     per child by design (seconds of compile, ruled acceptable under D3)."""
     task = json.loads(Path(args.child_task).read_text())
-    guard = BudgetGuard(task["budget_gb"])
+    # Captured at startup, before any work: this is the parent that owns the
+    # lock, the checkpoint and the results file. If it changes, we are an
+    # orphan and every record we go on to measure is unowned.
+    guard = BudgetGuard(task["budget_gb"], parent_pid=os.getppid())
     cell = task.get("cell", task["kind"])
     verbose = task.get("verbose", False)
     print(f"  child {cell}: start ({footprint_line()})", flush=True)
@@ -1183,7 +1242,7 @@ def probe_batch_regimes(shapes, session: DeviceMemberSession,
         if guard is not None:
             guard.check(f"probe {name} {d_out}x{d_in}")
         if verbose:
-            print(f"  {name} {d_out}x{d_in}: quantizing ({rss_line()})",
+            print(f"  {name} {d_out}x{d_in}: quantizing ({footprint_line()})",
                   flush=True)
         rng = np.random.default_rng(10_000 + PROBE_SEED)
         w = make_w(d_out, d_in, "normal-0.02", rng)
@@ -1195,7 +1254,7 @@ def probe_batch_regimes(shapes, session: DeviceMemberSession,
         carrier = _carrier(artefact)
         w_q, scales, biases = mlx_quantize_hoist(w)
         if verbose:
-            print(f"    hoists + carrier built ({rss_line()})", flush=True)
+            print(f"    hoists + carrier built ({footprint_line()})", flush=True)
         # rng order pinned: float32 then float16
         x16 = {d: make_x(PROBE_BATCH_MAX, d_in, _np_dtype(d), "unit", rng)
                for d in ("float32", "float16")}
@@ -1225,7 +1284,7 @@ def probe_batch_regimes(shapes, session: DeviceMemberSession,
                 matrix &= match_matrix([outs])
                 del outs
                 if verbose:
-                    print(f"    {dtype_name} {impl_name} done ({rss_line()})",
+                    print(f"    {dtype_name} {impl_name} done ({footprint_line()})",
                           flush=True)
         current, peak = rss_gb()
         report[name] = {
@@ -1308,7 +1367,7 @@ def grid_iteration(name: str, d_out: int, d_in: int, draw: str, seed: int,
         }
         block.append((record, x, ref))
         if verbose:
-            print(f"    {label} done ({rss_line()})", flush=True)
+            print(f"    {label} done ({footprint_line()})", flush=True)
     for fault_name, w_fault32 in fault_dequants(artefact):
         for record, x, ref in block:
             record["faults"][fault_name] = err(
@@ -1342,7 +1401,7 @@ def measure_serving(shapes, batches, session: DeviceMemberSession,
                 records.extend(block["records"])
             if verbose:
                 print(f"    {name} {d_out}x{d_in} {draw} done "
-                      f"({len(records)} records, {rss_line()})", flush=True)
+                      f"({len(records)} records, {footprint_line()})", flush=True)
             if on_block is not None:
                 on_block(records)
     return {"records": records, "bit_exact": all(exactness),
@@ -1863,7 +1922,7 @@ def _locked_main(args) -> int:
     print("serving shapes: "
           + ", ".join(f"{n} {d_out}x{d_in}" for n, (d_out, d_in) in shapes))
     print(f"budget: {args.budget_gb:.1f} GB phys_footprint on a "
-          f"{machine_ram_gb():.1f} GB machine; start {rss_line()}")
+          f"{machine_ram_gb():.1f} GB machine; start {footprint_line()}")
 
     fingerprint = checkpoint_fingerprint(provenance, shapes)
     saved = read_checkpoint(CHECKPOINT_PATH, fingerprint) if args.resume else {}
@@ -2104,7 +2163,8 @@ def _run_measured_steps(args, shapes, spawn, saved, steps, resumed,
         "records": records,
     }, default=float))
     print(f"\nrecords: {OUT_PATH}")
-    print(f"peak footprint: {rss_line()}")
+    print(summary_line({"footprint_peak_gb": phys_footprint_gb()[1],
+                        "rss_peak_gb": rss_gb()[1]}))
     if resumed:
         print(f"RESUMED steps (not re-measured in this process): {resumed}; "
               f"ADR 0013 must say so")

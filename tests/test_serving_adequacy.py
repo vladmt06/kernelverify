@@ -115,6 +115,15 @@ def test_canonical_artifact_path_is_absolute_and_shared():
     assert str(ARTIFACT_DIR).startswith("/Users/vlad/kernelverify/")
 
 
+def test_the_serving_harness_ships_the_verifier_k_not_a_copy():
+    """Identity, not equality: two 4.0 literals in two modules are equal and
+    are different objects, so only `is` can tell a shared K from a copy that
+    has already drifted, or is one edit away from drifting."""
+    import calibrate_quant_serving as h
+    from kernelverify.schemas.native_ops import K_QUANT
+    assert h.K_SHIP is K_QUANT
+
+
 # ---------------------------------------------------------------------------
 # Exact-value engineering: every rewritten path must be bit-identical to the
 # untouched reference path. Tolerance has no place in these assertions.

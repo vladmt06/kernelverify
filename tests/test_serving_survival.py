@@ -8,6 +8,8 @@ dying at 39.5 GB footprint, so RSS survives only as a secondary print and no
 gate reads it.
 """
 
+import ast
+import inspect
 import math
 import os
 import struct
@@ -29,6 +31,7 @@ from calibrate_quant_serving import (
     BudgetExceeded,
     BudgetGuard,
     LowMemoryRefusal,
+    Orphaned,
     available_memory_gb,
     build_parser,
     machine_ram_gb,
@@ -62,6 +65,61 @@ def test_machine_ram_reading_is_plausible():
 
 
 # ---------------------------------------------------------------------------
+# T1b: what the progress lines SAY. The reader being truthful is not enough if
+# the narration prints the other number. Three SIGKILLs were narrated by lines
+# reporting RSS, which under-read a 52 GB footprint as 8 GB, so the log showed
+# an idle-looking run right up to the kill.
+# ---------------------------------------------------------------------------
+def test_no_progress_line_prints_rss_alone():
+    """Every print goes through footprint_line().
+
+    Checked against the syntax tree, not the text. A text scan gets this wrong
+    twice over: counting `rss_line()` reads 2 when the change is complete (the
+    definition line contains its own name, and footprint_line keeps one call to
+    carry RSS as its tail), and grepping lines that hold both `print(` and
+    `rss_line()` flags a docstring that QUOTES the old line. The tree answers
+    the question actually being asked: does any print statement, anywhere,
+    still reach rss_line?
+    """
+    tree = ast.parse(inspect.getsource(harness))
+    offenders = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "print"):
+            continue
+        for inner in ast.walk(node):
+            if (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
+                    and inner.func.id == "rss_line"):
+                offenders.append(node.lineno)
+    assert offenders == [], offenders
+
+    # and the demotion is real, not a rename: rss_line still has exactly one
+    # caller, footprint_line, which is what keeps RSS visible as a second number
+    callers = [n.lineno for n in ast.walk(tree)
+               if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+               and n.func.id == "rss_line"]
+    assert len(callers) == 1, callers
+
+
+def test_footprint_line_still_carries_rss_second():
+    """RSS is not deleted, it is demoted. A line that dropped it would lose the
+    comparison that shows the two readings diverging."""
+    line = harness.footprint_line()
+    assert line.startswith("footprint ")
+    assert "rss " in line
+    assert line.index("footprint") < line.index("rss")
+
+
+def test_the_final_summary_reports_the_footprint_peak_not_ru_maxrss():
+    """The closing line was labelled `peak footprint:` and printed ru_maxrss -
+    a mislabel, and the single most misleading number in the whole log."""
+    line = harness.summary_line({"footprint_peak_gb": 22.4, "rss_peak_gb": 2.4})
+    assert line.startswith("peak footprint: 22.4")
+    assert "rss 2.4" in line
+    assert line.index("footprint") < line.index("rss")
+
+
+# ---------------------------------------------------------------------------
 # T1: the budget guard. Refusal, never silent grid shrinking.
 # ---------------------------------------------------------------------------
 def test_budget_guard_refuses_over_budget_and_names_the_cell():
@@ -77,6 +135,34 @@ def test_budget_guard_refuses_over_budget_and_names_the_cell():
 def test_budget_guard_passes_under_budget():
     guard = BudgetGuard(24.0, reader=lambda: (10.0, 12.0))
     assert guard.check("grid lm_head normal-0.02 s0") == 10.0
+
+
+# ---------------------------------------------------------------------------
+# T1c: the orphan hole. A child outlives a killed parent, keeps the GPU, and
+# keeps allocating - while the machine lock the PARENT held has already been
+# released by its death, so the next harness starts on top of it. The child
+# must notice and stop. getppid() is the signal: when the parent dies the
+# child is reparented, so the value it saw at startup stops being true.
+# ---------------------------------------------------------------------------
+def test_a_child_stops_at_the_next_record_once_its_parent_is_gone():
+    guard = BudgetGuard(24.0, reader=lambda: (1.0, 1.0),
+                        parent_pid=os.getppid() + 100000)  # never our real parent
+    with pytest.raises(Orphaned) as exc:
+        guard.check("grid lm_head normal-0.02 s0")
+    assert "lm_head" in str(exc.value), "the cell it died on must be named"
+
+
+def test_a_child_whose_parent_is_alive_keeps_going():
+    guard = BudgetGuard(24.0, reader=lambda: (1.0, 1.0), parent_pid=os.getppid())
+    assert guard.check("grid lm_head normal-0.02 s0") == 1.0
+
+
+def test_the_parent_side_guard_has_no_parent_to_lose():
+    """The same guard runs in the parent's own in-process path, where an
+    orphan check would be meaningless - and would fire on any process whose
+    own parent exits, which is every detached run."""
+    guard = BudgetGuard(24.0, reader=lambda: (1.0, 1.0))
+    assert guard.check("probe lm_head") == 1.0
 
 
 def test_refusal_exit_codes_are_distinct_and_leave_the_existing_ones_alone():
@@ -578,6 +664,78 @@ def test_child_exit_zero_without_result_is_a_death(child_dir):
                                   budget_gb=24.0, command=_cmd("pass"))
     assert exc.value.exit_for_parent == EXIT_CHILD_DEATH
     assert "no result" in exc.value.reason
+
+
+def test_the_child_is_spawned_into_its_own_session(child_dir, monkeypatch):
+    """start_new_session is what makes the group kill target the child alone.
+
+    Pinned because the two halves are strictly ordered: without the session,
+    the child shares the parent's process group and `killpg(child.pid)` would
+    resolve to the parent's own group. Dropping this flag would not fail
+    loudly - it would make the reaper lethal.
+    """
+    seen = {}
+    real_popen = harness.subprocess.Popen
+
+    def spy(argv, **kwargs):
+        seen.update(kwargs)
+        return real_popen(argv, **kwargs)
+
+    monkeypatch.setattr(harness.subprocess, "Popen", spy)
+    harness.spawn_measurement("cell", {"kind": "noop"}, 24.0,
+                              command=_cmd(_WRITES_RESULT % "3.5"))
+    assert seen.get("start_new_session") is True
+
+
+def test_the_reaper_never_signals_the_parents_own_group(monkeypatch):
+    """The one line that could kill the whole foreground job.
+
+    os.getpgid(child) would return OUR group if the session flag were ever
+    dropped, so the reaper passes the child's own pid and refuses to signal a
+    pgid equal to our own. Asserted directly, because the only other way to
+    learn it is to lose the session.
+    """
+    killed = []
+    monkeypatch.setattr(harness.os, "killpg",
+                        lambda pgid, sig: killed.append(pgid))
+
+    class _Ours:
+        pid = os.getpgrp()          # pretend the child leads OUR group
+        def poll(self): return None
+        def wait(self, timeout=None): return 0
+
+    harness._reap(_Ours())
+    assert killed == [], "the reaper signalled the group it is standing in"
+
+
+def test_a_parent_that_stops_does_not_leave_the_child_running(child_dir,
+                                                              monkeypatch):
+    """The hole itself. A child outliving its parent keeps the GPU and keeps
+    allocating, while the machine lock the parent held was released by its
+    death - so the next harness starts on top of it.
+
+    This also pins a behaviour change the Popen switch introduced: `subprocess
+    .run` killed its child on timeout, `proc.wait(timeout=)` does not. Without
+    the reaper the wall-cap path would leak a live child on every refusal.
+    """
+    spawned = []
+    real_popen = harness.subprocess.Popen
+
+    def spy(argv, **kwargs):
+        proc = real_popen(argv, **kwargs)
+        spawned.append(proc)
+        return proc
+
+    monkeypatch.setattr(harness.subprocess, "Popen", spy)
+    with pytest.raises(harness.ChildRefusal):
+        harness.spawn_measurement("cell", {"kind": "noop"}, 24.0,
+                                  command=_cmd("import time\ntime.sleep(60)\n"),
+                                  wall_cap_s=0.5)
+
+    assert len(spawned) == 1
+    assert spawned[0].poll() is not None, (
+        "the wall-capped child is still running: the refusal returned and "
+        "left it holding the machine")
 
 
 def test_wall_capped_child_is_a_death_naming_the_cap(child_dir):
