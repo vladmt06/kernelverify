@@ -18,7 +18,9 @@ What this repo has already measured, and this review must not re-derive (ruling 
 
 - Dense 4-bit decode already runs at ~92% of the memory-bandwidth ceiling on this machine (ADR 0007); the remaining ~8% is the most any dense-4-bit GEMV kernel can ever win at batch 1. That is not where "faster" comes from.
 - The fixed cost outside the kernel is 0.99 ms per token (ADR 0007, "the small-model gap is dispatch cost").
-- Apple's own sub-4-bit (3-bit, 2-bit) path is inefficient by construction (pivot design E3, PolyQ's 2^b table wall), and 3-bit reads fewer bytes than 4-bit, so an honest 3-bit kernel near the ceiling would be BOTH faster than stock 4-bit AND smaller in memory. Our current 3-bit kernel loses to stock at batch 1 (ADR 0015: 0.937x-0.98x at M=1); the headroom is real and unclaimed.
+- Apple's own sub-4-bit (3-bit, 2-bit) path is inefficient by construction, and 3-bit reads fewer bytes than 4-bit, so an honest 3-bit kernel near the ceiling would be BOTH faster than stock 4-bit AND smaller in memory.
+  The "pivot design E3" and "PolyQ 2^b table wall" references travel from the plan's own skeleton wording; the design document naming them is outside this worktree and this review could not open it, so they are unsourced here. Our current 3-bit kernel loses to stock at batch 1: the committed pricing recording `bench/results/qmv-boundary-pricing-2026-08-15.json` reads 0.937x at M = 1, and ADR 0015 buckets M = 1 to 3 as a loss without restating the ratio.
+The headroom is real and unclaimed.
 - Apple's stock batch-1 kernel rounds in half precision internally (ADR 0014); an honest kernel accumulates in fp32 or better, and that is our contract's line.
 
 Sub-question A1 (sub-4-bit kernels): what published kernel designs bring 2/3-bit weight-only GEMV close to the bandwidth ceiling at batch 1 on a unified-memory GPU without narrowing intermediate precision - packing layouts, dequant-on-the-fly schemes, lookup-table methods and their limits, register/occupancy strategies?
@@ -37,14 +39,28 @@ Sub-question B (generator architecture): what published approaches to generating
 - Evidence: 3 = open code + reproduced by others; 2 = open code; 1 = numbers only; 0 = claims.
 - Applicability to Metal/unified memory: 3 = demonstrated on Apple silicon; 2 = memory-bound technique with no CUDA-only dependency; 1 = needs a hardware feature Metal lacks (tensor-core int8, warp shuffle semantics differ); 0 = CUDA-specific.
 - Honesty by our contract: 3 = fp32 accumulate throughout; 2 = int accumulate then fp32 (our int-domain class); 1 = mixed with a narrower intermediate somewhere; 0 = fp16 accumulate.
-- Bytes read per weight at M = 1, relative to MLX affine 3-bit (3 bits + one fp16 scale and one fp16 bias per 64-group = 3.5 bits/weight): 3 = under 3.25 bits/weight with the group parameters counted; 2 = 3.25-3.5; 1 = 3.5-4.0; 0 = at or above 4-bit dense. This is the mechanism at batch 1 (bandwidth-bound) and it is derivable from any paper's packing description; the paper's own reported gain and the hardware it was measured on go in a NOTE column, never in the score (ruling OV-7: CUDA-measured speedups do not transfer).
+- Bytes read per weight at M = 1, relative to MLX affine 3-bit, which is 3 bits plus one fp16 scale and one fp16 bias per 64-group and therefore 3.5 bits/weight.
+  Bands, with the group parameters always counted: 3 = under 3.25 bits/weight; 2 = 3.25-3.5; 1 = 3.5-4.0; 0 = at or above 4-bit dense. This is the mechanism at batch 1 (bandwidth-bound) and it is derivable from any paper's packing description; the paper's own reported gain and the hardware it was measured on go in a NOTE column, never in the score (ruling OV-7: CUDA-measured speedups do not transfer).
 
 ## 4. Candidates (filled by R1 step 4)
 
-### 4.0 How the pre-registered rubric was applied where an axis does not fit
+### 4.0 POST-HOC amendment to section 2, made after the papers were in hand
+
+Status: this section was written in the same commit that filled the table below (`db65724`), NOT in the pre-registered skeleton (`71c6748`).
+It relaxes a pre-registered rule after seeing the candidates, which is the exact move pre-registration exists to prevent, so it is labelled rather than absorbed.
+The merge review of 2026-08-16 caught it.
+
+Why the relaxation was needed rather than merely convenient: section 2's criteria are written about weight-quantized matvec, and read literally they exclude EVERY generator paper for not being a GEMV paper, which makes sub-question B unanswerable by construction.
+That is a flaw in the pre-registration, discovered mid-review.
+The honest handling is to say so here and to let the reader discount what depends on it, not to rewrite section 2.
+
+WHAT DEPENDS ON IT: three papers are IN only under this amendment and fail section 2 as originally written.
+Metal-Sci (arXiv 2605.09708) fails criterion 1 - this document's own row says its ten tasks contain no decode and no GEMV.
+VOLTA (arXiv 2511.12638) fails criterion 2 - it reports no speed against any named baseline.
+Open-TQ-Metal (arXiv 2604.16957) fails criterion 2 as written, its baseline being an unoptimised dequantize-then-attend reference.
+None of the three is in the section 5 ranking or the top three, so no spike and no go/no-go decision rests on them; they inform sub-question B and the Metal context only.
 
 Three readings had to be made to score papers that the four axes do not cleanly describe.
-They are recorded here rather than exercised silently, and they were fixed before the table below was filled.
 
 - The four inclusion criteria of section 2 are written about weight-quantized matvec, so criteria 1 to 3 bind sub-questions A1 and A2, and criterion 4 is the bar for sub-question B.
   A generator or verifier paper is not excluded for failing to be a GEMV paper; that is what criterion 4 exists to say.
@@ -93,7 +109,7 @@ Six scores in that table were read from a source rather than from a paper's pros
 - Multi-Scale Dequant, arXiv 2605.13915 - criterion 1: its target is an Ascend NPU with decoupled compute units, and the dequantization bottleneck it removes is a property of that decoupling rather than of a GPU whose ALUs do the dequant.
 - QServe (arXiv 2405.04532) and Atom (arXiv 2310.19102) - criterion 1 as measured: both quantize activations as well as weights and both report batched serving throughput, not the M = 1 decode GEMV; W4A8 and W4A4 are also a different contract question from weight-only.
 - SBVR (arXiv 2509.18172), CodeGEMM (arXiv 2512.17970), AnyBCQ (arXiv 2510.10467), RaZeR (arXiv 2501.04052) - criterion 3: none states its accumulation precision in the material this review could read, and none links a kernel source this review could open.
-- Marlin (PPoPP 2025) - criterion 3 as assessed: this review could not read a source that states its accumulation precision, and its 4-bit packing with group scales scores 0 on the bytes-per-weight axis regardless, so the ranking in section 5 could not move if the fetch succeeded.
+- Marlin (PPoPP 2025, arXiv 2408.11743) - criterion 3 as assessed: this review could not read a source that states its accumulation precision, and its 4-bit packing with group scales scores 0 on the bytes-per-weight axis regardless, so the ranking in section 5 could not move if the fetch succeeded.
 - The launch-overhead family - ClusterFusion++ (arXiv 2604.23553), Mirage Persistent Kernel (arXiv 2512.22219), Hybrid JIT-CUDA Graph (arXiv 2604.23467), TaxBreak (arXiv 2603.12465) and "Memory-Bound but Not Bandwidth-Limited" (arXiv 2605.30571) - criterion 3 as assessed: none of the material this review could read states an accumulation precision, and each one's mechanism is a CUDA-runtime construct (CUDA Graphs, thread-block clusters, TMA descriptors, persistent megakernels) whose Metal counterpart, the indirect command buffer, none of them evaluates.
   They agree with ADR 0007's finding in words - "at batch 1 single-token decode, the binding constraint is the launch of the many small kernels that make up a transformer layer" (arXiv 2605.30571) - and none of them measures it on our backend.
   The PDF of arXiv 2605.30571 did not render for this review, so its numbers are not quoted anywhere above.
@@ -262,7 +278,8 @@ And no spike's number is a product claim: the M = 1 spike measures one shape at 
 
 ## 7. The optimiser's shape
 
-The generator does not exist: the claims audit of 2026-08-15 found zero code in this repository that produces a candidate kernel.
+The generator does not exist.
+No module under `kernelverify/` emits a candidate kernel: `kernelverify/runners/specialize.py` substitutes into a fixed template, `kernelverify/pack/` holds three hand-written Metal kernels (`wide_qmv.py`, `kv_attention.py`, `moe_dispatch.py`), and nothing proposes a new one.
 Almost everything downstream of the generator does exist, and it exists in the shape the sub-question B papers say it should, which is why this section is a wiring diagram and not a design.
 
 ### 7.1 The loop, as it would sit on this repo
