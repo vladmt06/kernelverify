@@ -786,3 +786,78 @@ def test_the_round_count_is_the_registered_one():
     import inspect
     src = inspect.getsource(serve_sub4bit._op_probe)
     assert "range(ROUNDS)" in src and "range(7)" not in src
+
+
+# ---------------------------------------------------------------------------
+# the registration and the code say the same thing
+#
+# Each of these is a degree of freedom the harness always had and section 4
+# never named. A measurement harness's freedoms are registered in writing or
+# removed from the code; an unregistered one is a knob nobody agreed to.
+# ---------------------------------------------------------------------------
+def _findings_doc() -> str:
+    return (Path(serve_sub4bit.__file__).resolve().parents[1] / "docs"
+            / "research" / "2026-08-15-sub4bit-serve-findings.md").read_text()
+
+
+def test_the_whitelist_matches_the_registration():
+    """One spelling of the rule, in the doc, checked against the code. Two
+    spellings is how the doc came to say `prefill-*` and `m-*-outside-
+    dispatch` while the code whitelisted any `m-` reason plus forced-stock."""
+    import ast
+    import re
+
+    found = re.search(r"WHITELIST_PREFIXES = (\([^)]*\))", _findings_doc())
+    assert found, "the findings doc must register the whitelist verbatim"
+    assert ast.literal_eval(found.group(1)) == \
+        serve_sub4bit._WHITELIST_PREFIXES
+
+
+def test_the_only_m_reason_is_the_routing_table_declining_the_cell():
+    """The registration whitelists the `m-` prefix, which is wider than the
+    one reason that exists. This is what keeps the widening honest: no other
+    `m-` reason may appear and be absorbed without anyone deciding it."""
+    import re
+
+    a = make_holder()
+    with patched(a) as patch:
+        for m in B_GRID:
+            mx.eval(a(x_rows(m)))
+        m_reasons = [r for r in patch.fallbacks if r.startswith("m-")]
+    assert m_reasons, "the grid must exercise the outside-dispatch branch"
+    for reason in m_reasons:
+        assert re.fullmatch(r"m-\d+-outside-dispatch-\d+x\d+", reason), reason
+
+
+def test_a_bias_term_falls_back_and_invalidates_the_round():
+    """The kernel has no bias path, so a biased layer must run stock - and
+    because `bias-term` is deliberately NOT whitelisted, a round in which it
+    happened is invalid rather than quietly part-stock."""
+    holder = Holder()
+    holder.proj = nn.QuantizedLinear(D_IN, D_OUT, bits=BITS, group_size=64,
+                                     bias=True)
+    holder.set_dtype(mx.float16)
+    mx.eval(holder.parameters())
+    with patched(holder) as patch:
+        mx.eval(holder(x_rows(dispatched_m())))
+        assert patch.calls == 0
+        assert patch.fallbacks.get("bias-term") == 1
+        assert patch.hard_fallbacks() == {"bias-term": 1}
+    assert "bias-term" in _findings_doc()
+
+
+def test_the_fp16_cast_of_both_checkpoints_is_registered():
+    """load_model casts every parameter of both artifacts to fp16, which is
+    what makes arm 1 eligible at all; it is applied to every arm equally and
+    the doc has to say the numbers describe the cast checkpoints."""
+    import inspect
+
+    assert "set_dtype(mx.float16)" in inspect.getsource(
+        serve_sub4bit.load_model)
+    assert "set_dtype" in _findings_doc()
+
+
+def test_the_corpus_location_is_recorded():
+    """bench/.corpus is gitignored, so the file exists per worktree and the
+    doc is the only place that can say where it comes from."""
+    assert "`bench/.corpus/` is gitignored" in _findings_doc()
