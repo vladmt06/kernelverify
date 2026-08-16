@@ -108,8 +108,156 @@ Rigel (arXiv 2606.12765) is titled "Reverse-Engineering the Metal 4.1 Tensor Com
 If a tensor compute path exists and is reachable on M4, then ADR 0007's reading that the tensor API is disabled for pre-M5 devices bounds THIS machine (M3 Pro) and not the product's future hardware, which changes what a tensor-core-dependent technique like QTIP is worth.
 That is an open question for a later pass, not a finding of this one.
 
-## 5. Synthesis (filled by R2)
+## 5. Synthesis
 
-## 6. What the verifier would need (filled by R2)
+### 5.1 The ranking, and what it says about the literature
+
+The pre-registered order is the product of the honesty score and the bytes-per-weight score, with evidence as the tie-break.
+Only the A1 rows can be ranked: the axis is weight traffic at M = 1, and section 4.0 fixed that a paper scored `n/a` on it is out of this ranking by construction.
+
+| rank | paper | honest x bytes | evidence | Metal | kept |
+|---|---|---|---|---|---|
+| 1 | QTIP, arXiv 2406.11235 | 3 x 3 = 9 | 2 | 1 | yes |
+| 2 | LUT-GEMM, arXiv 2206.09557 | 1 x 3 = 3 | 2 | 2 | yes |
+| 3 | FLUTE, arXiv 2407.10960 | 1 x 3 = 3 | 2 | 1 | yes |
+| 4 | Any-Precision LLM, arXiv 2402.10517 | 0 x 3 = 0 | 2 | 2 | no |
+
+Ranks 2 and 3 tie at 3 and tie again on evidence at 2, which the pre-registered tie-break does not resolve.
+The tie is broken by the Metal axis (LUT-GEMM 2 against FLUTE 1) and the extension is recorded here rather than applied silently; it changes the order of two techniques that are both kept, so nothing rides on it.
+
+The ranking says one thing plainly, and it is the finding of this review.
+Exactly one published sub-4-bit GEMV design in this table both reads fewer bytes per weight than MLX affine 3-bit and keeps an fp32 total, and its published kernel gets its speed from a tensor-core instruction this machine does not have (ADR 0007).
+The other two designs reach the same traffic and pay for it with a narrower intermediate: FLUTE by reducing partial sums in fp16 across splits, LUT-GEMM by forming activation partial sums in an fp16 table.
+The fourth accumulates in half precision outright, which its own released source shows.
+So the product opening is not "port a paper".
+It is that the honest version of these packings has not been published for any backend, and the backend where it matters most for a person on a laptop has no entrant at all.
+
+### 5.2 Rank 1: QTIP (arXiv 2406.11235)
+
+**Mechanism.**
+Weights are coded by a bitshift trellis: consecutive weights share bits of one bit stream, and the decoder walks the stream shifting kV bits at a time, so no per-group scale table has to be read at all.
+At 2 bits that is about 2.0 bits per weight against MLX affine 3-bit's 3.5 (3 bits plus one fp16 scale and one fp16 bias per 64-group).
+The released kernels are for the HYB code, whose decode is a small table gather rather than an arithmetic expression, and the accumulation is fp32 throughout (`float4 reg_p`, an `f32.f16.f16.f32` mma, a `float` reduction).
+
+**Why it should still win on Metal at batch 1.**
+Batch-1 decode on this machine is bandwidth-bound and dense 4-bit already sits at about 92% of the bandwidth ceiling (ADR 0007), so the only large lever left is reading fewer bytes.
+1.75x less weight traffic is a 1.75x lever on the part of the token that is not the 0.99 ms fixed cost (ADR 0007).
+The decode work the trellis adds is arithmetic, and arithmetic is what a bandwidth-bound kernel has spare: ADR 0007 measured 6.24 TFLOP/s of fp32 against 135.4 GB/s, a ridge point of 46.7 flop/byte, and a decode of a few instructions per weight is nowhere near it.
+
+**The risk that it does not.**
+Three, in order of size.
+The published kernel's speed comes from `mma.sync`, a tensor-core instruction, and ADR 0007 records the tensor API disabled on this machine, so the Metal version is a different kernel and its performance is unmeasured rather than ported.
+QTIP also applies incoherence processing, which means a Hadamard rotation of the activations at run time and its inverse on the output; that is arithmetic our operator does not contain today and it costs time the paper's own numbers include but our roofline does not model.
+And 2-bit quality is a separate claim from 2-bit speed: nothing in this review measures whether a 2-bit Qwen3-4B is a model anyone wants, and the pricing protocol will happily certify a fast kernel for a bad model.
+
+**The cheapest spike on this machine.**
+Strip it to the part that carries the traffic win and drop the rest.
+Write one Metal kernel that decodes a bitshift-trellis 2-bit stream with a table gather and accumulates in fp32, at ONE shape, `down_proj` 2560x9728, and at M = 1 only.
+That shape because it has the largest reduction dimension of the six Qwen3-4B dispatch shapes (ADR 0015) and ADR 0007 measured that the sub-4-bit kernel deficit needs a large reduction dimension to appear at all.
+Verify first with `bench/pack_wide_qmv.py`'s gate at that shape, then time under `bench/price_qmv_boundary.py`'s protocol (interleaved arms, canary spread capped at 1.5, `ratio_lo > 1` is the only WIN), against stock MLX at the width the product would ship.
+Skip incoherence processing in the spike: without it the arithmetic stays inside a class the contract already has members for (section 6), and if the traffic win does not appear without the rotation it will not appear with it.
+
+### 5.3 Rank 2: LUT-GEMM (arXiv 2206.09557)
+
+**Mechanism.**
+Binary-coding quantization writes each weight as a sum of q signed binary matrices times per-group scales, and the kernel precomputes, once per input vector, a table of every possible sum of a mu-element sub-vector of activations.
+The matvec then reads weight bits and gathers table entries: no weight is ever dequantized and no multiply happens in the inner loop.
+At q = 3 with g = 128 that is 3.125 bits per weight, against MLX's 3.5.
+
+**Why it should still win on Metal at batch 1.**
+The table is small (about 1 KB per eight hidden dimensions by the paper's own accounting) and lives in shared memory, which is Metal threadgroup memory with no CUDA-only dependency named anywhere in the paper.
+The inner loop becomes lookups and adds, which is the cheapest thing a bandwidth-bound kernel can be doing while it waits, and the paper's batch-1 numbers are the ones it leads with (51.6 ms to 46.5 ms per token on OPT-175B).
+It is also the only top-three technique whose mechanism removes multiplication from the inner loop entirely, which matters on a machine where fp16 buys no arithmetic over fp32 (ADR 0007: 6.30 against 6.24 TFLOP/s).
+
+**The risk that it does not.**
+The mechanism's cost is a table build per input vector, and at batch 1 there is exactly one input vector per token to amortize it over, so the build is a fixed per-token cost added to a token that already carries 0.99 ms of fixed cost (ADR 0007).
+The table also has to be rebuilt for every layer, which multiplies that cost by the layer count.
+And the honest version is not the published version: the fp16 table has to become an fp32 table, which doubles the shared-memory footprint and can cost occupancy, so the spike measures a kernel the paper did not.
+
+**The cheapest spike on this machine.**
+Same shape, same protocol, same M = 1: one Metal kernel that builds the sub-vector sum table in fp32 in threadgroup memory and accumulates the gathered sums in fp32, at `down_proj` 2560x9728.
+Time the table build separately from the matvec inside the same interleaved pass, because the two have different scaling and a single number cannot say which one lost.
+The pre-registered reading is the protocol's own: `ratio_lo > 1` against stock MLX 3-bit or it is not a win.
+
+### 5.4 Rank 3: FLUTE (arXiv 2407.10960)
+
+**Mechanism.**
+The packed weight matrix is restructured offline so the bit-unpacking a non-evenly-divisible width needs becomes a handful of aligned vector loads, and the dequantization table is duplicated and vectorized so table reads do not serialize on shared-memory bandwidth.
+At 3 bits with group 128 it reads 3.125 bits per weight.
+
+**Why it should still win on Metal at batch 1.**
+The deficit it attacks is exactly the one ADR 0007 measured in llama.cpp's q3_K: a format that moves 24% fewer bytes than q4_K and is still 17% slower in tokens per second at the 7B's shapes, which no traffic model permits and which therefore has to be unpack cost.
+FLUTE's answer is to move that cost to quantization time, and offline restructuring is backend-independent by construction: it is a permutation of bytes in a file, not an instruction.
+
+**The risk that it does not.**
+As published this technique is out of contract, not merely imprecise: "we implement in-register accumulation in FP32 and globally reduce partial sums in FP16", and the cross-split reduction is where batch-1 GEMV does most of its reducing.
+That is clause C1's line and the same finding ADR 0014 recorded against MLX's own batch-1 kernel, so a faithful port would be a kernel our verifier is built to flag.
+The rest of the kernel is Ampere-shaped (the paper says it is "mostly optimized for Ampere-generation GPUs"), so what transfers is the offline restructuring idea and not the kernel.
+
+**The cheapest spike on this machine.**
+Do not port the kernel; test the claim.
+Take our existing 3-bit path, produce a restructured weight file offline (bit-slices aligned so an MSL kernel reads whole words per thread), and measure only whether the same fp32-accumulating kernel gets faster at M = 1 at `down_proj` 2560x9728 when the bytes are laid out differently.
+That isolates the one portable idea from everything CUDA-shaped around it, and it is the cheapest of the three spikes because it changes no arithmetic at all, which also means its gate result is a formality rather than a question.
+
+### 5.5 What sub-question A2 adds, which is more than the kernels do
+
+Two A2 findings change what the A1 spikes are worth, and one of them may be worth more than all three.
+
+**Speculative decoding is the only mechanism here that moves batch-1 without a better kernel, and it is measured on our hardware.**
+arXiv 2607.17283 measures five draft/target configurations on a consumer Apple-silicon laptop: the best reaches 1.61x wall-clock at K = 6, and three of five configurations DECELERATE.
+One of the losing reasons is the finding to read twice: "the quantized Metal backend executes 'parallel' verification serially".
+Verification of K drafted tokens is a batch-(K+1) matvec, which is the tile-width regime ADR 0015 priced, and where our own wide-tile kernel is a measured WIN at M = 5 to 9 (1.02x to 1.38x across all six shapes).
+So the kernel this repo already has, which ADR 0015 and the plan both record as useless at batch 1, is a kernel for the exact operation that a speculative decoder does once per accepted run.
+That is not a claim that it works; it is a claim that the two measurements meet, and that the meeting point is testable with things this repo already owns.
+
+**Quantization paying for itself at decode has been measured once, on Apple silicon, and the mechanism was dispatch.**
+arXiv 2605.05699 reports an int4 KV cache running FASTER than fp16 across 256 to 4096-token prefixes on Apple M1 (37.0 against 39.4 ms/token on SmolLM2-360M, 211.9 against 246.8 on a 1.7B), with the whole transform in fp32 and quality preserved.
+Its own explanation is ours: "the cost is dispatch, not compute", and the fused single-dispatch kernel is what closed a 12-17% eager-mode penalty.
+That is an independent measurement of ADR 0007's 0.99 ms/token on a different stack, and it says the fusion lever is real on this backend, which none of the CUDA launch-overhead papers can say.
+arXiv 2604.16957 is the same lever at Sq = 1 with fp32 accumulation and open Metal shaders, so the technique has two independent Apple-silicon entries and no CUDA dependency at all.
+
+## 6. What the verifier would need
+
+Every spike above produces a kernel the verifier has to judge, and the judgement is only meaningful if the shipped tolerance's floor contains a member that rounds the way that kernel rounds.
+That is not a formality here: ADR 0016 is the record of what happens when it fails.
+`factored-groups` formed its per-group sums with numpy's pairwise reduction, which is exact on a constant row, so it was the most accurate member exactly where real kernels are least accurate, and the shipped tolerance flagged a correct device kernel on 10 of 1,536 serving records.
+The standing order from ADR 0012 is membership before K, and it applies to each technique below before its gate result may be read.
+
+The classes, as the contract has them today: the six CPU members of `kernelverify/schemas/quant_contract.py::ENSEMBLE` split into a dequant-domain group (`dequant-pairwise`, `dequant-serial`, `lut-gather`, `dequant-reversed`) and an int-domain group (`factored-groups`, `factored-serial`, both of the form `s * sum(x*q) + b * sum(x)`), with a third device-arithmetic class in `kernelverify/schemas/quant_device.py` (`DEVICE_CLASS = "device-arithmetic"`).
+
+| technique | arithmetic class | why | eligible outcome |
+|---|---|---|---|
+| QTIP (arXiv 2406.11235) | NEW | the multiply-accumulate is dequant-domain, but incoherence processing puts a Hadamard rotation of the activations and its inverse inside the operator, and no member of any class rotates | NEW CLASS: membership block first |
+| QTIP without incoherence processing | dequant-domain | a trellis decode by table gather is an exact gather of representable values, which is `lut-gather`'s shape with a different address computation; addressing is not an arithmetic class | GO / NO-GO |
+| LUT-GEMM (arXiv 2206.09557) | int-domain | `sum_i alpha_i * (sum_j b_ij x_j)` is the contract's `s * sum(x*q) + b * sum(x)` with q in {-1, +1}; the table changes the ORDER of the inner sum, not its domain | GO / NO-GO |
+| FLUTE (arXiv 2407.10960), as published | dequant-domain, and out of contract | table-gather dequant then fp32 mma is `lut-gather`'s shape, but the fp16 cross-split reduction is an intermediate narrower than binary32, which is clause C1 - the same ruling ADR 0014 made against MLX's own batch-1 kernel | NO-GO by construction; only the fp32-reduction variant is eligible for GO |
+
+**What the contract would need for the NEW case.**
+A QTIP kernel with incoherence processing computes `R2^T * f(W', R1 * x)` where the rotations are fast Hadamard transforms, so the operator's reference is no longer "quantized matvec" and the admissible class is no longer described by the six members.
+Before its gate result could be read, the ensemble would need at least one member that performs the same rotation with its summation order spelled out, and by AGENTS.md's own lesson it has to round the way a real Hadamard kernel rounds: a butterfly of log2(d) stages accumulated in the stage order the kernel runs, not numpy's vectorized transform, which is the precise mistake ADR 0016 had to repair in `factored-groups`.
+The class needs two members, not one, for the reason `quant_contract.py` already states beside `factored-serial`: leave-one-out calibration over a one-member class measures class absence rather than within-class spread.
+Then K is re-derived over the enlarged membership, in that order, never the reverse (ADR 0012, ADR 0016).
+
+**One risk inside a class that already exists.**
+LUT-GEMM is int-domain and therefore GO/NO-GO eligible, and the class it lands in is the one ADR 0016 flagged as resting on a single outlying member: the six-CPU leave-one-out spread is 7.561 for `factored-groups` against 2.166 for `factored-serial`.
+A LUT-GEMM-shaped kernel sums each mu-element sub-vector as a shallow tree, which is neither the chain `factored-groups` now runs nor the order `factored-serial` varies, so the class contains its domain but not necessarily its rounding.
+That does not change the eligible outcome, which section 6 fixes before any spike runs; it is recorded as the reason a NO-GO on this technique would need reading twice before it is believed.
+
+### 6.1 The go/no-go, pre-registered before any spike runs
+
+Three outcomes, and which one a technique is eligible for is fixed by the table above, not by what its spike measures.
+
+- **(i) GO.** The technique's M = 1 spike measures WIN under the pricing protocol (`ratio_lo > 1`, the whole ratio interval clear of 1.0 from below on a round whose reference arm held steady) AND passes `bench/pack_wide_qmv.py`'s gate at that shape.
+- **(ii) NO-GO.** The spike measures LOSS or REFUSED under the same protocol, or it fails the gate while its arithmetic class already has ensemble members.
+  Recorded and stopped.
+  REFUSED means undecided and never means measured-bad (ADR 0015), so a REFUSED cell stops the technique for this spike without licensing any claim about it.
+- **(iii) NEW CLASS.** Section 6 named the technique's class as NEW, so the shipped tolerance's floor holds no member of that class and a flag would be the ten-false-positives mechanism of ADR 0016 all over again.
+  Its spike's gate result is READ ONLY AFTER a membership block: a member of that class added under its own pre-registration, then K re-derived under the standing membership-before-K order (ADR 0012).
+  After the membership block lands, (i) and (ii) apply unchanged.
+
+Two clauses that bind all three outcomes.
+
+Every spike is verify-then-time: the gate runs before any timing, and a candidate that fails the gate is never timed, because a speed number about an unverified kernel is the thing this repo exists to refuse (ADR 0015 records that every timed cell of the boundary pricing was verified first).
+And no spike's number is a product claim: the M = 1 spike measures one shape at one width against stock MLX, and the end-to-end baseline every technique must ultimately beat is the batch-1 per-stream tokens/s that M2 pins, whatever `wide_qmv` does there.
 
 ## 7. The optimiser's shape (filled by R2)
