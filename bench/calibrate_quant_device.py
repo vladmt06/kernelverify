@@ -117,6 +117,38 @@ e. The five untouched CPU members must reproduce their committed values
    bit-identically (tests/test_quant_contract_members.py pins this on a 64
    record sample). Any other member moving means the environment moved, not
    the repair, and this run's numbers describe neither.
+
+AMENDMENT, 2026-08-16: G1 was not a test
+--------------------------------------
+Step 3 chose k_ship as max(calibration demand, independent demand) and step 4
+then scored G1 over the union of both draws at that k.
+Since the demand IS the maximum of heldout/floor over those records, G1 = 0 was
+true by construction and every ADR since 0009 reported it as evidence.
+From this amendment: k_ship is chosen from the CALIBRATION draw alone; the
+independent draw TESTS it and never sets it.
+If the independent draw's demand exceeds k_ship, that is an INDEPENDENT MISS:
+the cell is named, the run exits 1, and the rule is renegotiated by a human -
+the same stop-at-miss semantics as the serving harness's DEMAND MISS branch.
+This REPLACES ADR 0012's pre-registered "take the next covering grid value and
+report the miss": rolling K up to cover the held-out draw would make G1 on that
+draw true by construction again, and the whole point of this amendment is that
+G1 can fail (ruling 1A of the 2026-08-16 plan review).
+G1 is evaluated on the independent draw only.
+Value-duplicate members (leave-one-out ratio pinned at 1.0 by a bit-identical
+twin) are collapsed before the demand is taken; both readings are printed.
+K rising under this amendment is a stop, as before.
+
+Data flow, before and after::
+
+  BEFORE (ADR 0012 as implemented)                AFTER (this amendment)
+  records --+-- cal ---> k_demand -+              records --+-- cal ---> k_demand --> cover() --> k_ship
+            +-- indep -> k_demand -+-> max -> k_ship        +-- indep -> k_demand --> > k_ship ? --> INDEPENDENT MISS, exit 1
+  records (both) --> gates(k_ship) -> G1 = 0 always         indep --> gates(k_ship) -> G1 can fail
+                                                            records (both) --> gates(k_ship) -> G2, G3
+
+What this amendment does NOT change: G2 and G3 stay scored over both draws,
+because they ask whether the ensemble catches faults and spans its classes,
+which every record is evidence about. Only G1 is an out-of-sample question.
 """
 
 from __future__ import annotations
