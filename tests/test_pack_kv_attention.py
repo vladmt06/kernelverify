@@ -201,6 +201,7 @@ def test_gqa_matches_the_tiled_cache_reference(kernel):
     assert v.ok, v
 
 
+@requires_metal
 def test_mlx_door_rejects_over_capacity(kernel):
     """t > TCAP must raise before dispatch: the softmax buffer is sized at
     compile time, and the overrun it prevents is silent memory corruption."""

@@ -162,6 +162,7 @@ def test_result_reading_returns_a_list():
     assert np.array_equal(outputs[0], payload)
 
 
+@pytest.mark.gpu
 def test_session_compiles_each_spec_exactly_once(session):
     first = session.compiled("device-dequant-simd", "float32")
     second = session.compiled("device-dequant-simd", "float32")

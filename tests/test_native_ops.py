@@ -11,6 +11,7 @@ stays equivalent.
 import numpy as np
 import pytest
 
+from conftest import requires_metal
 from kernelverify.battery.core import case_space, make_mode_inputs
 from kernelverify.mutation.catalogue import CATALOGUE, KERNEL_TO_OP
 from kernelverify.reference.native_kernels import moe_dispatch, quantized_matmul
@@ -55,6 +56,7 @@ def test_qmm_reference_cross_checked_against_mlx_device():
     assert np.max(np.abs(np.array(dev).astype(np.float64) - ref)) < 5e-2
 
 
+@requires_metal
 def test_moe_reference_cross_checked_against_mlx():
     mx = pytest.importorskip("mlx.core")
     inputs = moe_inputs()
@@ -203,6 +205,7 @@ def test_controls_pass_across_sampled_battery():
                 f"{op_name} control fails at {case}"
 
 
+@requires_metal
 @pytest.mark.parametrize("bits", [2, 3, 4, 8])
 def test_cache_dequant_matches_mlx_quantize_dequantize_bit_for_bit(bits):
     """The kv reference's cache half, checked against code it shares nothing with.

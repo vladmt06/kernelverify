@@ -63,7 +63,13 @@ def test_footprint_reader_reports_this_process_truthfully():
 
     mmap(-1, size) asks the kernel for pages nothing has touched, so they
     cannot be pre-charged, and the write below faults every one of them in.
+
+    Growth alone cannot show the reader reads phys_footprint rather than RSS -
+    a freshly touched mapping raises both by the same amount, so a reader that
+    regressed to ri_resident_size would satisfy every growth assertion here.
+    The last assertion is the one that separates them.
     """
+    import ctypes
     import gc
     import mmap
 
@@ -84,6 +90,19 @@ def test_footprint_reader_reports_this_process_truthfully():
         grown, grown_peak = phys_footprint_gb()
         assert grown - current > 0.4, "the reader must see our own allocation"
         assert grown_peak >= grown * 0.99
+
+        # ri_resident_size sits at word 8, immediately before ri_phys_footprint
+        # at word 9, so reading one word short is the plausible regression and
+        # the one every assertion above is blind to. Read it here independently
+        # and require the reader not to have returned it. The two are different
+        # accountings - footprint adds compressed and IOKit-mapped pages that
+        # residency does not - so they do not coincide on a live process.
+        lib = ctypes.CDLL("/usr/lib/libSystem.dylib", use_errno=True)
+        words = (ctypes.c_uint64 * 64)()
+        assert lib.proc_pid_rusage(os.getpid(), 4, ctypes.byref(words)) == 0
+        resident_gb = words[8] / 1e9
+        assert grown != resident_gb, (
+            "the reader returned ri_resident_size (RSS), not ri_phys_footprint")
     finally:
         # A failing assert must not leak 512 MB into every test that follows.
         region.close()

@@ -1,6 +1,7 @@
 import json
 import sys
 from pathlib import Path
+from conftest import requires_metal
 import detached_run as dr
 from memory_guard import EXIT_BUDGET_REFUSAL, EXIT_LOCK_HELD, EXIT_NOT_IDLE, EXIT_PRECONDITION
 
@@ -114,6 +115,7 @@ def test_measure_baselines_refuses_a_held_lock_before_the_idle_gate(monkeypatch)
     assert measure_baselines.main() == EXIT_LOCK_HELD
 
 
+@requires_metal
 def test_spike_timed_path_refuses_a_held_lock_before_loading(monkeypatch):
     """The REAL module, really imported. The first version of this test
     ast-lifted main() out of the file and exec'd it against a namespace that
@@ -121,6 +123,12 @@ def test_spike_timed_path_refuses_a_held_lock_before_loading(monkeypatch):
     - so deleting the module's actual MeasurementLock import left it green
     while the harness would die on its first line under launchd. A test that
     provides every name it checks for proves only that its own stubs work.
+
+    Gated on Metal for that same reason, not because locking needs a GPU:
+    importing the real module reaches mlx_lm.models.qwen3 and so mlx.nn, and
+    that import ABORTS the interpreter where no device can be created. Ungated
+    it took the whole collection down, this file and every other, which is how
+    it reached the supposedly GPU-free subset.
     """
     import spike_mlx_e2e as spike
 

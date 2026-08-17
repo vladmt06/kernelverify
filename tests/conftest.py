@@ -29,9 +29,21 @@ METAL_DEVICE = MetalRunner().probe()
 #
 # Gating a test with `requires_metal` therefore also excuses it from the safe
 # subset, with no second edit to remember.
-requires_metal = pytest.mark.gpu(
-    pytest.mark.skipif(METAL_DEVICE is None,
-                       reason="no Metal device on this machine"))
+_no_metal = pytest.mark.skipif(METAL_DEVICE is None,
+                               reason="no Metal device on this machine")
+
+
+def requires_metal(obj):
+    """Gate a test on a Metal device AND excuse it from the safe subset.
+
+    Applied as two marks, deliberately. `pytest.mark.gpu(pytest.mark.skipif(...))`
+    reads like composition and is not: pytest takes the inner MarkDecorator as a
+    positional ARGUMENT to `gpu`, so the decorated test carries one mark named
+    `gpu` and no skipif at all. That failure is invisible on a machine that has
+    Metal, because there the skip would be a no-op anyway - it only shows up on
+    the machine the skip exists for, as a crash instead of a skip.
+    """
+    return pytest.mark.gpu(_no_metal(obj))
 
 # Well-conditioned shapes: every dimension modest, no degenerate reduction, so
 # any correct implementation should agree with the fp64 reference to near

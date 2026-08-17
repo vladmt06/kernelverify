@@ -29,8 +29,25 @@ import numpy as np
 import pytest
 
 mx = pytest.importorskip("mlx.core")
-nn = pytest.importorskip("mlx.nn")
+# The device check comes BEFORE the mlx.nn import, and that order is the whole
+# point. importorskip cannot help here: mlx.nn evaluates on the device while it
+# imports, so where there is no usable device the interpreter ABORTS rather than
+# raising ImportError. A fatal abort during collection takes down the entire
+# session, so this one line used to cost every other test file in the suite,
+# not just this module's own.
+#
+# The probe is conftest's, and it has to be: `mx.metal.is_available()` answers
+# whether the Metal framework loaded, NOT whether a device can be created, and
+# it returns True inside a sandbox that then aborts on first use. METAL_DEVICE
+# asks the only question that matters by trying it in a worker process, where
+# an abort costs that process instead of this one.
+from conftest import METAL_DEVICE, requires_metal  # noqa: E402
 
+if METAL_DEVICE is None:
+    pytest.skip("the interception tests build a real quantized model on Metal",
+                allow_module_level=True)
+
+nn = pytest.importorskip("mlx.nn")
 from kernelverify.pack import routed_windows  # noqa: E402
 from kernelverify.pack.wide_qmv import should_dispatch  # noqa: E402
 
@@ -458,6 +475,7 @@ class UniformModel(nn.Module):
                         dtype=mx.float16)
 
 
+@requires_metal
 def test_perplexity_windowing_is_exact_on_the_uniform_model():
     model = UniformModel()
     window, n_windows = 8, 3
