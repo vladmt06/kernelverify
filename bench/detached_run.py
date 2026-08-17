@@ -109,9 +109,16 @@ def judge_exit_code(code: int, stderr_tail: str = "") -> tuple[str, bool]:
         return ("crashed" if "Traceback" in stderr_tail else "stopped"), True
     if code in (EXIT_NOT_IDLE, EXIT_LOCK_HELD, EXIT_LOW_MEMORY):
         return "waiting", False
-    if code in (EXIT_BUDGET_REFUSAL, EXIT_NO_DEVICE, EXIT_PRECONDITION):
+    # The gave-up set is the plan's pre-registered pair and NOTHING else.
+    # EXIT_NO_DEVICE sat here for one commit: a missing Metal device felt
+    # permanent, but "gave-up" is the state an operator files as a legitimate
+    # refusal, and a vanished GPU is an environment fault to investigate -
+    # crashed is what sends them to the stderr tail. Widening a
+    # pre-registered table without a written amendment is the exact move
+    # this repo's rules exist to stop.
+    if code in (EXIT_BUDGET_REFUSAL, EXIT_PRECONDITION):
         return "gave-up", True
-    if code in (EXIT_CHILD_DEATH, EXIT_ORPHANED):
+    if code in (EXIT_NO_DEVICE, EXIT_CHILD_DEATH, EXIT_ORPHANED):
         return "crashed", True
     return "crashed", True
 
@@ -123,6 +130,15 @@ def strong_idle_blockers() -> list[str]:
         return [f"load5 {chk['load5']:.2f} over threshold "
                 f"{chk['load_threshold']:.2f} (machine not yet settled)"]
     return list(chk["blockers"])
+
+
+# The per-poll status writer, wired by main() before each wait. A module
+# hook rather than a parameter because the spec's own tests pin this
+# function's arity (they replace it with `lambda deadline: ...`), and the
+# heartbeat needs the harness stem and the attempts count that only main
+# holds. None means no status is written, which is right for a unit test
+# calling the wait directly.
+_WAIT_HEARTBEAT = None
 
 
 def wait_for_strong_idle(deadline: float) -> bool:
@@ -140,6 +156,13 @@ def wait_for_strong_idle(deadline: float) -> bool:
         if streak:
             log("idle streak broken")
         streak = 0
+        # The status file is refreshed on EVERY poll, not only on change: it
+        # is the one artifact the operator card says to read, and its
+        # updated_at is how a live runner still polling is told apart from a
+        # dead one. The first generalisation pass dropped this write and a
+        # nine-hour wait read "just started" the whole way through.
+        if _WAIT_HEARTBEAT is not None:
+            _WAIT_HEARTBEAT(blockers)
         # Only log when the reason changes; a 12-hour wait must stay readable.
         if blockers != last_reported:
             log(f"waiting, not idle: {'; '.join(blockers)}")
@@ -166,8 +189,13 @@ def _stderr_tail(stderr: str) -> str:
 
 
 def _run_harness(args: argparse.Namespace) -> subprocess.CompletedProcess:
+    # -u because the child's stdout is the launchd log file, not a tty, so
+    # Python block-buffers at 8 KB: `tail` on the log during a 45-minute
+    # harness would show no progress at all, and a Jetsam SIGKILL - the
+    # recurring death these harnesses are hardened against - discards the
+    # buffer, losing exactly the lines that localise which cell was live.
     return subprocess.run(
-        [sys.executable, str(args.harness), *args.harness_args],
+        [sys.executable, "-u", str(args.harness), *args.harness_args],
         cwd=ROOT,
         stderr=subprocess.PIPE,
         text=True,
@@ -184,6 +212,14 @@ def main(argv=None) -> int:
     attempts_consumed = 0
     run_id, rows = None, []
     last_stderr_tail = ""
+
+    # Wired here, not passed, because the spec's tests pin the wait's arity;
+    # the closure reads attempts_consumed live so a heartbeat written after a
+    # retry does not reset the count the operator sees.
+    global _WAIT_HEARTBEAT
+    _WAIT_HEARTBEAT = lambda blockers: write_status(
+        "waiting", harness_stem, attempts_consumed=attempts_consumed,
+        blockers=blockers)
 
     while attempts_consumed < MAX_ATTEMPTS:
         if not wait_for_strong_idle(deadline):

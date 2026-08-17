@@ -23,6 +23,15 @@ if (( $# > 0 )); then
   shift
 fi
 
+# A leading dash is a flag this script does not know, not a harness. Without
+# this check, `--print-plsit` (one transposed letter) was accepted as a
+# harness path, armed a real launchd job, printed "armed", and the machine
+# then waited up to 12 hours to run a file that does not exist.
+if [[ "$HARNESS_ARG" == -* ]]; then
+  print -u2 -- "unknown flag: $HARNESS_ARG (the only flag is --print-plist, first)"
+  exit 2
+fi
+
 HARNESS_ARGS=()
 if (( $# > 0 )); then
   if [[ "$1" != "--" ]]; then
@@ -37,6 +46,15 @@ if [[ "$HARNESS_ARG" == /* ]]; then
   HARNESS="$HARNESS_ARG"
 else
   HARNESS="$ROOT/$HARNESS_ARG"
+fi
+
+# Validated before EITHER path - printing a plist for a harness that does not
+# exist is as wrong as arming one. A typo'd path otherwise armed a job whose
+# every attempt exits 2 ("can't open file"), which the runner rightly calls
+# crashed, but only after the operator has already walked away for the night.
+if [[ ! -f "$HARNESS" ]]; then
+  print -u2 -- "no such harness: $HARNESS"
+  exit 2
 fi
 
 HARNESS_NAME="${HARNESS:t}"
