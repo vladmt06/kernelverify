@@ -1,5 +1,14 @@
 # TODOS
 
+## Four test modules build their own Metal device instead of sharing conftest's probe
+
+- What: convert `tests/test_device_buffer_pool.py`, `tests/test_serving_adequacy.py`, `tests/test_serving_survival.py` and `tests/test_quant_device_members.py` from their local `try: _DEVICE = MetalDevice() / except RuntimeError` blocks and local `needs_metal` skipif markers to `conftest.METAL_DEVICE` and `conftest.requires_metal`, which is what AGENTS.md now tells a new test to use.
+- Why: each local block spawns its own device probe at import, so a run pays for five probes where one would do, and each local `needs_metal` skips correctly while never attaching the `gpu` marker - the exact drift that let seven dispatching tests sit inside the safe subset until the 2026-08-17 merge gate measured them.
+- Pros: one probe per run instead of five, one definition of what a Metal test is, and AGENTS.md's gating rule becomes true of the tree rather than aspirational.
+- Cons: 34 call sites across four files, and `test_serving_survival.py` and `test_serving_adequacy.py` use their local `_DEVICE` object for more than gating, so the conversion is not a pure find-and-replace and wants its own green run.
+- Context: `tests/conftest.py:13-16` states the one-probe rule; AGENTS.md's marker section names these four as predating it; surfaced by the merge gate's standards axis on 2026-08-17.
+- Depends on / blocked by: nothing; deliberately kept off `lane/test-infra-and-record` because these four modules gate correctly today - an in-process `MetalDevice()` raises rather than aborting - so this is consolidation, not a fix.
+
 ## An fp16 cell at a batch the eligibility table never ruled on reads as in-contract
 
 - What: make `kernelverify/schemas/heldout_eligibility.py` refuse loudly when a record asks about an (heldout, batch, dtype) cell at float16 and batch > 1 that carries NO ruling, instead of returning "eligible" by absence; today the table keys the B16 exclusion on batch 16 exactly, while its own docstring says MLX dispatches `affine_qmm_t` at batch 12 and above.

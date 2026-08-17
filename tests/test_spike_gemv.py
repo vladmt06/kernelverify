@@ -14,16 +14,11 @@ import pytest
 
 from spike_dequant_gemv import gemv_case, gemv_template
 
-from conftest import METAL_DEVICE, requires_metal
+from conftest import requires_metal
 
 from kernelverify.runners import MetalRunner, specialize
 
 RUNNER = MetalRunner()
-# One probe per pytest run, and one definition of what a Metal test is: both
-# live in conftest, which also attaches the `gpu` marker. A local copy of
-# either drifts from the shared one and, worse, skips correctly while never
-# earning the marker that keeps it out of the safe subset.
-DEVICE = METAL_DEVICE
 
 
 def pack_nibbles(q: np.ndarray) -> np.ndarray:

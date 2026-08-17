@@ -140,21 +140,27 @@ cd /Users/vlad/kernelverify
 - The environment needs `torch`, which only `gelu[variant=erf]` uses; a worktree venv created without it fails part-way through a verdict build.
 - It also needs `mlx==0.32.0` and `mlx-lm==0.31.3`, pinned across worktrees so binding comparisons stay on one toolchain.
   Without mlx, the mlx-dependent test modules are skipped whole or fail to collect, so the suite under-reports badly.
-  Skipped modules hide their contents rather than their count, so quote test counts from a fully equipped venv only; `.venv/bin/python -m pytest -q` reported 916 passed in 108 s warm on 2026-08-17.
+  Skipped modules hide their contents rather than their count, so quote test counts from a fully equipped venv only; `.venv/bin/python -m pytest -q` reported 916 passed in 104 s warm on 2026-08-17.
   Two markers exist, registered in `pyproject.toml`, and they answer different questions - one is about time, the other about the machine.
-  `slow` is on the four tests in `tests/test_quant_contract_members.py` that recompute serving-grid blocks from committed evidence; measured 2026-08-17 they are 73.3 s, 12.9 s, 5.5 s and 5.2 s of a 110 s suite, and every other test in the repository is under 2 s.
-  `gpu` is on the 150 tests that actually dispatch to the Metal device, which is not the same as the tests that import mlx: `tests/test_serving_survival.py` imports it and 4 of its 66 tests dispatch.
+  `slow` is on the four tests in `tests/test_quant_contract_members.py` that recompute serving-grid blocks from committed evidence; measured 2026-08-17 they are 62.8 s, 11.3 s, 4.7 s and 4.5 s of a 104 s suite, so they are 80% of its wall clock and every other test in the repository is under 2 s.
+  `gpu` is on the 153 tests that actually dispatch to the Metal device, which is not the same as the tests that import mlx: `tests/test_serving_survival.py` imports it and 4 of its 66 tests dispatch.
   That set is the union of two instruments, and it needs both.
   Counting MLX allocation (`mx.get_peak_memory` around each test) catches every mlx evaluation however it was triggered, which hooking `mx.eval`/`mx.synchronize` does not: `float()`, `np.array()` and `.item()` force evaluation inside the C++ layer and call neither, so a route-hooking pass undercounted by 7 while each of those tests dispatched up to 942 KB.
   Counting the PyObjC door (`MetalDevice.compile`/`pooled_buffer`, `CompiledKernel.run`, `metal.spawn_isolated`) catches what MLX's counter is blind to, because Metal's own allocator is a different one.
   Work done inside a shared module-scoped fixture is charged to whichever test happens to run first, so a per-test reading taken during a full-suite run under-attributes it; that is how one Metal compile survived in the safe subset until the check below was run.
-  Do not verify this with a count or with `--collect-only`: run the safe subset under an instrument and confirm it does zero GPU work, because that is the property the marker exists for and a count cannot see an ordering bug.
+  Do not verify this with a count or with `--collect-only`: run the safe subset under an instrument and confirm no test in it dispatches, because that is the property the marker exists for and a count cannot see an ordering bug.
+  "No test in it dispatches" is the exact claim, and it is not the same as zero GPU work in the process: `tests/conftest.py` probes for a device once at import on every run, safe subset included, and that probe spawns a worker which creates one.
+  A device query is not a dispatch, but it is not nothing either, so do not read the safe subset as leaving the GPU untouched.
   One class of defect this machine cannot detect at all: a test that imports a module reaching `mlx.nn` aborts the interpreter where no device can be created, which takes down the whole collection rather than failing one test, and here that import simply succeeds.
   `bench/serve_sub4bit.py` and `bench/spike_mlx_e2e.py` both reach it at module scope, so any test importing either is gated on `requires_metal` for that reason and not because it needs a GPU.
   Run the suite once on a machine with no Metal device after touching this, because that is the only place the gating is visible.
-  The times, all from 2026-08-17: full suite 104 s / 916 tests; `-m "not gpu"` 91 s / 766 tests; `-m "not slow and not gpu"` 8 s / 762 tests.
+  The times, all from 2026-08-17: full suite 104 s / 916 tests; `-m "not gpu"` 91 s / 763 tests; `-m "not slow and not gpu"` 8 s / 759 tests.
+  `-m "not slow"` alone is deliberately not quoted, because it is not a useful subset: it still collects 912 of the 916 tests and every one of the 153 gpu tests.
   Read those numbers before choosing: `not gpu` is the SAFE subset to run while a measurement holds the machine, and it is barely faster than the full suite because the slow tests are CPU-only; `not slow and not gpu` is the edit loop.
   Gate a new Metal test with `conftest.requires_metal`, never a local `pytest.mark.skipif`: that decorator carries the `gpu` marker too, so a local copy skips correctly on a machine without a device and still collides with a measurement on one that has it.
+  Gate a Metal MODULE on `conftest.METAL_DEVICE`, never on `mx.metal.is_available()`, which reports whether the framework loaded rather than whether a device can be made, and answers True inside a sandbox where the probe answers None.
+  Four modules predate this rule and still build their own `MetalDevice()`: `test_device_buffer_pool.py`, `test_serving_adequacy.py`, `test_serving_survival.py`, `test_quant_device_members.py`.
+  They gate correctly, because an in-process `MetalDevice()` raises rather than aborting; they are redundant probes rather than broken ones, and consolidating them is queued in TODOS.
   Fully equipped means `pyobjc` as well as `mlx`: without the Metal bindings the runner-backed pack tests fail rather than skip, so a venv with mlx alone reports a partial count nobody should quote.
 
 The machine baseline, in this order, because each step writes the denominators the next one divides by:

@@ -93,16 +93,23 @@ def test_footprint_reader_reports_this_process_truthfully():
 
         # ri_resident_size sits at word 8, immediately before ri_phys_footprint
         # at word 9, so reading one word short is the plausible regression and
-        # the one every assertion above is blind to. Read it here independently
-        # and require the reader not to have returned it. The two are different
-        # accountings - footprint adds compressed and IOKit-mapped pages that
-        # residency does not - so they do not coincide on a live process.
+        # the one every assertion above is blind to.
+        #
+        # Both words come from ONE proc_pid_rusage call, and the test asks which
+        # of the two the reader is NEARER. Comparing the reader against a
+        # separately-sampled resident size would prove nothing: the two samples
+        # are taken at different instants, so any page-level change between them
+        # makes the numbers differ and the assertion pass even under a genuine
+        # word-8 regression. One sample, and a nearer-than test, has no such gap:
+        # the words are ~15 MB apart while two adjacent reads move by a page.
         lib = ctypes.CDLL("/usr/lib/libSystem.dylib", use_errno=True)
         words = (ctypes.c_uint64 * 64)()
         assert lib.proc_pid_rusage(os.getpid(), 4, ctypes.byref(words)) == 0
-        resident_gb = words[8] / 1e9
-        assert grown != resident_gb, (
-            "the reader returned ri_resident_size (RSS), not ri_phys_footprint")
+        resident_gb, footprint_gb = words[8] / 1e9, words[9] / 1e9
+        assert abs(grown - footprint_gb) < abs(grown - resident_gb), (
+            f"the reader returned {grown:.4f} GB, which is nearer "
+            f"ri_resident_size ({resident_gb:.4f}) than ri_phys_footprint "
+            f"({footprint_gb:.4f}): it is reading RSS")
     finally:
         # A failing assert must not leak 512 MB into every test that follows.
         region.close()

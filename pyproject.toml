@@ -18,8 +18,9 @@
 #   - MLX allocation (mx.get_peak_memory around each test) catches every mlx
 #     evaluation however it was triggered. Hooking mx.eval/mx.synchronize is
 #     NOT enough: float(), np.array() and .item() force evaluation inside the
-#     C++ layer and call neither. One such call dispatches 2 MB to the GPU
-#     while both counters stay at zero.
+#     C++ layer and call neither. A trivial such call dispatches 2 MB to the
+#     GPU while both counters stay at zero, and the largest test caught this
+#     way was allocating 942 KB inside the supposedly safe subset.
 #   - The PyObjC door (MetalDevice.compile/pooled_buffer, CompiledKernel.run,
 #     metal.spawn_isolated) uses Metal's own allocator, which the MLX counter
 #     cannot see at all.
@@ -35,9 +36,13 @@
 # `slow` - four tests recompute serving-grid blocks from committed evidence
 # (tests/test_quant_contract_members.py::_recompute dequantizes a block to
 # float64 and runs all six CPU ensemble members over it). Measured on
-# 2026-08-17 they take 73.3 s, 12.9 s, 5.5 s and 5.2 s against a 108 s full
-# suite, so they are 90% of the wall clock and every other test in the
-# repository is under 2 s. `pytest -m "not slow"` is the edit-loop subset.
+# 2026-08-17 they take 62.8 s, 11.3 s, 4.7 s and 4.5 s against a 104 s full
+# suite, so they are 80% of the wall clock and every other test in the
+# repository is under 2 s.
+#
+# The edit-loop subset is `-m "not slow and not gpu"`, never `-m "not slow"`
+# alone: dropping only the slow tests still collects all 153 gpu tests, which
+# is exactly the set that must not run while a measurement holds the machine.
 # Adding this table also makes pytest treat the repository root as its rootdir
 # whatever directory it is invoked from, where before it inferred one per run.
 # That is deliberate - node IDs and the .pytest_cache location are now stable -

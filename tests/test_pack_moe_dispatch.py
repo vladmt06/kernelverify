@@ -13,7 +13,12 @@ import numpy as np
 import pytest
 
 mx = pytest.importorskip("mlx.core")
-if not mx.metal.is_available():
+from conftest import METAL_DEVICE  # noqa: E402
+
+# conftest's probe, not mx.metal.is_available(): the latter reports whether
+# the Metal framework loaded, not whether a device can be created, and it
+# answers True inside a sandbox that then aborts on first use.
+if METAL_DEVICE is None:
     pytest.skip("Metal unavailable", allow_module_level=True)
 
 from pack_moe_dispatch import make_case, quantize_experts

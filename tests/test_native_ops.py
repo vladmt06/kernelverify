@@ -45,8 +45,6 @@ def test_qmm_kernel_agrees_with_contract_reference():
 @pytest.mark.gpu
 def test_qmm_reference_cross_checked_against_mlx_device():
     mx = pytest.importorskip("mlx.core")
-    if not mx.metal.is_available():
-        pytest.skip("Metal unavailable")
     inputs = qmm_inputs(bits=4)
     ref = NATIVE_OPS["quantized_matmul"].reference(inputs)
     w_q, s, b = mx.quantize(mx.array(inputs["w"]), group_size=64, bits=4)

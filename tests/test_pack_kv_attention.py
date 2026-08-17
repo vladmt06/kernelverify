@@ -15,10 +15,14 @@ import numpy as np
 import pytest
 
 mx = pytest.importorskip("mlx.core")
-if not mx.metal.is_available():
-    pytest.skip("Metal unavailable", allow_module_level=True)
 
-from conftest import METAL_DEVICE, requires_metal
+from conftest import METAL_DEVICE, requires_metal  # noqa: E402
+
+# conftest's probe, not mx.metal.is_available(): the latter reports whether
+# the Metal framework loaded, not whether a device can be created, and it
+# answers True inside a sandbox that then aborts on first use.
+if METAL_DEVICE is None:
+    pytest.skip("Metal unavailable", allow_module_level=True)
 from pack_kv_attention import make_case
 
 from kernelverify.pack.kv_attention import (
