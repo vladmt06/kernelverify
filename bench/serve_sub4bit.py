@@ -833,6 +833,14 @@ def mde(manifest: dict, guard) -> int:
     deciders: dict[int, bool] = {}
     exit_code = 0
     for b in zone:
+        # Before the guard reads the footprint, not after: MLX keeps freed
+        # buffers in an internal cache rather than returning them, and
+        # phys_footprint - the number Jetsam kills on, and the number the
+        # budget reads - counts them. Without this the measured footprint
+        # ratchets across cells while live memory does not, and the budget
+        # refuses a run for memory nothing is using. That is what discarded
+        # six completed cells at B=12 on 2026-08-17.
+        mx.clear_cache()
         guard(f"B={b}")
         saving_us = 0.0
         rows = []
@@ -954,6 +962,7 @@ def ab(manifest: dict, guard) -> int:
     model4, _ = load_model(MODEL_4BIT)
     exit_code = 0
     for b in B_GRID:
+        mx.clear_cache()        # see mde(): the budget must read live memory
         guard(f"B={b}")
         prompts = make_prompts(tok, PROMPT_T, b)
         arms: dict[str, list[float]] = {"1": [], "2": [], "3": [], "4": []}
