@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -13,7 +14,21 @@ from kernelverify.runners import MetalRunner  # noqa: E402
 # One Metal probe per pytest run, shared by every Metal-gated module. Each
 # probe spawns a worker process, so the per-file copies of this line paid
 # that cost three to four times per collection.
-METAL_DEVICE = MetalRunner().probe()
+#
+# KV_FORCE_NO_METAL makes the gating testable on a machine that HAS a device,
+# which is otherwise impossible and is how a broken gate reached main twice.
+# It forces every gate to decide as if there were no device WITHOUT removing
+# the device, so the check is "did this test skip", not "did it fail" - on this
+# machine an ungated test still finds a real GPU and passes, which is exactly
+# why a plain run cannot see the hole. The audit is:
+#
+#     KV_FORCE_NO_METAL=1 pytest -m gpu
+#
+# Every gpu test must skip. Any that RUNS carries the marker without a skip,
+# so it would crash rather than skip where there is no device. The four modules
+# listed in AGENTS.md that still build their own MetalDevice() do not honour
+# this switch, and until they are consolidated they are known exclusions.
+METAL_DEVICE = None if os.environ.get("KV_FORCE_NO_METAL") else MetalRunner().probe()
 
 # One decorator carries BOTH facts about a Metal test, because they are the
 # same fact read two ways and keeping them apart is how they drift:

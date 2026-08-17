@@ -498,7 +498,7 @@ def test_an_oversized_threadgroup_is_a_launch_error_not_an_abort():
     assert "4096" in result.detail
 
 
-@pytest.mark.gpu
+@requires_metal
 def test_a_worker_that_dies_becomes_a_crash_status():
     runner = MetalRunner(python="/usr/bin/false")
     result = runner.run_one(elementwise_spec(GELU_SRC, "gelu"), vector_case(16))

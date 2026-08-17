@@ -151,6 +151,10 @@ cd /Users/vlad/kernelverify
   Do not verify this with a count or with `--collect-only`: run the safe subset under an instrument and confirm no test in it dispatches, because that is the property the marker exists for and a count cannot see an ordering bug.
   "No test in it dispatches" is the exact claim, and it is not the same as zero GPU work in the process: `tests/conftest.py` probes for a device once at import on every run, safe subset included, and that probe spawns a worker which creates one.
   A device query is not a dispatch, but it is not nothing either, so do not read the safe subset as leaving the GPU untouched.
+  The OTHER half of the marker - that a gated test skips rather than crashes where there is no device - is invisible on this machine, because here every gate decides "device present" and the question never arises.
+  `KV_FORCE_NO_METAL=1 .venv/bin/python -m pytest -m gpu` makes it visible: every gate decides as if there were no device while the device is still there, so the check is whether each test SKIPPED, not whether it passed.
+  Every gpu test must skip. One that RUNS carries the marker without a skip and would crash on a machine with no GPU; that audit found 8 such tests, one of which was a bare `pytest.mark.gpu` on a whole module.
+  The four modules with their own `MetalDevice()` do not honour the switch and are the known exclusions, 33 of them.
   One class of defect this machine cannot detect at all: a test that imports a module reaching `mlx.nn` aborts the interpreter where no device can be created, which takes down the whole collection rather than failing one test, and here that import simply succeeds.
   `bench/serve_sub4bit.py` and `bench/spike_mlx_e2e.py` both reach it at module scope, so any test importing either is gated on `requires_metal` for that reason and not because it needs a GPU.
   Run the suite once on a machine with no Metal device after touching this, because that is the only place the gating is visible.
