@@ -43,8 +43,10 @@ try:
 except RuntimeError:  # pragma: no cover - a machine without a GPU
     _DEVICE = None
 
-pytestmark = pytest.mark.skipif(_DEVICE is None,
-                                reason="no Metal device on this machine")
+# Whole-module: every test here allocates through the device buffer pool, which is a live Metal allocation,
+# so the gpu marker is module-level rather than 62 copies of itself.
+pytestmark = [pytest.mark.gpu, pytest.mark.skipif(_DEVICE is None,
+                                reason="no Metal device on this machine")]
 
 
 @pytest.fixture(scope="module")

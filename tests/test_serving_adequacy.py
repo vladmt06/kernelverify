@@ -548,6 +548,7 @@ needs_metal = pytest.mark.skipif(_DEVICE is None,
                                  reason="no Metal device on this machine")
 
 
+@pytest.mark.gpu
 @needs_metal
 @pytest.mark.parametrize("dtype", [np.float32, np.float16])
 def test_mlx_quantize_hoist_is_bit_identical(dtype):
@@ -565,6 +566,7 @@ def test_mlx_quantize_hoist_is_bit_identical(dtype):
     assert np.array_equal(hoisted, verbatim)
 
 
+@pytest.mark.gpu
 @needs_metal
 def test_measure_serving_records_feed_the_standing_machinery():
     """A tiny grid end to end: records carry the batch axis and slot straight
@@ -588,6 +590,7 @@ def test_measure_serving_records_feed_the_standing_machinery():
         assert rep["verdict"] in ("ADEQUATE", "INADEQUATE")
 
 
+@pytest.mark.gpu
 @needs_metal
 def test_measure_serving_checkpoints_after_every_block():
     """The recorder that makes a death inside the main grid cost one block
@@ -602,6 +605,7 @@ def test_measure_serving_checkpoints_after_every_block():
     assert seen == sorted(seen) and seen[-1] == len(measured["records"])
 
 
+@pytest.mark.gpu
 @needs_metal
 def test_probe_reports_its_own_rss_per_shape():
     """The line that confirms or refutes the memory hypothesis has to reach

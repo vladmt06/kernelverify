@@ -13,7 +13,12 @@ import numpy as np
 import pytest
 
 mx = pytest.importorskip("mlx.core")
-if not mx.metal.is_available():
+from conftest import METAL_DEVICE  # noqa: E402
+
+# conftest's probe, not mx.metal.is_available(): the latter reports whether
+# the Metal framework loaded, not whether a device can be created, and it
+# answers True inside a sandbox that then aborts on first use.
+if METAL_DEVICE is None:
     pytest.skip("Metal unavailable", allow_module_level=True)
 
 from pack_wide_qmv import artefact_for
@@ -52,6 +57,7 @@ def _run(kernel, x, art, d_out, bits=4):
     return np.array(out)
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("m", [1, 2, 4, 5, 6, 7, 8, 10, 11])
 def test_agrees_with_contract_at_every_tile_width(kernel, m):
     """One weight pass must give the same answer as the contract at any M."""
@@ -110,6 +116,7 @@ def test_should_dispatch_demands_the_whole_key():
         should_dispatch(7)
 
 
+@pytest.mark.gpu
 def test_handles_d_out_not_divisible_by_r(kernel):
     """Out-of-range rows read clamped and must never be stored."""
     d_out, d_in = 254, 512  # 254 % 4 == 2
@@ -121,6 +128,7 @@ def test_handles_d_out_not_divisible_by_r(kernel):
     assert v.ok, v
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("bits", SUPPORTED_BITS)
 def test_artefact_layout_matches_mlx(kernel, bits):
     """The kernel reads MLX's own packing, so the two artefacts must be equal."""
@@ -132,6 +140,7 @@ def test_artefact_layout_matches_mlx(kernel, bits):
     assert np.array_equal(art.biases, np.array(biases))
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("bits", SUPPORTED_BITS)
 @pytest.mark.parametrize("m", [1, 6, 8])
 def test_agrees_with_contract_at_every_bit_width(kernel, bits, m):
@@ -212,6 +221,7 @@ def reduced_gate(monkeypatch):
     return pack_wide_qmv
 
 
+@pytest.mark.gpu
 def test_passing_evidence_keeps_fingerprints_not_arrays(reduced_gate):
     from kernelverify.runners import MetalRunner
 
@@ -225,6 +235,7 @@ def test_passing_evidence_keeps_fingerprints_not_arrays(reduced_gate):
         assert call.inputs == {}, "a judged passing case must not retain arrays"
 
 
+@pytest.mark.gpu
 def test_failing_evidence_keeps_the_arrays(reduced_gate, monkeypatch):
     """One case passes, one fails: only the failing case's LiveCall keeps its
     input arrays, and both keep their fingerprints."""
@@ -257,6 +268,7 @@ def test_failing_evidence_keeps_the_arrays(reduced_gate, monkeypatch):
     assert set(failing.input_sha256) == INPUT_NAMES
 
 
+@pytest.mark.gpu
 def test_the_extraction_pipeline_may_retain_inputs(reduced_gate):
     """The certificate emitter re-dispatches the gate's own calls through the
     extraction capture, so its evidence keeps the arrays on request."""
@@ -278,6 +290,7 @@ def test_the_extraction_pipeline_may_retain_inputs(reduced_gate):
 # `guard(cell)` may refuse by raising, and None means no checks - the
 # microbenchmark gate is unchanged.
 # ---------------------------------------------------------------------------
+@pytest.mark.gpu
 def test_verify_calls_the_guard_between_tile_widths(reduced_gate, monkeypatch):
     from kernelverify.runners import MetalRunner
 
@@ -289,6 +302,7 @@ def test_verify_calls_the_guard_between_tile_widths(reduced_gate, monkeypatch):
     assert sum("M=6" in cell for cell in seen) == 1
 
 
+@pytest.mark.gpu
 def test_a_refusing_guard_stops_verification(reduced_gate):
     from kernelverify.runners import MetalRunner
 
@@ -302,6 +316,7 @@ def test_a_refusing_guard_stops_verification(reduced_gate):
         reduced_gate.verify(MetalRunner(), guard=guard)
 
 
+@pytest.mark.gpu
 def test_interleaved_samples_calls_the_guard_between_rounds():
     import pack_wide_qmv
 
@@ -314,6 +329,7 @@ def test_interleaved_samples_calls_the_guard_between_rounds():
     assert len(seen) == 3
 
 
+@pytest.mark.gpu
 def test_a_refusing_guard_stops_the_rounds():
     import pack_wide_qmv
 
@@ -329,6 +345,7 @@ def test_a_refusing_guard_stops_the_rounds():
             rounds=3, guard=guard)
 
 
+@pytest.mark.gpu
 def test_gate_evidence_carries_e2e_cases_with_projection_names(monkeypatch):
     """A reduced gate run over one E2E shape must produce specialization
     evidence labelled with the projection name, so a certificate reader can
@@ -348,6 +365,7 @@ def test_gate_evidence_carries_e2e_cases_with_projection_names(monkeypatch):
     assert labels and all("q_proj" in label for label in labels)
 
 
+@pytest.mark.gpu
 def test_matches_mlx_quantized_matmul_within_contract(kernel):
     """Both are admissible implementations, so they agree within the floor."""
     d_out, d_in, m = 256, 512, 8

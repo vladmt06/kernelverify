@@ -1,0 +1,55 @@
+# pytest configuration only. This project is not packaged: it is run from the
+# tree through `.venv/bin/python`, so there is no [project] table and nothing
+# here builds a distribution.
+#
+# The two markers exist for one reason each, and both reasons are measured
+# rather than guessed.
+#
+# `gpu` - this machine has ONE GPU and one machine-wide measurement lock
+# (bench/machine_state.py), so a heavy measurement and a test run compete for
+# the same device. Before this marker there was no way to run the suite during
+# a 33-minute A/B without both slowing down and the timings becoming unusable.
+# `pytest -m "not gpu"` is what a lane runs while a measurement holds the
+# machine. The marked set was derived by measurement, not by grep and not by a
+# no-device run: a file that imports mlx.core without computing on it does NOT
+# need the marker, and marking it would shrink the safe subset for nothing.
+#
+# Two independent instruments were needed, because neither is complete alone:
+#   - MLX allocation (mx.get_peak_memory around each test) catches every mlx
+#     evaluation however it was triggered. Hooking mx.eval/mx.synchronize is
+#     NOT enough: float(), np.array() and .item() force evaluation inside the
+#     C++ layer and call neither. A trivial such call dispatches 2 MB to the
+#     GPU while both counters stay at zero, and the largest test caught this
+#     way was allocating 942 KB inside the supposedly safe subset.
+#   - The PyObjC door (MetalDevice.compile/pooled_buffer, CompiledKernel.run,
+#     metal.spawn_isolated) uses Metal's own allocator, which the MLX counter
+#     cannot see at all.
+# Their union is the marked set. Work done inside a shared module-scoped
+# fixture is charged to whichever test runs first, so a per-test reading taken
+# during a full-suite run under-attributes it; that is how one Metal compile
+# survived in the safe subset through an earlier pass of this file.
+#
+# The check worth repeating after any change here is not a count but a
+# behaviour: run the safe subset under an instrument and confirm it does zero
+# GPU work.
+#
+# `slow` - four tests recompute serving-grid blocks from committed evidence
+# (tests/test_quant_contract_members.py::_recompute dequantizes a block to
+# float64 and runs all six CPU ensemble members over it). Measured on
+# 2026-08-17 they take 62.8 s, 11.3 s, 4.7 s and 4.5 s against a 104 s full
+# suite, so they are 80% of the wall clock and every other test in the
+# repository is under 2 s.
+#
+# The edit-loop subset is `-m "not slow and not gpu"`, never `-m "not slow"`
+# alone: dropping only the slow tests still collects all 153 gpu tests, which
+# is exactly the set that must not run while a measurement holds the machine.
+# Adding this table also makes pytest treat the repository root as its rootdir
+# whatever directory it is invoked from, where before it inferred one per run.
+# That is deliberate - node IDs and the .pytest_cache location are now stable -
+# but it is a real change: `pytest test_docs.py` run from inside tests/ now
+# reports the node as tests/test_docs.py, not test_docs.py.
+[tool.pytest.ini_options]
+markers = [
+  "slow: recomputes serving-grid blocks from committed evidence (5-75 s each)",
+  "gpu: dispatches to a Metal device; cannot run while a measurement holds the machine",
+]

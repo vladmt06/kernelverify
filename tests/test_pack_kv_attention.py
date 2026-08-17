@@ -15,10 +15,14 @@ import numpy as np
 import pytest
 
 mx = pytest.importorskip("mlx.core")
-if not mx.metal.is_available():
-    pytest.skip("Metal unavailable", allow_module_level=True)
 
-from conftest import METAL_DEVICE
+from conftest import METAL_DEVICE, requires_metal  # noqa: E402
+
+# conftest's probe, not mx.metal.is_available(): the latter reports whether
+# the Metal framework loaded, not whether a device can be created, and it
+# answers True inside a sandbox that then aborts on first use.
+if METAL_DEVICE is None:
+    pytest.skip("Metal unavailable", allow_module_level=True)
 from pack_kv_attention import make_case
 
 from kernelverify.pack.kv_attention import (
@@ -35,8 +39,7 @@ from kernelverify.pack.verify import kv_inputs, verify_output
 # a separate dependency from mlx's Metal: a venv can carry one and not the
 # other, so that test needs the runner's own probe-based skip and the
 # module-level mlx guard above cannot stand in for it.
-requires_metal_runner = pytest.mark.skipif(
-    METAL_DEVICE is None, reason="no Metal device for the runner")
+
 
 MXD = {"float16": mx.float16, "float32": mx.float32}
 
@@ -66,6 +69,7 @@ def _run(kernel, q, k_cache, v_cache, new_k, new_v, bits, dtype):
 
 @pytest.mark.parametrize("shape", [(1, 8, 512, 128), (4, 2, 64, 64),
                                    (1, 4, 300, 128)])
+@pytest.mark.gpu
 @pytest.mark.parametrize("bits", [4, 8])
 def test_agrees_with_the_shipped_reference(kernel, shape, bits):
     b, h, t, dh = shape
@@ -75,6 +79,7 @@ def test_agrees_with_the_shipped_reference(kernel, shape, bits):
     assert v.ok, v
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("bits", [4, 8])
 def test_float32_dtype(kernel, bits):
     """Both contract dtypes; at fp32 the base tolerance is ~4e-7 * scale, so
@@ -86,6 +91,7 @@ def test_float32_dtype(kernel, bits):
     assert v.ok, v
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("bits", sorted(SUPPORTED_BITS))
 def test_every_supported_width(kernel, bits):
     """2 and 3 bits ride the same 8-code block reader; the oracle quantizes
@@ -96,6 +102,7 @@ def test_every_supported_width(kernel, bits):
     assert v.ok, v
 
 
+@pytest.mark.gpu
 def test_new_entry_dominates_when_it_should(kernel):
     """The off-by-one clause, behaviourally: a new key aligned with the query
     concentrates the softmax on the new entry, so a kernel that dropped it
@@ -110,6 +117,7 @@ def test_new_entry_dominates_when_it_should(kernel):
     assert float(np.max(np.abs(out - nv.astype(np.float64)))) < 0.05
 
 
+@pytest.mark.gpu
 def test_batch_rows_are_independent(kernel):
     """The shared cache is read per (batch row, head); each batch row must
     reproduce its own B=1 answer exactly."""
@@ -122,6 +130,7 @@ def test_batch_rows_are_independent(kernel):
         assert np.array_equal(full[row:row + 1], one)
 
 
+@pytest.mark.gpu
 def test_single_cached_position(kernel):
     """T=1: the smallest cache, where every simdgroup but one is idle in the
     combine and the strided score loop touches two positions total."""
@@ -131,6 +140,7 @@ def test_single_cached_position(kernel):
     assert v.ok, v
 
 
+@pytest.mark.gpu
 def test_padded_cache_reads_only_the_logical_prefix(kernel):
     """The mlx-lm integration passes the cache's padded buffer whole with the
     logical length as a scalar (never sliced, ruling D12.1). Rows past the
@@ -163,6 +173,7 @@ def test_padded_cache_reads_only_the_logical_prefix(kernel):
     assert v.ok, v
 
 
+@pytest.mark.gpu
 def test_gqa_matches_the_tiled_cache_reference(kernel):
     """Query heads over fewer cache heads (Qwen3's 4:1 shape, scaled down).
     The shipped reference has no GQA form, so the oracle case tiles each
@@ -194,6 +205,7 @@ def test_gqa_matches_the_tiled_cache_reference(kernel):
     assert v.ok, v
 
 
+@requires_metal
 def test_mlx_door_rejects_over_capacity(kernel):
     """t > TCAP must raise before dispatch: the softmax buffer is sized at
     compile time, and the overrun it prevents is silent memory corruption."""
@@ -202,7 +214,7 @@ def test_mlx_door_rejects_over_capacity(kernel):
         _run(kernel, q, kc, vc, nk, nv, 8, "float16")
 
 
-@requires_metal_runner
+@requires_metal
 def test_raw_door_poisons_over_capacity_output():
     """The raw door's t_cached is a runtime scalar binding, so the rejection
     lives in the kernel body: an over-capacity launch must come back all-NaN,

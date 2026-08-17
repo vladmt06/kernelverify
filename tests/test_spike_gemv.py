@@ -14,11 +14,11 @@ import pytest
 
 from spike_dequant_gemv import gemv_case, gemv_template
 
+from conftest import requires_metal
+
 from kernelverify.runners import MetalRunner, specialize
 
 RUNNER = MetalRunner()
-DEVICE = RUNNER.probe()
-requires_metal = pytest.mark.skipif(DEVICE is None, reason="no Metal device on this machine")
 
 
 def pack_nibbles(q: np.ndarray) -> np.ndarray:

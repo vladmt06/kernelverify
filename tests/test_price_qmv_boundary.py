@@ -16,6 +16,7 @@ import pytest
 
 pytest.importorskip("mlx.core")
 
+from conftest import requires_metal
 import price_qmv_boundary as probe
 from price_qmv_boundary import MAX_CANARY_SPREAD, classify
 
@@ -116,6 +117,7 @@ def _sequence_idle_checks(monkeypatch, verdicts):
                         lambda _cores: next(calls))
 
 
+@requires_metal
 def test_a_clean_run_records_under_the_canonical_name(hardware_free,
                                                       monkeypatch):
     _sequence_idle_checks(monkeypatch, [_idle(True), _idle(True)])
@@ -125,6 +127,7 @@ def test_a_clean_run_records_under_the_canonical_name(hardware_free,
     assert written.name.startswith("qmv-boundary-pricing-")
 
 
+@requires_metal
 def test_a_run_that_went_busy_quarantines_its_recording(hardware_free,
                                                         monkeypatch):
     """The final gate runs BEFORE any write: a busy machine at idle_after
@@ -176,6 +179,7 @@ def test_an_injected_tiny_budget_refuses_with_no_results(hardware_free,
     assert not list(hardware_free.glob("*.json"))
 
 
+@requires_metal
 def test_low_machine_memory_refuses_with_no_results(hardware_free,
                                                     monkeypatch):
     _sequence_idle_checks(monkeypatch, [_idle(True)])

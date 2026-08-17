@@ -19,6 +19,18 @@ from kernelverify.extraction.mlx_arm import (
 )
 from kernelverify.extraction.surface import LiveCall, MLXKernelSurface
 
+from conftest import METAL_DEVICE  # noqa: E402
+
+# Whole-module: every test here drives a real extraction worker against a live
+# surface, so the gpu marker is module-level - and so is the skip. A module-level
+# `pytest.mark.gpu` alone excuses these from the safe subset while still letting
+# them RUN where there is no device, which is a crash rather than a skip.
+if METAL_DEVICE is None:
+    pytest.skip("the extraction workers need a live Metal surface",
+                allow_module_level=True)
+
+pytestmark = pytest.mark.gpu
+
 SURFACE = MLXKernelSurface(
     name="fake", source="out[0] = inp[0];",
     input_names=("inp",), output_names=("out",),

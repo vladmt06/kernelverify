@@ -11,6 +11,7 @@ stays equivalent.
 import numpy as np
 import pytest
 
+from conftest import requires_metal
 from kernelverify.battery.core import case_space, make_mode_inputs
 from kernelverify.mutation.catalogue import CATALOGUE, KERNEL_TO_OP
 from kernelverify.reference.native_kernels import moe_dispatch, quantized_matmul
@@ -41,10 +42,9 @@ def test_qmm_kernel_agrees_with_contract_reference():
         assert np.max(np.abs(out - ref)) < 5e-2
 
 
+@requires_metal
 def test_qmm_reference_cross_checked_against_mlx_device():
     mx = pytest.importorskip("mlx.core")
-    if not mx.metal.is_available():
-        pytest.skip("Metal unavailable")
     inputs = qmm_inputs(bits=4)
     ref = NATIVE_OPS["quantized_matmul"].reference(inputs)
     w_q, s, b = mx.quantize(mx.array(inputs["w"]), group_size=64, bits=4)
@@ -54,6 +54,7 @@ def test_qmm_reference_cross_checked_against_mlx_device():
     assert np.max(np.abs(np.array(dev).astype(np.float64) - ref)) < 5e-2
 
 
+@requires_metal
 def test_moe_reference_cross_checked_against_mlx():
     mx = pytest.importorskip("mlx.core")
     inputs = moe_inputs()
@@ -121,6 +122,7 @@ def test_kv_kernel_agrees_with_reference():
         assert np.max(np.abs(out - ref)) < 5e-3
 
 
+@requires_metal
 def test_kv_reference_cross_checked_against_mlx():
     mx = pytest.importorskip("mlx.core")
     from kernelverify.reference.native_kernels import _cache_dequant
@@ -201,6 +203,7 @@ def test_controls_pass_across_sampled_battery():
                 f"{op_name} control fails at {case}"
 
 
+@requires_metal
 @pytest.mark.parametrize("bits", [2, 3, 4, 8])
 def test_cache_dequant_matches_mlx_quantize_dequantize_bit_for_bit(bits):
     """The kv reference's cache half, checked against code it shares nothing with.

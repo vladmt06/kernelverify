@@ -210,6 +210,7 @@ def _continuity_sample(records):
     return wanted
 
 
+@pytest.mark.slow
 def test_continuity_only_factored_groups_moves(evidence):
     sample = _continuity_sample(evidence)
     assert len(sample) == 64, "the sample's own shape is part of the check"
@@ -223,6 +224,7 @@ def test_continuity_only_factored_groups_moves(evidence):
     assert moved, "the repair changed nothing on the sampled records"
 
 
+@pytest.mark.slow
 def test_the_ten_shipped_false_positives_are_closed(evidence):
     """The headline. On the committed evidence the shipped tolerance flags a
     correct in-contract device kernel on ten records; under the repaired member
@@ -247,6 +249,7 @@ def test_the_ten_shipped_false_positives_are_closed(evidence):
     assert 0.20 < min(after) <= max(after) < 0.30, sorted(after)
 
 
+@pytest.mark.slow
 def test_k_stays_four_and_the_member_now_carries_its_class_alone(evidence):
     """ADR 0016, the two readings that decided K.
 
@@ -289,6 +292,7 @@ def test_k_stays_four_and_the_member_now_carries_its_class_alone(evidence):
     assert worst > K_QUANT, "recorded as open: no K in the grid covers this spread"
 
 
+@pytest.mark.slow
 def test_the_shipped_verifier_flags_no_correct_kernel_after_the_repair(evidence):
     """The product claim, on the cells that carried the defect: judged the way
     the shipped verifier judges - candidate against max(base, K * floor over

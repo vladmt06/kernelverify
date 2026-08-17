@@ -89,6 +89,7 @@ def test_unknown_member_or_dtype_is_rejected():
 # ---------------------------------------------------------------------------
 # Correctness envelope and class structure
 # ---------------------------------------------------------------------------
+@pytest.mark.gpu
 @pytest.mark.parametrize("member", DEVICE_MEMBERS)
 @pytest.mark.parametrize("dtype", [np.float32, np.float16])
 def test_member_is_correct_within_sanity_envelope(member, dtype, session, artefact):
@@ -102,6 +103,7 @@ def test_member_is_correct_within_sanity_envelope(member, dtype, session, artefa
     assert error / scale < SANITY_RELATIVE[str(x.dtype)]
 
 
+@pytest.mark.gpu
 def test_members_are_pairwise_distinct(session, artefact):
     """The structural gate counts members on outputs, never on names."""
     x = _x(np.float32)
@@ -110,6 +112,7 @@ def test_members_are_pairwise_distinct(session, artefact):
         assert not np.array_equal(outputs[a], outputs[b]), f"{a} == {b}"
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("bits", [2, 3, 8])
 def test_members_are_bits_generic(bits, session):
     """One compiled spec serves every width: only the artefact values change."""
@@ -124,6 +127,7 @@ def test_members_are_bits_generic(bits, session):
         assert error / scale < SANITY_RELATIVE["float32"], (member, bits)
 
 
+@pytest.mark.gpu
 def test_faulted_artefact_is_visible_to_a_device_member(session, artefact):
     """A member that could not see a bias-dropped artefact would be reading
     something other than the artefact it was handed."""
@@ -158,6 +162,7 @@ def test_result_reading_returns_a_list():
     assert np.array_equal(outputs[0], payload)
 
 
+@pytest.mark.gpu
 def test_session_compiles_each_spec_exactly_once(session):
     first = session.compiled("device-dequant-simd", "float32")
     second = session.compiled("device-dequant-simd", "float32")

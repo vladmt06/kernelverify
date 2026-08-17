@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -13,9 +14,51 @@ from kernelverify.runners import MetalRunner  # noqa: E402
 # One Metal probe per pytest run, shared by every Metal-gated module. Each
 # probe spawns a worker process, so the per-file copies of this line paid
 # that cost three to four times per collection.
-METAL_DEVICE = MetalRunner().probe()
-requires_metal = pytest.mark.skipif(METAL_DEVICE is None,
-                                    reason="no Metal device on this machine")
+#
+# KV_FORCE_NO_METAL makes the gating testable on a machine that HAS a device,
+# which is otherwise impossible and is how a broken gate reached main twice.
+# It forces every gate to decide as if there were no device WITHOUT removing
+# the device, so the check is "did this test skip", not "did it fail" - on this
+# machine an ungated test still finds a real GPU and passes, which is exactly
+# why a plain run cannot see the hole. The audit is:
+#
+#     KV_FORCE_NO_METAL=1 pytest -m gpu
+#
+# Every gpu test must skip. Any that RUNS carries the marker without a skip,
+# so it would crash rather than skip where there is no device. The four modules
+# listed in AGENTS.md that still build their own MetalDevice() do not honour
+# this switch, and until they are consolidated they are known exclusions.
+METAL_DEVICE = None if os.environ.get("KV_FORCE_NO_METAL") else MetalRunner().probe()
+
+# One decorator carries BOTH facts about a Metal test, because they are the
+# same fact read two ways and keeping them apart is how they drift:
+#
+#   skipif   - there may be no device at all (CI, a sandbox), so the test
+#              cannot run and must not fail;
+#   gpu      - there IS a device and something heavy is using it, so the test
+#              must not run: this machine has one GPU and one machine-wide
+#              measurement lock (bench/machine_state.py), and a 33-minute A/B
+#              and a test batch dispatching against each other corrupts the
+#              measurement and slows the tests. `pytest -m "not gpu"` is what
+#              a lane runs during a measurement.
+#
+# Gating a test with `requires_metal` therefore also excuses it from the safe
+# subset, with no second edit to remember.
+_no_metal = pytest.mark.skipif(METAL_DEVICE is None,
+                               reason="no Metal device on this machine")
+
+
+def requires_metal(obj):
+    """Gate a test on a Metal device AND excuse it from the safe subset.
+
+    Applied as two marks, deliberately. `pytest.mark.gpu(pytest.mark.skipif(...))`
+    reads like composition and is not: pytest takes the inner MarkDecorator as a
+    positional ARGUMENT to `gpu`, so the decorated test carries one mark named
+    `gpu` and no skipif at all. That failure is invisible on a machine that has
+    Metal, because there the skip would be a no-op anyway - it only shows up on
+    the machine the skip exists for, as a crash instead of a skip.
+    """
+    return pytest.mark.gpu(_no_metal(obj))
 
 # Well-conditioned shapes: every dimension modest, no degenerate reduction, so
 # any correct implementation should agree with the fp64 reference to near
