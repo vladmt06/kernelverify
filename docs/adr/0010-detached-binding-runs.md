@@ -25,6 +25,9 @@ The job runs `bench/detached_run.py` under `caffeinate -i`, so the machine will 
 `ProcessType` is `Interactive`, so launchd does not down-schedule the benchmark the way it does background jobs.
 The plist deliberately never enters `~/Library/LaunchAgents`, so it cannot re-fire at login; re-running the script replaces any previous instance.
 Output appends to `bench/.baselines/detached.log`, and `bench/.baselines/detached_status.json` always holds the current state, so the outcome is readable without scrolling.
+(Amended 2026-08-17, task I2: the runner now serves any harness, so both paths carry the harness stem - `detached-<stem>.log` and `detached_status-<stem>.json`.
+The un-suffixed paths above are pre-amendment artifacts: a file at one of them holds the verdict of some run from BEFORE this amendment, not the current state, and reading it as current is exactly the misread this line used to prevent.
+`bench/OPERATOR-CARD.md` carries the live paths.)
 
 `nohup` from a closing terminal would also survive, but it starts inside a terminal session and inherits its environment; the launchd job never has a controlling terminal at any point in its life, which is the productized form of the condition being created.
 

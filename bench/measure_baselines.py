@@ -52,6 +52,8 @@ import mlx_info  # noqa: E402
 import roofline  # noqa: E402
 
 from external import GGUF_DIR, LLAMA_CPP  # noqa: E402
+from machine_state import MeasurementLock  # noqa: E402
+from memory_guard import EXIT_LOCK_HELD, EXIT_NOT_IDLE  # noqa: E402
 from kernelverify.report.matrix import _workload  # noqa: E402
 from kernelverify.report.matrix import utilisation as _renderer_utilisation  # noqa: E402
 
@@ -554,6 +556,20 @@ def main() -> int:
     ap.add_argument("--allow-busy", action="store_true",
                     help="measure anyway; rows are recorded as non-binding")
     args = ap.parse_args()
+
+    lock = MeasurementLock("measure_baselines")
+    acquired, detail = lock.acquire()
+    if not acquired:
+        print(f"REFUSAL (exit {EXIT_LOCK_HELD}): machine measurement lock "
+              f"{detail}; one heavy measurement at a time")
+        return EXIT_LOCK_HELD
+    try:
+        return _measure(args)
+    finally:
+        lock.release()
+
+
+def _measure(args: argparse.Namespace) -> int:
     rounds = 1 if args.quick else args.rounds
 
     fp = machine_state.fingerprint()
@@ -564,7 +580,7 @@ def main() -> int:
             print(f"  - {b}", file=sys.stderr)
         print("re-run when idle and on AC, or pass --allow-busy to record "
               "labelled non-binding rows", file=sys.stderr)
-        return 2
+        return EXIT_NOT_IDLE
 
     print("[roofline] measuring machine ceilings", flush=True)
     roof = roofline.measure()

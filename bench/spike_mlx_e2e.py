@@ -67,7 +67,8 @@ import machine_state  # noqa: E402
 import mlx.core as mx  # noqa: E402
 
 from interleave import calibrate_copies, dispatch  # noqa: E402
-from machine_state import spread_pct  # noqa: E402
+from machine_state import MeasurementLock, spread_pct  # noqa: E402
+from memory_guard import EXIT_LOCK_HELD, EXIT_NOT_IDLE  # noqa: E402
 from kernelverify.pack.kv_attention import (  # noqa: E402
     SUPPORTED_BITS,
     SUPPORTED_DH,
@@ -285,7 +286,7 @@ def require_idle(label: str) -> dict:
         print(f"NOT QUIET ({label}): " + "; ".join(state["blockers"]))
         print("Timing refused (ruling D12.2). Do non-timing prep, then rerun "
               "in a quiet window.")
-        raise SystemExit(2)
+        raise SystemExit(EXIT_NOT_IDLE)
     return state
 
 
@@ -479,13 +480,25 @@ def main(argv=None) -> int:
     mode.add_argument("--ab", action="store_true")
     args = parser.parse_args(argv)
 
-    install_patch()
-    model, tokenizer = load_model()
     if args.smoke:
+        install_patch()
+        model, tokenizer = load_model()
         return smoke(model, tokenizer)
-    if args.mde:
-        return mde(model, tokenizer)
-    return ab(model, tokenizer)
+
+    lock = MeasurementLock("spike_mlx_e2e")
+    acquired, detail = lock.acquire()
+    if not acquired:
+        print(f"REFUSAL (exit {EXIT_LOCK_HELD}): machine measurement lock "
+              f"{detail}; one heavy measurement at a time")
+        return EXIT_LOCK_HELD
+    try:
+        install_patch()
+        model, tokenizer = load_model()
+        if args.mde:
+            return mde(model, tokenizer)
+        return ab(model, tokenizer)
+    finally:
+        lock.release()
 
 
 if __name__ == "__main__":
