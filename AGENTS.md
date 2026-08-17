@@ -141,7 +141,14 @@ cd /Users/vlad/kernelverify
 - It also needs `mlx==0.32.0` and `mlx-lm==0.31.3`, pinned across worktrees so binding comparisons stay on one toolchain.
   Without mlx, the mlx-dependent test modules are skipped whole or fail to collect, so the suite under-reports badly.
   Skipped modules hide their contents rather than their count, so quote test counts from a fully equipped venv only; `.venv/bin/python -m pytest -q` reported 916 passed in 108 s warm on 2026-08-17.
-  There is no fast subset yet: the repository has no pytest settings file (`tests/conftest.py` exists, but it only puts the repo root and `bench/` on `sys.path`) and no test carries a `slow` or `gpu` marker, so `-m "not slow"` deselects nothing and the full suite is the only time worth quoting.
+  Two markers exist, registered in `pyproject.toml`, and they answer different questions - one is about time, the other about the machine.
+  `slow` is on the four tests in `tests/test_quant_contract_members.py` that recompute serving-grid blocks from committed evidence; measured 2026-08-17 they are 73.3 s, 12.9 s, 5.5 s and 5.2 s of a 110 s suite, and every other test in the repository is under 2 s.
+  `gpu` is on the 141 tests that actually dispatch to the Metal device, which is not the same as the tests that import mlx: `tests/test_serving_survival.py` imports it and 4 of its 66 tests dispatch.
+  That set was derived by instrumenting all three doors a dispatch can leave through - `mlx.core` eval/synchronize, `metal.spawn_isolated`, and the direct PyObjC path in `kernelverify/runners/device.py` - running the suite, and recording which tests crossed one; the first attempt wrapped only the first two doors and undercounted by 25.
+  `pytest -m gpu --collect-only` and that measured set are identical in both directions, which is the check worth repeating after any change here.
+  The times, all from 2026-08-17: full suite 110 s / 916 tests; `-m "not gpu"` 101 s / 775 tests; `-m "not slow and not gpu"` 9 s / 771 tests.
+  Read those numbers before choosing: `not gpu` is the SAFE subset to run while a measurement holds the machine, and it is barely faster than the full suite because the slow tests are CPU-only; `not slow and not gpu` is the edit loop.
+  Gate a new Metal test with `conftest.requires_metal`, never a local `pytest.mark.skipif`: that decorator carries the `gpu` marker too, so a local copy skips correctly on a machine without a device and still collides with a measurement on one that has it.
   Fully equipped means `pyobjc` as well as `mlx`: without the Metal bindings the runner-backed pack tests fail rather than skip, so a venv with mlx alone reports a partial count nobody should quote.
 
 The machine baseline, in this order, because each step writes the denominators the next one divides by:
@@ -176,7 +183,9 @@ bench/start_binding_run.sh     # arms a launchd job, then quit Terminal
 - One heavy measurement on this machine at a time, and the harness takes the lock rather than the caller: `machine_state.MeasurementLock` is a single `fcntl.flock` on a fixed path.
   This is the RULE, not yet the state of the tree - only four harnesses acquire it (see the `machine_state.py` entry above), so read that list before running two things.
   A launcher must never take it on the harness's behalf: a child cannot acquire the flock its parent holds, verified live, so a locking launcher makes every self-locking harness refuse.
-  Long runs go detached so no interactive session competes with them (ADR 0010), but `bench/start_binding_run.sh` is wired to one harness only - it arms `bench/detached_run.py`, whose `HARNESS` constant is `bench/measure_baselines.py` - so every other long harness is started by hand in a quiet window until that is generalised.
+  Long runs go detached so no interactive session competes with them (ADR 0010), and since I2 landed that path takes any harness: `bench/start_binding_run.sh <harness> [-- args]` arms a per-harness launchd job and `bench/detached_run.py --harness <path> --protocol exit-code` runs it, writing `bench/.baselines/detached_status-<stem>.json`.
+  `measure_baselines.py` remains the default when no harness is named, and its row-appending protocol is still the default protocol.
+  The 2026-08-17 A/B was run this way end to end, including the two attempts the runner correctly refused.
 - Never cite the corpus's `benchmark_verdict` fields as evidence; they are hardcoded "pass" and were never computed.
 - Any 100% claim must be backed by exact miss counts, not by a rounded table cell.
 - Grow the fault catalogue faster than the policy adapts; the numbers stay honest only while the population outpaces the tuning.

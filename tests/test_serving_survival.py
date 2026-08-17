@@ -51,14 +51,42 @@ BENCH_DIR = Path(__file__).resolve().parents[1] / "bench"
 # what Jetsam kills on - not RSS, and not another process's number.
 # ---------------------------------------------------------------------------
 def test_footprint_reader_reports_this_process_truthfully():
+    """The reader sees an allocation this process just made.
+
+    The ballast is a FRESH anonymous mapping, not a numpy array, and that is
+    the whole point. numpy allocates through an arena that keeps freed pages
+    charged to the process, so after any earlier test has allocated and
+    released half a gigabyte, a numpy ballast can be satisfied from pages the
+    footprint already counts and the delta this test asserts on never appears.
+    The test then fails or passes according to what ran before it, which makes
+    it a report about test order rather than about the reader.
+
+    mmap(-1, size) asks the kernel for pages nothing has touched, so they
+    cannot be pre-charged, and the write below faults every one of them in.
+    """
+    import gc
+    import mmap
+
+    gc.collect()
     current, peak = phys_footprint_gb()
     assert 0.0 < current < machine_ram_gb()
     assert peak >= current * 0.99, "lifetime high-water cannot sit under now"
-    ballast = np.ones(64 * 1024 * 1024, dtype=np.float64)  # 512 MB, touched
-    grown, grown_peak = phys_footprint_gb()
-    assert grown - current > 0.4, "the reader must see our own allocation"
-    assert grown_peak >= grown * 0.99
-    del ballast
+
+    size = 512 * 1024 * 1024
+    chunk = b"\x01" * (4 * 1024 * 1024)
+    region = mmap.mmap(-1, size)
+    try:
+        # Written in chunks rather than one 512 MB bytes object: building that
+        # object would itself allocate the amount under test, so the assertion
+        # below could pass on the temporary instead of on the mapping.
+        for _ in range(size // len(chunk)):
+            region.write(chunk)
+        grown, grown_peak = phys_footprint_gb()
+        assert grown - current > 0.4, "the reader must see our own allocation"
+        assert grown_peak >= grown * 0.99
+    finally:
+        # A failing assert must not leak 512 MB into every test that follows.
+        region.close()
 
 
 def test_machine_ram_reading_is_plausible():
@@ -1135,6 +1163,7 @@ def _assert_bit_identical(ours, theirs, path="records"):
         assert ours == theirs, path
 
 
+@pytest.mark.gpu
 @needs_metal
 def test_device_dispatch_does_not_retain_buffers_across_runs():
     """The convicted holder of the 30-60 GB gap, pinned at unit scale: the
@@ -1162,6 +1191,7 @@ def test_device_dispatch_does_not_retain_buffers_across_runs():
         f"case: per-dispatch buffer retention is back")
 
 
+@pytest.mark.gpu
 @needs_metal
 def test_releasing_the_buffer_pool_gives_the_memory_back():
     """The other half of the pool's memory story, at readable scale.
@@ -1189,6 +1219,7 @@ def test_releasing_the_buffer_pool_gives_the_memory_back():
         f"{one_cycle_gb:.2f} GB cycles: released buffers are retained again")
 
 
+@pytest.mark.gpu
 @needs_metal
 def test_attribution_probe_measures_stages_and_sweep_delta(tmp_path, capsys):
     """T4's attribution instrument at a tiny shape: every stage snapshotted,
@@ -1214,6 +1245,7 @@ def test_attribution_probe_measures_stages_and_sweep_delta(tmp_path, capsys):
     assert "DEVICE-SWEEP DELTA" in capsys.readouterr().out
 
 
+@pytest.mark.gpu
 @needs_metal
 def test_real_child_grid_iteration_round_trips_bit_exactly(child_dir):
     """The whole isolation boundary, for real: one tiny grid iteration in a

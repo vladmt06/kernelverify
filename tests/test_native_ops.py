@@ -41,6 +41,7 @@ def test_qmm_kernel_agrees_with_contract_reference():
         assert np.max(np.abs(out - ref)) < 5e-2
 
 
+@pytest.mark.gpu
 def test_qmm_reference_cross_checked_against_mlx_device():
     mx = pytest.importorskip("mlx.core")
     if not mx.metal.is_available():
@@ -121,6 +122,7 @@ def test_kv_kernel_agrees_with_reference():
         assert np.max(np.abs(out - ref)) < 5e-3
 
 
+@pytest.mark.gpu
 def test_kv_reference_cross_checked_against_mlx():
     mx = pytest.importorskip("mlx.core")
     from kernelverify.reference.native_kernels import _cache_dequant

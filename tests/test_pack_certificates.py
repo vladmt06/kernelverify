@@ -59,6 +59,7 @@ def qmv_evidence():
 # ---------------------------------------------------------------------------
 # The evidence object itself
 # ---------------------------------------------------------------------------
+@pytest.mark.gpu
 def test_gate_evidence_carries_cases_errors_tolerances_and_labels(qmv_evidence):
     assert qmv_evidence.ok
     [spec] = qmv_evidence.specializations
@@ -79,6 +80,7 @@ def test_gate_evidence_carries_cases_errors_tolerances_and_labels(qmv_evidence):
 # ---------------------------------------------------------------------------
 # Happy path: evidence -> extraction -> certificates -> manifest, all real
 # ---------------------------------------------------------------------------
+@pytest.mark.gpu
 def test_emission_happy_path_from_real_gate_evidence(qmv_evidence, tmp_path):
     report = emitter.certify([qmv_evidence], RUNNER, tmp_path)
     assert report.ok, report.refused
@@ -156,6 +158,7 @@ def _synthetic_routing_evidence() -> GateEvidence:
     return evidence
 
 
+@pytest.mark.gpu
 def test_one_kernels_capture_failure_leaves_the_other_kernel_emitting(
         qmv_evidence, tmp_path, monkeypatch):
     real_validate = emitter.validate_spec
@@ -179,6 +182,7 @@ def test_one_kernels_capture_failure_leaves_the_other_kernel_emitting(
     assert "## Refused" in manifest and "forced capture failure" in manifest
 
 
+@pytest.mark.gpu
 def test_a_behavioral_validation_failure_refuses_with_a_named_reason(
         qmv_evidence, tmp_path, monkeypatch):
     failing = ExtractionReport(outcomes=[
@@ -198,6 +202,7 @@ def test_a_behavioral_validation_failure_refuses_with_a_named_reason(
         "a kernel whose validation failed must emit nothing")
 
 
+@pytest.mark.gpu
 def test_a_failed_gate_case_refuses_before_any_extraction_runs(tmp_path,
                                                                monkeypatch):
     def exploding_validate(family, spec, runner):  # must never be reached

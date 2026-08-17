@@ -14,8 +14,24 @@ from kernelverify.runners import MetalRunner  # noqa: E402
 # probe spawns a worker process, so the per-file copies of this line paid
 # that cost three to four times per collection.
 METAL_DEVICE = MetalRunner().probe()
-requires_metal = pytest.mark.skipif(METAL_DEVICE is None,
-                                    reason="no Metal device on this machine")
+
+# One decorator carries BOTH facts about a Metal test, because they are the
+# same fact read two ways and keeping them apart is how they drift:
+#
+#   skipif   - there may be no device at all (CI, a sandbox), so the test
+#              cannot run and must not fail;
+#   gpu      - there IS a device and something heavy is using it, so the test
+#              must not run: this machine has one GPU and one machine-wide
+#              measurement lock (bench/machine_state.py), and a 33-minute A/B
+#              and a test batch dispatching against each other corrupts the
+#              measurement and slows the tests. `pytest -m "not gpu"` is what
+#              a lane runs during a measurement.
+#
+# Gating a test with `requires_metal` therefore also excuses it from the safe
+# subset, with no second edit to remember.
+requires_metal = pytest.mark.gpu(
+    pytest.mark.skipif(METAL_DEVICE is None,
+                       reason="no Metal device on this machine"))
 
 # Well-conditioned shapes: every dimension modest, no degenerate reduction, so
 # any correct implementation should agree with the fp64 reference to near

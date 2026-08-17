@@ -27,6 +27,10 @@ from kernelverify.pack.moe_dispatch import (
 from kernelverify.pack.verify import moe_inputs, verify_output
 from kernelverify.reference.native_kernels import _topk_by_prob
 
+# Whole-module: every test here compiles and dispatches the moe kernel,
+# so the gpu marker is module-level.
+pytestmark = pytest.mark.gpu
+
 
 @pytest.fixture(scope="module")
 def kernels():

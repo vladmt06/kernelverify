@@ -19,6 +19,10 @@ from kernelverify.extraction.mlx_arm import (
 )
 from kernelverify.extraction.surface import LiveCall, MLXKernelSurface
 
+# Whole-module: every test here drives a real extraction worker against a live surface,
+# so the gpu marker is module-level.
+pytestmark = pytest.mark.gpu
+
 SURFACE = MLXKernelSurface(
     name="fake", source="out[0] = inp[0];",
     input_names=("inp",), output_names=("out",),

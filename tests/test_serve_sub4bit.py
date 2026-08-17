@@ -105,6 +105,7 @@ def patched(model):
 # ---------------------------------------------------------------------------
 # scoping: the brief's non-negotiable
 # ---------------------------------------------------------------------------
+@pytest.mark.gpu
 def test_oracle_and_second_model_never_routed():
     a, b = make_holder(), make_holder()
     with patched(a) as patch:
@@ -127,6 +128,7 @@ def test_oracle_and_second_model_never_routed():
         assert patch.calls == 1
 
 
+@pytest.mark.gpu
 def test_uninstall_restores_the_original_module():
     a = make_holder()
     original = a.proj
@@ -136,6 +138,7 @@ def test_uninstall_restores_the_original_module():
     assert a.proj is original
 
 
+@pytest.mark.gpu
 def test_install_counts_wrapped_leaves():
     a = make_holder()
     with patched(a) as patch:
@@ -145,6 +148,7 @@ def test_install_counts_wrapped_leaves():
 # ---------------------------------------------------------------------------
 # routing: delegated to should_dispatch, decode-scoped
 # ---------------------------------------------------------------------------
+@pytest.mark.gpu
 def test_routing_follows_should_dispatch_across_the_grid():
     a = make_holder()
     with patched(a) as patch:
@@ -158,6 +162,7 @@ def test_routing_follows_should_dispatch_across_the_grid():
                 assert any(k.startswith("m-") for k in patch.fallbacks)
 
 
+@pytest.mark.gpu
 def test_an_unpriced_shape_routes_nowhere_on_the_whole_grid():
     """Routing is keyed by shape, so a shape the pricing run never priced
     falls back at every tile width, including the widths that win at the
@@ -187,6 +192,7 @@ class TwoShapes(nn.Module):
         return self.routed(x), self.unpriced(y)
 
 
+@pytest.mark.gpu
 def test_expected_calls_counts_routed_sites_not_wrapped_sites():
     model = TwoShapes()
     model.set_dtype(mx.float16)
@@ -206,6 +212,7 @@ def test_expected_calls_counts_routed_sites_not_wrapped_sites():
         assert patch.calls == serve_sub4bit.expected_calls(patch, m, 1)
 
 
+@pytest.mark.gpu
 def test_site_cell_reads_d_out_and_d_in_in_should_dispatch_order():
     """scales is (d_out, d_in // group_size); reading the pair the other way
     round routes nowhere and looks like a boundary rather than a bug."""
@@ -248,6 +255,7 @@ def test_registered_zone_refuses_a_boundary_that_moved_at_one_shape(
     assert "1 of 5" in out and "2560x4096" in out
 
 
+@pytest.mark.gpu
 def test_prefill_shaped_input_falls_back_and_matches_stock():
     a = make_holder()
     x3 = mx.array(np.random.default_rng(5)
@@ -262,6 +270,7 @@ def test_prefill_shaped_input_falls_back_and_matches_stock():
         assert mx.array_equal(out, stock).item()
 
 
+@pytest.mark.gpu
 def test_decode_shaped_3d_input_dispatches():
     a = make_holder()
     with patched(a) as patch:
@@ -274,6 +283,7 @@ def test_decode_shaped_3d_input_dispatches():
         assert out.shape == (m, 1, D_OUT)
 
 
+@pytest.mark.gpu
 def test_ineligible_group_size_falls_back_with_reason():
     a = make_holder(group_size=32)
     with patched(a) as patch:
@@ -285,6 +295,7 @@ def test_ineligible_group_size_falls_back_with_reason():
 # ---------------------------------------------------------------------------
 # correctness of the routed output
 # ---------------------------------------------------------------------------
+@pytest.mark.gpu
 def test_routed_output_sits_at_the_fp64_reference():
     a = make_holder()
     m = dispatched_m()
@@ -304,6 +315,7 @@ def test_routed_output_sits_at_the_fp64_reference():
 # ---------------------------------------------------------------------------
 # arm 4: forced stock
 # ---------------------------------------------------------------------------
+@pytest.mark.gpu
 def test_forced_stock_never_dispatches_and_is_bit_identical():
     a = make_holder()
     m = dispatched_m()
@@ -409,6 +421,7 @@ class ChainModel(nn.Module):
         return mx.where(hit, mx.array(10.0, dtype=mx.float16), zeros)
 
 
+@pytest.mark.gpu
 def test_decode_window_step_accounting_and_feedback():
     model = ChainModel()
     b, t, g = 3, 5, 6
@@ -813,6 +826,7 @@ def test_the_whitelist_matches_the_registration():
         serve_sub4bit._WHITELIST_PREFIXES
 
 
+@pytest.mark.gpu
 def test_the_only_m_reason_is_the_routing_table_declining_the_cell():
     """The registration whitelists the `m-` prefix, which is wider than the
     one reason that exists. This is what keeps the widening honest: no other
@@ -829,6 +843,7 @@ def test_the_only_m_reason_is_the_routing_table_declining_the_cell():
         assert re.fullmatch(r"m-\d+-outside-dispatch-\d+x\d+", reason), reason
 
 
+@pytest.mark.gpu
 def test_a_bias_term_falls_back_and_invalidates_the_round():
     """The kernel has no bias path, so a biased layer must run stock - and
     because `bias-term` is deliberately NOT whitelisted, a round in which it
@@ -880,6 +895,7 @@ def test_the_harness_owns_no_second_copy_of_the_timing_rules():
     assert serve_sub4bit.spread_pct is serve_sub4bit.machine_state.spread_pct
 
 
+@pytest.mark.gpu
 def test_the_op_probe_times_through_the_shared_engine(monkeypatch):
     """Counted, not read off the source: the probe must calibrate once and
     then sample both arms ROUNDS times through interleave.dispatch."""

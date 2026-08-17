@@ -177,6 +177,7 @@ def silu_surface() -> MLXKernelSurface:
                             input_names=("input",), output_names=("out",))
 
 
+@pytest.mark.gpu
 @requires_arms
 def test_each_specialization_is_captured_fresh_and_distinct():
     surface = silu_surface()
@@ -195,6 +196,7 @@ def test_each_specialization_is_captured_fresh_and_distinct():
         assert len(record.outputs) == 1  # the capturing call's own arrays
 
 
+@pytest.mark.gpu
 @requires_arms
 def test_the_extracted_kernel_matches_the_live_surface_under_the_shipped_oracle():
     """The dispatch's match criterion, verbatim: the shipped oracle's verdict
@@ -256,6 +258,7 @@ def test_the_extracted_kernel_matches_the_live_surface_under_the_shipped_oracle(
     assert not report.compile_option_alarm
 
 
+@pytest.mark.gpu
 @requires_arms
 def test_a_metadata_binding_kernel_survives_the_round_trip():
     """The shape/stride ABI, end to end: MLX appends int32 shape and int64
@@ -281,6 +284,7 @@ def test_a_metadata_binding_kernel_survives_the_round_trip():
     np.testing.assert_array_equal(result.outputs[0], x * 2.0)
 
 
+@pytest.mark.gpu
 @requires_arms
 def test_the_live_arm_reports_a_broken_surface_as_an_error_not_a_crash():
     broken = MLXKernelSurface(name="kv_broken", source="this is not MSL;",
@@ -294,6 +298,7 @@ def test_the_live_arm_reports_a_broken_surface_as_an_error_not_a_crash():
     assert results[0].error
 
 
+@pytest.mark.gpu
 @requires_arms
 def test_a_non_default_math_mode_is_recorded_as_used():
     from kernelverify.runners import Binding, KernelSpec

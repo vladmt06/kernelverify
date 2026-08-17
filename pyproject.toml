@@ -1,0 +1,28 @@
+# pytest configuration only. This project is not packaged: it is run from the
+# tree through `.venv/bin/python`, so there is no [project] table and nothing
+# here builds a distribution.
+#
+# The two markers exist for one reason each, and both reasons are measured
+# rather than guessed.
+#
+# `gpu` - this machine has ONE GPU and one machine-wide measurement lock
+# (bench/machine_state.py), so a heavy measurement and a test run compete for
+# the same device. Before this marker there was no way to run the suite during
+# a 33-minute A/B without both slowing down and the timings becoming unusable.
+# `pytest -m "not gpu"` is what a lane runs while a measurement holds the
+# machine. The marked set was derived empirically, from a run inside a sandbox
+# with no Metal device, not from grepping for imports: a file that imports
+# mlx.core without computing on it does NOT need the marker, and marking it
+# would shrink the safe subset for nothing.
+#
+# `slow` - four tests recompute serving-grid blocks from committed evidence
+# (tests/test_quant_contract_members.py::_recompute dequantizes a block to
+# float64 and runs all six CPU ensemble members over it). Measured on
+# 2026-08-17 they take 73.3 s, 12.9 s, 5.5 s and 5.2 s against a 108 s full
+# suite, so they are 90% of the wall clock and every other test in the
+# repository is under 2 s. `pytest -m "not slow"` is the edit-loop subset.
+[tool.pytest.ini_options]
+markers = [
+  "slow: recomputes serving-grid blocks from committed evidence (5-75 s each)",
+  "gpu: dispatches to a Metal device; cannot run while a measurement holds the machine",
+]
