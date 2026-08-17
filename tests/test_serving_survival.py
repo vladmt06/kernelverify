@@ -218,6 +218,152 @@ def test_a_child_whose_parent_died_during_startup_still_notices(
     assert "ORPHAN STOP" in capsys.readouterr().out
 
 
+def test_a_child_orphaned_after_its_last_record_does_not_publish(
+        tmp_path, monkeypatch, capsys):
+    """The publish window: work finished, result not yet written.
+
+    A parent dying during the FINAL record used to leave an orphan that
+    completed, published, and exited 0 - and its late write to the shared
+    result path could replace a restarted run's owned result. The work here
+    completes untouched; only the publish is refused.
+    """
+    measured = []
+
+    def _grid(name, d_out, d_in, draw, seed, batches, session, guard, verbose):
+        for cell in ("record-0", "record-1"):
+            guard.check(cell)
+            measured.append(cell)
+        return {"records": measured}
+
+    # Calls 1 and 2 clear both records; call 3 is the publish gate, by which
+    # time the parent is gone.
+    real_getppid, calls = os.getppid, []
+
+    def _getppid():
+        calls.append(None)
+        return real_getppid() if len(calls) <= 2 else 1
+
+    monkeypatch.setattr(harness, "DeviceMemberSession", lambda: object())
+    monkeypatch.setattr(harness, "grid_iteration", _grid)
+    monkeypatch.setattr(harness.os, "getppid", _getppid)
+
+    task_path, out_path = tmp_path / "task.json", tmp_path / "out.json"
+    task_path.write_text(json.dumps({
+        "kind": "grid", "name": "tiny", "d_out": 8, "d_in": 64,
+        "draw": "normal-0.02", "seed": 0, "batches": [1], "budget_gb": 24.0,
+        "cell": "grid tiny 8x64 normal-0.02 s0",
+        "parent_pid": real_getppid()}))
+
+    class _Args:
+        child_task = str(task_path)
+        child_out = str(out_path)
+
+    assert harness.child_main(_Args()) == EXIT_ORPHANED
+    assert measured == ["record-0", "record-1"], "the work itself finished"
+    assert not out_path.exists(), (
+        "an orphan published a result nobody owns")
+    assert "publish" in capsys.readouterr().out, (
+        "the stop must name the publish gate it refused at")
+
+
+def test_the_probe_checks_its_guard_between_every_evaluator(monkeypatch):
+    """A probe child holds exactly ONE shape, so the old per-shape check was
+    the last it would ever make: an orphaned probe ran every remaining
+    (dtype, implementation) pair against a lock its dead parent had released.
+    The cadence has to live INSIDE the shape.
+    """
+    checked = []
+
+    class _SpyGuard:
+        def check(self, cell):
+            checked.append(cell)
+            return 1.0
+
+    class _Hoists:
+        w32 = w_lut32 = qg32 = scales32 = biases32 = w16_32 = None
+
+    # Signatures differ across evaluators (the device one takes the session
+    # first), so the stub finds the batch array by its shape wherever it sits.
+    zeros = lambda *a, **k: np.zeros(
+        (next(x for x in a if hasattr(x, "shape")).shape[0], 8), np.float32)
+    for fn in ("eval_pairwise", "eval_serial_chunked", "eval_lut",
+               "eval_factored_groups", "eval_factored_serial",
+               "eval_block_tiled", "eval_boundary", "mlx_qmm_heldout",
+               "_device_member_output"):
+        monkeypatch.setattr(harness, fn, zeros)
+    monkeypatch.setattr(harness, "verify_against_mlx",
+                        lambda w, contract: (object(), True))
+    monkeypatch.setattr(harness, "ArtefactHoists", lambda a: _Hoists())
+    monkeypatch.setattr(harness, "_carrier", lambda a: {})
+    monkeypatch.setattr(harness, "mlx_quantize_hoist",
+                        lambda w: (None, None, None))
+    monkeypatch.setattr(harness, "serial_chunk_rows", lambda *a: 1)
+
+    harness.probe_batch_regimes([("tiny", (8, 64))], session=object(),
+                                verbose=False, guard=_SpyGuard())
+
+    # Exact, not a floor. A `>= 20` version of this passed while the single
+    # longest-running evaluator went unchecked - four checks of slack is
+    # wider than a whole evaluator, and mlx-on-device is exactly where an
+    # orphan burns the most GPU. Every (dtype, implementation) pair must be
+    # checked once, so the two dtypes must agree on the set.
+    per_pair = [c.split() for c in checked if "float" in c]
+    by_dtype = {}
+    for cell in per_pair:
+        by_dtype.setdefault(cell[-2], set()).add(cell[-1])
+
+    assert set(by_dtype) == {"float32", "float16"}, (
+        f"a dtype ran with no checks at all: {sorted(by_dtype)}")
+    assert by_dtype["float32"] == by_dtype["float16"], (
+        f"the dtypes disagree on which evaluators were checked: "
+        f"{by_dtype['float32'] ^ by_dtype['float16']}")
+    assert len(per_pair) == 2 * len(by_dtype["float32"]), (
+        f"{len(per_pair)} checks for "
+        f"{2 * len(by_dtype['float32'])} pairs: some pair was skipped or "
+        f"checked twice")
+    assert {"mlx-on-device", "boundary-fp16-dequant"} <= by_dtype["float32"], (
+        "the held-out evaluators are the longest-running ones and the most "
+        "expensive to leave unguarded")
+
+
+def test_the_probe_summary_names_every_memory_number_it_prints(capsys):
+    """The probe summary narrated RSS ALONE until 2026-08-17: it formats a
+    dict by hand, so the AST test that bans rss_line() inside print never saw
+    it. Behavioural instead of syntactic, because the lie was in the output.
+
+    The first repair then printed the RSS PEAK under a bare `rss` label - the
+    token every other line uses for CURRENT - and dropped current entirely.
+    That is this file's own recorded mistake a second time, so the four
+    numbers are given four distinct values here and each is pinned to the
+    word in front of it.
+    """
+    harness._print_probe({"lm_head": {
+        "g0_exact": True, "components": [[1, 2]], "joins": [],
+        "weak_prefix_covered": [],
+        "footprint_gb": {"current": 21.4, "peak": 22.0},
+        "rss_gb": {"current": 2.4, "peak": 9.9}}})
+    line = capsys.readouterr().out
+    assert "footprint 21.40 GB, peak 22.00 GB" in line, (
+        "the Jetsam number leads, and its peak is named as a peak")
+    assert "rss 2.40 GB, peak 9.90 GB" in line, (
+        "RSS trails with BOTH halves, worded exactly as rss_line() words "
+        "them - a bare `rss` carrying the peak is the mislabel this pins")
+    assert line.index("footprint") < line.index("rss"), (
+        "RSS may trail the footprint, never lead it")
+
+
+def test_a_probe_payload_missing_its_footprint_fails_loudly(capsys):
+    """No silent fallback. A producer that stopped emitting footprint_gb must
+    raise here, because the alternative - quietly reverting to the RSS-alone
+    line - is the exact regression the repair above removed, and a green
+    suite would hide it."""
+    with pytest.raises(KeyError):
+        harness._print_probe({"lm_head": {
+            "g0_exact": True, "components": [[1, 2]], "joins": [],
+            "weak_prefix_covered": [],
+            "rss_gb": {"current": 2.4, "peak": 9.9}}})
+
+
 def test_the_continuity_child_checks_its_guard_between_cases(
         tmp_path, monkeypatch):
     """The continuity path was the one child with NO checks at all.
@@ -323,12 +469,25 @@ def test_the_parent_side_guard_has_no_parent_to_lose():
 
 
 def test_refusal_exit_codes_are_distinct_and_leave_the_existing_ones_alone():
-    codes = {EXIT_BUDGET_REFUSAL, EXIT_LOCK_HELD, EXIT_LOW_MEMORY,
-             EXIT_CHILD_DEATH, EXIT_NO_DEVICE, EXIT_ORPHANED}
-    assert len(codes) == 6
-    assert not codes & {0, 1, 2}, (
+    # Derived from the module, never hand-copied. Two rounds of review hit
+    # this same test: the first version listed six of the eight codes, so
+    # EXIT_ORPHANED = 8 would have passed while aliasing a precondition
+    # refusal; listing all eight fixed that instance and left the CLASS
+    # alone, since the ninth code added would alias just as silently.
+    # Reading the table itself is the only version that stays true.
+    import memory_guard
+    table = {name: value for name, value in vars(memory_guard).items()
+             if name.startswith("EXIT_")}
+    assert len(set(table.values())) == len(table), (
+        f"two refusals share an exit code, so the coordinator cannot tell "
+        f"them apart: {sorted(table.items(), key=lambda kv: kv[1])}")
+    assert not set(table.values()) & {0, 1, 2}, (
         "0 and 1 already mean attested/measured-and-stopped, and 2 is "
         "argparse's own exit - a gate sharing it is unreadable")
+    # and the codes this harness itself returns are all in that table
+    assert {EXIT_BUDGET_REFUSAL, EXIT_LOCK_HELD, EXIT_LOW_MEMORY,
+            EXIT_CHILD_DEATH, EXIT_NO_DEVICE,
+            EXIT_ORPHANED} <= set(table.values())
 
 
 # ---------------------------------------------------------------------------

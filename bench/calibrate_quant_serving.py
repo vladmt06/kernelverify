@@ -144,10 +144,14 @@ RSS already 2.4 GB early in the step and no log line naming the shape that
 was live. Authorized by the coordinator and recorded here before the rerun:
 
 1. STEP 2 announces every shape and every (dtype, implementation) as it
-   starts and finishes, each line carrying an RSS self-report (current and
-   peak), and each shape's report carries ``rss_gb`` into the JSON. The
-   memory hypothesis is then confirmed or refuted by the next run's log
-   rather than argued about.
+   starts and finishes, each line carrying a memory self-report, and each
+   shape's report carries that pair into the JSON. The memory hypothesis is
+   then confirmed or refuted by the next run's log rather than argued about.
+   (Amended 2026-08-17: the self-report was RSS alone when this was written.
+   It now leads with phys_footprint, the number Jetsam kills on, and carries
+   RSS after it - both halves of both pairs, since current answers "how big
+   is this shape" and peak answers "did something spike". The JSON carries
+   ``footprint_gb`` beside ``rss_gb`` for the same reason.)
 
 2. A per-step checkpoint at ``.cache/quant_serving_partial.json``, written
    atomically (temp then replace, so a SIGKILL mid-write cannot leave a file
@@ -311,6 +315,11 @@ Two halves, and neither is sufficient alone:
    startup capture records the reparent pid and never diverges from it again.
    The child stops with EXIT_ORPHANED, its own number, because exit 1 already
    means measured-and-stopped and would read as the opposite of what happened.
+   The comparison runs between grid records, between every probe evaluator
+   (a probe child holds one shape, so a per-shape check would be its last),
+   and once more before the result file is published - finished work belongs
+   to a parent that is still alive to read it, and an orphan's late write
+   could otherwise replace a restarted run's owned result.
 
 2. The parent spawns with ``start_new_session=True`` and sweeps the child's
    process group in a ``finally``. This is the path for a parent that merely
@@ -1157,6 +1166,20 @@ def child_main(args) -> int:
         # that means "nothing was measured" as the one that means it was.
         print(f"  child {cell}: ORPHAN STOP - {exc}", flush=True)
         return EXIT_ORPHANED
+    # The last window: the work is finished but not yet published. A parent
+    # that died during the final record leaves an orphan holding a COMPLETE
+    # result, and publishing it is worse than losing it - a restarted run's
+    # child writes the same result path, and whichever write lands second is
+    # the one the new parent reads, so an unowned measurement could replace
+    # an owned one. Finished work belongs to a parent alive to read it.
+    try:
+        guard.check(f"{cell}: publish")
+    except Orphaned as exc:
+        print(f"  child {cell}: ORPHAN STOP - {exc}", flush=True)
+        return EXIT_ORPHANED
+    except BudgetExceeded as exc:
+        print(f"  child {cell}: BUDGET REFUSAL - {exc}", flush=True)
+        return EXIT_BUDGET_REFUSAL
     current, peak = phys_footprint_gb()
     write_child_result(Path(args.child_out), {
         "payload": payload,
@@ -1344,11 +1367,15 @@ def probe_batch_regimes(shapes, session: DeviceMemberSession,
     Evaluates one (implementation, dtype) at a time across B = 1..16 and ANDs
     its pairwise matrix into the joint one, bounding residency at lm_head.
 
-    Every stage announces itself with its RSS: this step died three times
-    under SIGKILL with nothing in the log past the header, so the last line
-    printed has to name the shape and the implementation that was live.
-    ``guard`` (when given) is checked before each shape starts, so an
-    over-budget process refuses before the next cell rather than mid-way.
+    Every stage announces itself with its footprint: this step died three
+    times under SIGKILL with nothing in the log past the header, so the last
+    line printed has to name the shape and the implementation that was live.
+    ``guard`` (when given) is checked before each shape starts and again
+    between every (dtype, implementation) pair. Per-shape alone is not a
+    cadence for the child that runs this: a probe child holds exactly ONE
+    shape, so its single up-front check was the last one it would ever make,
+    and an orphaned probe ran every remaining evaluator against a lock its
+    dead parent had already released.
     """
     contract = QuantContract(scheme="mlx-affine", bits=BITS, group_size=GROUP_SIZE)
     report = {}
@@ -1394,12 +1421,15 @@ def probe_batch_regimes(shapes, session: DeviceMemberSession,
                 "boundary-fp16-dequant": lambda xb: eval_boundary(xb, hoists.w16_32),
             }
             for impl_name, fn in evaluators.items():
+                if guard is not None:
+                    guard.check(f"probe {name} {dtype_name} {impl_name}")
                 outs = {B: fn(x_full[:B]) for B in range(1, PROBE_BATCH_MAX + 1)}
                 matrix &= match_matrix([outs])
                 del outs
                 if verbose:
                     print(f"    {dtype_name} {impl_name} done ({footprint_line()})",
                           flush=True)
+        fp_now, fp_peak = phys_footprint_gb()
         current, peak = rss_gb()
         report[name] = {
             "g0_exact": True,
@@ -1407,6 +1437,7 @@ def probe_batch_regimes(shapes, session: DeviceMemberSession,
             "components": [sorted(c) for c in match_components(matrix)],
             "joins": coverage_joins(matrix, BASE_BATCHES),
             "weak_prefix_covered": weak_prefix_cover(matrix, BASE_BATCHES),
+            "footprint_gb": {"current": fp_now, "peak": fp_peak},
             "rss_gb": {"current": current, "peak": peak},
         }
         del hoists, carrier, w_q, scales, biases
@@ -2290,7 +2321,7 @@ def _run_measured_steps(args, shapes, spawn, saved, steps, resumed,
               f"here - membership before K, renegotiated with the "
               f"coordinator, never resolved inside this harness")
         return 1
-    print(f"VERDICT: {'K=4 COVERS THE SERVING SHAPES - attestation holds' if attested else 'INADEQUATE somewhere - see the tables'}")
+    print(f"VERDICT: {f'K={K_SHIP:g} COVERS THE SERVING SHAPES - attestation holds' if attested else 'INADEQUATE somewhere - see the tables'}")
     return 0 if attested else 1
 
 
@@ -2301,13 +2332,36 @@ def _print_probe(probe: dict) -> None:
             continue
         components = p["components"]
         weak = p["weak_prefix_covered"]
-        rss = p.get("rss_gb")
-        rss_note = (f" [rss {rss['current']:.2f} GB, "
-                    f"peak {rss['peak']:.2f} GB]" if rss else "")
+        # Footprint leads and RSS trails, the same order and the SAME WORDING
+        # as every other progress line (I4). Both halves of each pair are
+        # printed: current answers "how big is this shape", peak answers "did
+        # something transient spike", and rss_gb's own docstring is explicit
+        # that only the pair answers the memory hypothesis.
+        #
+        # This line narrated RSS alone until the fresh-eyes review of
+        # 2026-08-17 found it hiding from the AST test, which sees rss_line()
+        # calls and not a dict formatted by hand. The first repair then
+        # printed the RSS PEAK under a bare `rss` label, the token every other
+        # line in the same stream uses for CURRENT - which is this file's own
+        # recorded mistake (a line LABELLED peak footprint while printing
+        # ru_maxrss) committed a second time, in the same function, one round
+        # apart. Hence: no bare labels, no dropped halves.
+        #
+        # footprint_gb is indexed, not .get(): every payload that reaches here
+        # has passed the g0_exact continue above, and probe_batch_regimes
+        # writes footprint_gb and rss_gb into the same dict literal. A missing
+        # key is a producer that stopped emitting it, and a KeyError says so
+        # at once - where a fallback would silently restore the RSS-alone
+        # narration this whole repair exists to remove.
+        fp, rss = p["footprint_gb"], p["rss_gb"]
+        mem_note = (f" [footprint {fp['current']:.2f} GB, "
+                    f"peak {fp['peak']:.2f} GB; "
+                    f"rss {rss['current']:.2f} GB, "
+                    f"peak {rss['peak']:.2f} GB]")
         print(f"  {name}: {len(components)} regime component(s) "
               f"{[f'{min(c)}..{max(c)}' for c in components]}, "
               f"joins {p['joins'] or 'none'}, "
-              f"weak-prefix covered {weak or 'none'}{rss_note}")
+              f"weak-prefix covered {weak or 'none'}{mem_note}")
 
 
 if __name__ == "__main__":
