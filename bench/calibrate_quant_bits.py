@@ -128,6 +128,9 @@ from kernelverify.schemas.quant_contract import (  # noqa: E402
     r_contract,
 )
 from phase0_contract_k import (  # noqa: E402
+    BATCH,
+    MODES,
+    WEIGHT_DRAWS,
     err,
     heldout_block_tiled,
     make_w,
@@ -162,10 +165,7 @@ def cover(demand: float) -> float:
         f"demand {demand:.3f} is above the K grid {K_GRID}: this is the KILL "
         f"branch, and no grid value may be clamped to cover it")
 
-BATCH = 2
-MODES = ("unit", "corpus-scale", "near-zero", "constant-rows")
 IID_MODES = ("unit", "corpus-scale")
-WEIGHT_DRAWS = ("normal-0.02", "heavy-tailed")
 CALIBRATION_SEEDS = (0, 1)
 HELDOUT_SEEDS = (100, 101)   # the independent draw
 

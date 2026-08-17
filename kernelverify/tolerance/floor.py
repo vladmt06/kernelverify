@@ -73,17 +73,28 @@ def ensemble_labels(op: str) -> list[str]:
     return [label for label, _ in ENSEMBLE_MEMBERS[op]]
 
 
-def _max_abs_error(candidate, ref) -> float:
+def max_abs_error(candidate, ref) -> float:
+    """The one metric every tolerance in the project is built on: fp64 max-abs
+    deviation of `candidate` from `ref`, 0.0 on an empty array. The native
+    operators' tolerances import it too, so the corpus and native floors can
+    never measure two different things."""
     diff = np.abs(candidate.astype(np.float64) - ref.astype(np.float64))
     return float(np.max(diff)) if diff.size else 0.0
 
 
+def floored_tolerance(base_tol: float, k: float, member_outputs, ref: np.ndarray) -> float:
+    """The shipped verdict formula, spelled once for the corpus and every
+    native operator family: max(base_tol, k * floor), where the floor is the
+    worst max_abs_error of any ensemble member's output from fp64 truth."""
+    return max(base_tol, k * max(max_abs_error(out, ref) for out in member_outputs))
+
+
 def ensemble_floor(op: str, inputs: dict, ref: np.ndarray) -> float:
     """Worst deviation of any provably-correct implementation from fp64 truth."""
-    return max(_max_abs_error(fn(inputs), ref) for fn in ENSEMBLES[op])
+    return max(max_abs_error(fn(inputs), ref) for fn in ENSEMBLES[op])
 
 
 def conditioned_tolerance(op: str, inputs: dict, ref: np.ndarray,
                           base_tol: float) -> float:
     """The shipped per-case tolerance: max(base_tol, K_ENSEMBLE * floor)."""
-    return max(base_tol, K_ENSEMBLE * ensemble_floor(op, inputs, ref))
+    return floored_tolerance(base_tol, K_ENSEMBLE, (fn(inputs) for fn in ENSEMBLES[op]), ref)

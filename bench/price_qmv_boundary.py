@@ -99,6 +99,7 @@ import mlx.core as mx  # noqa: E402
 
 import machine_state  # noqa: E402
 import pack_wide_qmv as gate  # noqa: E402
+from interleave import interleaved_samples  # noqa: E402
 from machine_state import MeasurementLock  # noqa: E402
 
 # The refusal vocabulary, single-sourced (D1): the exit codes, footprint
@@ -295,8 +296,8 @@ def price_shape(kernel, shape, m_sweep, rounds, guard=None) -> list[PricedPoint]
             return mx.quantized_matmul(x, wq, sc, bi, transpose=True,
                                        group_size=64, bits=BITS)
 
-        a_samples, b_samples = gate.interleaved_samples(ours, theirs, rounds,
-                                                        guard=cell_guard)
+        a_samples, b_samples = interleaved_samples(ours, theirs, rounds,
+                                                   guard=cell_guard)
         points.append(classify(a_samples, b_samples, site=shape.name,
                                d_out=d_out, d_in=d_in, m=m, r=r))
     return points

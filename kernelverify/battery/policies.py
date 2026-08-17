@@ -114,6 +114,24 @@ def _greedy_pick(pool: list[Case], gain_sets: dict, covered: set,
     return best
 
 
+def _cover(pool: list[Case], gain_sets: dict, covered: set, chosen: list[Case],
+           budget: int, dim_min: dict, dim_max: dict) -> None:
+    """Greedy set cover in place: append to `chosen` until every item in
+    `gain_sets` is covered or the budget is spent; `covered` is updated in place."""
+    while len(chosen) < budget:
+        best = _greedy_pick(pool, gain_sets, covered, dim_min, dim_max)
+        if best is None:
+            return
+        chosen.append(best)
+        covered |= gain_sets[best]
+
+
+def _explore(pool: list[Case], chosen: list[Case], budget: int, rng: random.Random) -> None:
+    """Spend whatever budget the core left on uniform random draws from the pool."""
+    while len(chosen) < budget:
+        chosen.append(rng.choice(pool))
+
+
 def policy_boundary_hybrid(cases: list[Case], meta: dict, budget: int, rng: random.Random):
     """Deterministic boundary coverage first, random exploration with the rest.
 
@@ -142,17 +160,10 @@ def policy_boundary_hybrid(cases: list[Case], meta: dict, budget: int, rng: rand
     dim_min, dim_max = _dim_bounds(meta)
     feature_sets, _ = _op_feature_sets(pool, dim_min, dim_max)
 
-    covered: set = set()
     chosen: list[Case] = []
-    while len(chosen) < budget:
-        best = _greedy_pick(pool, feature_sets, covered, dim_min, dim_max)
-        if best is None:  # every feature covered: switch to exploration
-            break
-        chosen.append(best)
-        covered |= feature_sets[best]
-
-    while len(chosen) < budget:
-        chosen.append(rng.choice(pool))
+    _cover(pool, feature_sets, set(), chosen, budget, dim_min, dim_max)
+    # every feature covered: switch to exploration
+    _explore(pool, chosen, budget, rng)
     return chosen
 
 
@@ -183,26 +194,14 @@ def policy_boundary_pairwise(cases: list[Case], meta: dict, budget: int, rng: ra
     feature_sets, pair_sets = _op_feature_sets(pool, dim_min, dim_max)
 
     chosen: list[Case] = []
-    covered_singles: set = set()
-    while len(chosen) < budget:
-        best = _greedy_pick(pool, feature_sets, covered_singles, dim_min, dim_max)
-        if best is None:  # every single feature covered: move on to pairs
-            break
-        chosen.append(best)
-        covered_singles |= feature_sets[best]
-
+    _cover(pool, feature_sets, set(), chosen, budget, dim_min, dim_max)
+    # every single feature covered: move on to pairs
     covered_pairs: set = set()
     for case in chosen:
         covered_pairs |= pair_sets[case]
-    while len(chosen) < budget:
-        best = _greedy_pick(pool, pair_sets, covered_pairs, dim_min, dim_max)
-        if best is None:  # every achievable pair covered: switch to exploration
-            break
-        chosen.append(best)
-        covered_pairs |= pair_sets[best]
-
-    while len(chosen) < budget:
-        chosen.append(rng.choice(pool))
+    _cover(pool, pair_sets, covered_pairs, chosen, budget, dim_min, dim_max)
+    # every achievable pair covered: switch to exploration
+    _explore(pool, chosen, budget, rng)
     return chosen
 
 

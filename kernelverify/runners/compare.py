@@ -31,7 +31,7 @@ import json
 import statistics
 from dataclasses import dataclass, field
 
-from kernelverify.runners.metal import MetalRunner, _EventStream, _stream
+from kernelverify.runners.metal import MetalRunner, _EventStream, _stream, _tail
 from kernelverify.runners.result import RunResult
 from kernelverify.runners.spec import KernelSpec, RunCase, SpecError
 
@@ -145,8 +145,12 @@ class _LiveArm:
                 raise ComparisonAborted(
                     f"arm {self.name}: {result.status.value}: {result.detail}")
 
-    def time_case(self, index: int, case: RunCase) -> RunResult:
-        self._send({"index": index, "case": case.to_json()})
+    def time_case(self, case: RunCase, line: str) -> RunResult:
+        """Dispatch one case; `line` is its pre-encoded {"index", "case"} wire
+        line, built once per case by `compare` because every round sends the
+        same payload and the encoding must not sit in the ref-to-cand gap."""
+        self.process.stdin.write(line)
+        self.process.stdin.flush()
         while True:
             try:
                 event = self.events.next_event(self.runner.case_timeout)
@@ -168,9 +172,7 @@ class _LiveArm:
                 return result
 
     def _died(self, when: str) -> str:
-        tail = "".join(self.errors).strip().splitlines()[-4:]
-        return (f"arm {self.name}: the worker died {when}"
-                + (f": {' / '.join(tail)}" if tail else ""))
+        return f"arm {self.name}: the worker died {when}" + _tail("".join(self.errors))
 
     def close(self) -> None:
         try:
@@ -208,6 +210,12 @@ def compare(spec_a: KernelSpec, spec_b: KernelSpec, cases, *,
                 report.failure = f"arm {name}, case {case.label!r}: {error}"
                 return report
 
+    # Encoded once; the parent never mutates a case between rounds, and
+    # encoding inside the round loop would widen the ref-to-cand gap that
+    # interleaving exists to keep short.
+    wire = [json.dumps({"index": i, "case": c.to_json()}) + "\n"
+            for i, c in enumerate(cases)]
+
     arms: list[_LiveArm] = []
     try:
         arm_a = _LiveArm(runner, spec_a, "A (reference)", warmup, repeats)
@@ -219,8 +227,8 @@ def compare(spec_a: KernelSpec, spec_b: KernelSpec, cases, *,
                        for i, case in enumerate(cases)]
         for round_index in range(rounds):
             for index, case in enumerate(cases):
-                ref = arm_a.time_case(index, case)
-                cand = arm_b.time_case(index, case)
+                ref = arm_a.time_case(case, wire[index])
+                cand = arm_b.time_case(case, wire[index])
                 ref_spread = ref.timing.gpu_spread
                 comparisons[index].samples.append(RoundSample(
                     round_index=round_index,

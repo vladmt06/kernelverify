@@ -71,7 +71,7 @@ Vlad's global instructions still apply; this file adds the project's layout, how
 - `bench/memory_guard.py` - the footprint budget, the phys_footprint reader, the available-memory gate, the orphan check and the numbered refusal exits, shared by every harness that can be Jetsam-killed.
   Extracted from `calibrate_quant_serving.py` on 2026-08-15 so the pricing probe enforces the same budget by the same code, not by a second copy with its own numbering.
   Every refusal gets its own number and none may reuse 0, 1 or 2 (attested, measured-and-stopped, and argparse's own); `BudgetGuard` takes an optional `parent_pid` so the SAME guard serves the child, which has a parent to lose, and the parent's in-process path, which does not.
-- `bench/pack_wide_qmv.py` - the kernel pack's correctness gate: the shared sampler, the E2E dispatch shapes, and per-shape coverage at exactly the tile widths the pack routes to each of them.
+- `bench/pack_wide_qmv.py` - the kernel pack's correctness gate: the E2E dispatch shapes, and per-shape coverage at exactly the tile widths the pack routes to each of them.
 - `bench/pack_kv_attention.py` and `bench/pack_moe_dispatch.py` - the other two pack gates, in the same verify-then-time order and under the same interleaving discipline.
   Both arms are verified before either is timed, so a ratio compares two contract-passing implementations rather than one that merely happens to be faster.
 - `bench/emit_pack_certificates.py` - one certificate per specialization: it runs the pack gates' `verify()`, captures the generated translation unit in a fresh process, behaviourally validates it against the live MLX arm, and hashes what it certified.
@@ -95,7 +95,7 @@ Vlad's global instructions still apply; this file adds the project's layout, how
 - `bench/machine_state.py` - the idle gate, the timing floor, and the one machine-wide measurement lock (`MeasurementLock`, an `fcntl.flock` on a fixed path), with the reason each exists.
   Four harnesses take it today: `calibrate_quant_serving.py`, `price_qmv_boundary.py`, `derive_repaired_member_column.py` and `derive_prerepair_device_records.py`.
   `serve_sub4bit.py`, `calibrate_quant_device.py`, `measure_baselines.py`, `spike_mlx_e2e.py` and `emit_pack_certificates.py` do NOT, which is the gap tasks I1 and I2 of the 2026-08-16 plan close; until they land, running two of those together is on the operator.
-- `bench/interleave.py` - the shared interleaved-timing engine every GPU A/B in bench/ runs on: dispatch-size calibration to `MIN_SAMPLE_MS`, the timed dispatch itself, the canary spread limit a pack gate withholds a certificate above, and the arms-agree smoke check.
+- `bench/interleave.py` - the shared interleaved-timing engine every GPU A/B in bench/ runs on: dispatch-size calibration to `MIN_SAMPLE_MS`, the timed dispatch itself, the shared per-round sampler `interleaved_samples` with its guard seam, the canary spread limit a pack gate withholds a certificate above, and the arms-agree smoke check.
   One copy of the discipline, so a timing rule amended in one gate cannot silently stay old in another.
   Its `MAX_CANARY_SPREAD` is deliberately its own literal rather than the comparator's `DEFAULT_SPREAD_LIMIT`, because the limit is per class; `tests/test_interleave.py` is where a divergence surfaces.
 - `bench/detached_run.py` and `bench/start_binding_run.sh` - the detached run path: a one-shot launchd job that waits for a strong-idle window, then runs `measure_baselines.py` with no terminal attached, retrying up to three passes on dispersion (ADR 0010).
@@ -140,7 +140,7 @@ cd /Users/vlad/kernelverify
 - The environment needs `torch`, which only `gelu[variant=erf]` uses; a worktree venv created without it fails part-way through a verdict build.
 - It also needs `mlx==0.32.0` and `mlx-lm==0.31.3`, pinned across worktrees so binding comparisons stay on one toolchain.
   Without mlx, the mlx-dependent test modules are skipped whole or fail to collect, so the suite under-reports badly.
-  Skipped modules hide their contents rather than their count, so quote test counts from a fully equipped venv only; `.venv/bin/python -m pytest -q` reported 816 passed in 81 s warm on 2026-08-16, and 107 s on the first cold run of the session.
+  Skipped modules hide their contents rather than their count, so quote test counts from a fully equipped venv only; `.venv/bin/python -m pytest -q` reported 916 passed in 108 s warm on 2026-08-17.
   There is no fast subset yet: the repository has no pytest settings file (`tests/conftest.py` exists, but it only puts the repo root and `bench/` on `sys.path`) and no test carries a `slow` or `gpu` marker, so `-m "not slow"` deselects nothing and the full suite is the only time worth quoting.
   Fully equipped means `pyobjc` as well as `mlx`: without the Metal bindings the runner-backed pack tests fail rather than skip, so a venv with mlx alone reports a partial count nobody should quote.
 

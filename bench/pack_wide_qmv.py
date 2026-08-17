@@ -40,6 +40,7 @@ from interleave import (  # noqa: E402
     MIN_SAMPLE_MS,
     calibrate_copies,
     dispatch,
+    interleaved_samples,
 )
 from kernelverify.pack.dispatch_shapes import (  # noqa: E402
     PINNED_QWEN3_4B,
@@ -149,31 +150,6 @@ def weight_sets(d_out: int, d_in: int, bits: int) -> list:
     return sets
 
 
-def interleaved_samples(build_a, build_b, rounds: int = ROUNDS,
-                        guard=None) -> tuple:
-    """Per-round times of two arms, sampled interleaved within every round.
-
-    Interleaving is load-bearing and NOT sufficient (AGENTS.md): it equalizes
-    a clock excursion across the arms but cannot detect one, so the caller
-    must still gate on the reference arm's own spread. Both arms are warmed
-    first; the dispatch batch is calibrated on arm A to MIN_SAMPLE_MS.
-
-    ``guard``, when given, is called once per round with a cell label and may
-    refuse by raising (the pricing probe's memory checks); None leaves the
-    microbenchmark path exactly as it was. The seam lives HERE because this
-    loop is shared and a diverged sampler copy is the ADR 0004 two-halves
-    mistake.
-    """
-    mx.eval(build_a(0), build_b(0))
-    mx.synchronize()
-    copies = calibrate_copies(lambda c: dispatch(build_a, c))
-    a_samples, b_samples = [], []
-    for i in range(rounds):
-        if guard is not None:
-            guard(f"round {i + 1}/{rounds}")
-        a_samples.append(dispatch(build_a, copies) / copies)
-        b_samples.append(dispatch(build_b, copies) / copies)
-    return a_samples, b_samples
 
 
 # --------------------------------------------------------------------------
@@ -246,6 +222,8 @@ def verify(runner: MetalRunner, e2e_m: list | None = None, *,
         # One spec per tile width M (M and R are compile-time constants in the
         # raw door), all sharing one worker session as one candidate.
         rng = np.random.default_rng(11)
+        shared_sha = input_fingerprints({"w_q": packed, "scales": art.scales,
+                                         "biases": art.biases})
         spec_batches, case_refs = [], []
         for m in verify_m:
             if guard is not None:
@@ -277,8 +255,12 @@ def verify(runner: MetalRunner, e2e_m: list | None = None, *,
                     template=(("T", "float16"), ("BITS", bits),
                               ("M", m), ("R", r)),
                     label=label))
+                # x is the only per-case array; the packed weights, scales
+                # and biases are the coverage group's and are hashed once
+                # above, not re-hashed (and re-copied by tobytes) for every
+                # one of this group's cases.
                 case_refs.append((spec_ev, label, ref, tol,
-                                  input_fingerprints(case_inputs)))
+                                  {**input_fingerprints({"x": x}), **shared_sha}))
             spec_batches.append((spec, cases))
 
         results = [r for batch in runner.run_candidate(spec_batches) for r in batch]
@@ -330,7 +312,7 @@ def bench() -> bool:
                 return mx.quantized_matmul(x, wq, sc, bi, transpose=True,
                                            group_size=64, bits=bits)
 
-            a_samples, b_samples = interleaved_samples(ours, theirs)
+            a_samples, b_samples = interleaved_samples(ours, theirs, ROUNDS)
             t_ours = statistics.median(a_samples)
             t_mlx = statistics.median(b_samples)
             spread = max(b_samples) / min(b_samples)

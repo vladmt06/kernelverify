@@ -73,3 +73,31 @@ def arms_agree(ours, theirs) -> bool:
     a = np.array(ours).astype(np.float64)
     b = np.array(theirs).astype(np.float64)
     return float(np.max(np.abs(a - b))) <= 5e-3 * max(1.0, float(np.max(np.abs(b))))
+
+def interleaved_samples(build_a, build_b, rounds: int,
+                        guard=None) -> tuple:
+    """Per-round times of two arms, sampled interleaved within every round.
+
+    Interleaving is load-bearing and NOT sufficient (AGENTS.md): it equalizes
+    a clock excursion across the arms but cannot detect one, so the caller
+    must still gate on the reference arm's own spread. Both arms are warmed
+    first; the dispatch batch is calibrated on arm A to MIN_SAMPLE_MS.
+
+    ``guard``, when given, is called once per round with a cell label and may
+    refuse by raising (the pricing probe's memory checks); None leaves the
+    microbenchmark path exactly as it was. The seam lives HERE because this
+    loop is shared and a diverged sampler copy is the ADR 0004 two-halves
+    mistake. ``rounds`` is required rather than defaulted: each harness pins
+    its own round count as a measurement parameter, and a default here would
+    let one of them drift onto a number it never registered.
+    """
+    mx.eval(build_a(0), build_b(0))
+    mx.synchronize()
+    copies = calibrate_copies(lambda c: dispatch(build_a, c))
+    a_samples, b_samples = [], []
+    for i in range(rounds):
+        if guard is not None:
+            guard(f"round {i + 1}/{rounds}")
+        a_samples.append(dispatch(build_a, copies) / copies)
+        b_samples.append(dispatch(build_b, copies) / copies)
+    return a_samples, b_samples

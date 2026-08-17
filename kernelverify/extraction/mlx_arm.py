@@ -18,12 +18,11 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from kernelverify.extraction.surface import LiveCall, MLXKernelSurface
+from kernelverify.runners.metal import _tail, spawn_isolated
 from kernelverify.runners.spec import array_from_json
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKER_MODULE = "kernelverify.extraction._mlx_worker"
 
 DEFAULT_CAPTURE_TIMEOUT = 120.0
@@ -73,21 +72,7 @@ class LiveResult:
 
 
 def _spawn(python: str) -> subprocess.Popen:
-    environment = dict(os.environ)
-    existing = environment.get("PYTHONPATH", "")
-    environment["PYTHONPATH"] = (
-        f"{REPO_ROOT}{os.pathsep}{existing}" if existing else str(REPO_ROOT)
-    )
-    return subprocess.Popen(
-        [python, "-m", WORKER_MODULE],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        cwd=str(REPO_ROOT),
-        env=environment,
-        start_new_session=True,
-    )
+    return spawn_isolated(python, WORKER_MODULE)
 
 
 def _communicate(process: subprocess.Popen, payload: str, timeout: float):
@@ -200,8 +185,7 @@ def run_live(surface: MLXKernelSurface, calls, *, python: str = sys.executable,
                 label=calls[index].label,
             )
 
-    tail = (stderr or "").strip().splitlines()[-4:]
-    missing = "the live arm died before this case" + (f": {' / '.join(tail)}" if tail else "")
+    missing = "the live arm died before this case" + _tail(stderr or "")
     return [
         result if result is not None
         else LiveResult(ok=False, error=missing, label=calls[index].label)

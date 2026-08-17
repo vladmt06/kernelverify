@@ -242,9 +242,6 @@ class KernelSpec:
     def input_names(self) -> tuple[str, ...]:
         return tuple(b.name for b in self.bindings if b.kind is BindingKind.INPUT)
 
-    def scalar_names(self) -> tuple[str, ...]:
-        return tuple(b.name for b in self.bindings if b.kind is BindingKind.SCALAR)
-
     def output_count(self) -> int:
         return sum(1 for b in self.bindings if b.kind is BindingKind.OUTPUT)
 
