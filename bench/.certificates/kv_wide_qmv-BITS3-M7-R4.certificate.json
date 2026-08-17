@@ -1,10 +1,10 @@
 {
   "schema_version": 2,
-  "kernel": "kv_wide_qmv-BITS4-M4-R4",
+  "kernel": "kv_wide_qmv-BITS3-M7-R4",
   "kernel_family": "kv_wide_qmv",
   "byte_bound": {
     "_meaning": "these hashes identify WHAT was verified; they assert nothing about output values",
-    "translation_unit_sha256": "a24230727f204ddbc250622d73e224c61c1c3df8db468a0edc109c9aee9b8203",
+    "translation_unit_sha256": "1fc7f19a75368ac887d943836377990cbc59a97cd5710d1fb7eed0c6a855f464",
     "catalogue_fingerprint": "none: no mutation-scored fault catalogue exists for this operator yet",
     "harness_commit": "d4fee79",
     "contract_version": "MLX-affine quant contract, device-joined ensemble, K_QUANT=4 (ADR 0009/0012/0016)",
@@ -23,9 +23,9 @@
     "_assertion": "re-running the published protocol on a machine matching the recorded chip generation and toolchain reproduces these verdicts; output values are NOT asserted to be identical, which is not achievable on a GPU",
     "operator": "quantized_matmul",
     "policy": "pack-gate fixed-case sweep: 2 microbenchmark matrix shapes at every supported bit width, plus the six Qwen3-4B E2E decode dispatch shapes at 3 bits over each shape's OWN routed M values, x {unit, corpus} input scales per (BITS, M) specialization, judged against the shipped NATIVE_OPS['quantized_matmul'] reference and tolerance; artefact bytes checked identical to mx.quantize per (shape, bits). This is NOT the 16-eval mutation-scored battery, which has not run against this operator.",
-    "budget_evaluations_per_operator": 4,
-    "cases_run": 4,
-    "cases_passed": 4,
+    "budget_evaluations_per_operator": 12,
+    "cases_run": 12,
+    "cases_passed": 12,
     "all_passed": true,
     "seed_protocol": "weights: np.random.default_rng(7) per (shape, bits); inputs: np.random.default_rng(11) per (shape, bits), drawn M-major then {unit, corpus} scale, in bench/pack_wide_qmv.py verify()",
     "tolerance_model": {
@@ -80,50 +80,106 @@
     "elsewhere": "advisory: a mismatched chip generation or toolchain may move numerics legitimately, so a failure there is a new matrix row to investigate, not a refutation",
     "domain": {
       "tolerance_validity": "admissible class only (contract C1-C6): MLX's own batch-1 and batch-16 quantized-matmul kernels at fp16 activations are OUT of contract (ADR 0014: half-precision intermediates in affine_qmv/affine_qmm_t), so those cells carry no admissible device held-out evidence and the quant-tolerance attestation there is adequate-by-exclusion",
-      "BITS": 4,
-      "M": 4,
+      "BITS": 3,
+      "M": 7,
       "R": 4,
       "d_in": "any multiple of 64 (gate evidence at 2560 and 4096)",
       "d_out": "any positive count (out-of-range rows clamp-read, stores guarded; gate evidence at 2560 and 4096)",
-      "dispatch_boundary": "should_dispatch(m, bits, d_out, d_in) is per-shape and per-width: 4-bit is unpriced, so it routes nowhere and MLX serves every shape at this width until its own pricing run lands; a routing boundary, not a correctness bound - the certificate's correctness claim holds wherever this specialization is launched"
+      "dispatch_boundary": "should_dispatch(m, bits, d_out, d_in) is per-shape and per-width: at BITS=3, M=7 it routes here at 6 of the 6 priced dispatch shapes (4096x2560, 1024x2560, 2560x4096, 9728x2560, 2560x9728, 151936x2560) and nowhere else, per bench/results/qmv-boundary-pricing-2026-08-15.json (2026-08-15, sha256 4a7c500fce9c); a routing boundary, not a correctness bound - the certificate's correctness claim holds wherever this specialization is launched"
     }
   },
   "performance": [],
   "notes": [
     "evidence source: the pack_wide_qmv pack gate, not the 16-eval mutation-scored battery; no fault catalogue has run against this operator yet (TODOS.md: pack-operator battery extension is the upgrade path)",
-    "extraction behaviorally validated on 2 of 4 gate cases (see validation_calls in the emitter)",
+    "extraction behaviorally validated on 2 of 12 gate cases (see validation_calls in the emitter)",
     "no timings recorded: certification may run under contention (D12.2), so no performance claim is made or implied"
   ],
   "advisory": {
     "_meaning": "advisory, NOT reproducible: GPU outputs are not bit-stable across runs, so these fingerprints and margins describe the certifying run only and are never a re-check criterion",
     "cases": [
       {
-        "label": "4-bit M=4 unit 2560x2560",
-        "output_sha256": "199e11a891c6b162f621e8e1d7af0b9381779bec4859153290be850b276a72b5",
-        "err": 0.0009761709025042364,
-        "tol": 0.014766059975123005,
-        "margin_err_over_tol": 0.066109
+        "label": "3-bit M=7 unit 4096x2560 (q_proj)",
+        "output_sha256": "8eb8b9ab976d8ca68840468e58993daa58ef5c9aefb97e55f5700f88ceabccad",
+        "err": 0.0018681327092053834,
+        "tol": 0.01644951287517961,
+        "margin_err_over_tol": 0.113568
       },
       {
-        "label": "4-bit M=4 corpus 2560x2560",
-        "output_sha256": "427de26bc355b993f09624be46b660aae90869d5d68af875742e0b5d546bcedd",
-        "err": 0.01495850074570626,
-        "tol": 0.14417193074622703,
-        "margin_err_over_tol": 0.103755
+        "label": "3-bit M=7 corpus 4096x2560 (q_proj)",
+        "output_sha256": "ff3106d8deeebb7922941e51c4debee6a994ea08c3555587b72c7a20bc119a55",
+        "err": 0.01550044841133058,
+        "tol": 0.20685226092642034,
+        "margin_err_over_tol": 0.074935
       },
       {
-        "label": "4-bit M=4 unit 4096x4096",
-        "output_sha256": "99dfaad15449756d6beb8ad2d0e2787a2a1684c7f89f18394798bf8949af17b4",
-        "err": 0.001951608239323832,
-        "tol": 0.019801766368326527,
-        "margin_err_over_tol": 0.098557
+        "label": "3-bit M=7 unit 1024x2560 (k_proj/v_proj)",
+        "output_sha256": "80969c8e42261ae5a8be53663b3eff584aa6bebfbb2377ca3453882382f0420d",
+        "err": 0.0009755559549375903,
+        "tol": 0.014411249886801794,
+        "margin_err_over_tol": 0.067694
       },
       {
-        "label": "4-bit M=4 corpus 4096x4096",
-        "output_sha256": "15bd985cd176d6192baef4618cce56013f26df5febba840d35a4e8aa1bba4064",
-        "err": 0.015519814594881609,
-        "tol": 0.2122562792821969,
-        "margin_err_over_tol": 0.073118
+        "label": "3-bit M=7 corpus 1024x2560 (k_proj/v_proj)",
+        "output_sha256": "e4b16dacd6edb9111717d124d456d9e0bd0d07423df7387b0988c65ef71f3471",
+        "err": 0.015344803445259458,
+        "tol": 0.17152346749186406,
+        "margin_err_over_tol": 0.089462
+      },
+      {
+        "label": "3-bit M=7 unit 2560x4096 (o_proj)",
+        "output_sha256": "71d0b7226790101c9c04f49310da97b38ccd0f363c8b8cefc5c20420c23a0f60",
+        "err": 0.001922320246194431,
+        "tol": 0.021365133701556478,
+        "margin_err_over_tol": 0.089975
+      },
+      {
+        "label": "3-bit M=7 corpus 2560x4096 (o_proj)",
+        "output_sha256": "46f2716bd04a1eac2d2aec1e025acf41000ebeb532ed1a59d5bf30e018ed2ac9",
+        "err": 0.015591559116728604,
+        "tol": 0.22406671930510189,
+        "margin_err_over_tol": 0.069584
+      },
+      {
+        "label": "3-bit M=7 unit 9728x2560 (gate_proj/up_proj)",
+        "output_sha256": "41e069d2b59add9efbfbebce730e473a0582253d1cfedfc32222353a21a84ead",
+        "err": 0.0018681327092053834,
+        "tol": 0.017024341735558658,
+        "margin_err_over_tol": 0.109733
+      },
+      {
+        "label": "3-bit M=7 corpus 9728x2560 (gate_proj/up_proj)",
+        "output_sha256": "4db878d0071a7f11eb7cb09126c566e0f5004cd584eedaee1a4809e87c91c13c",
+        "err": 0.01550044841133058,
+        "tol": 0.20685226092642034,
+        "margin_err_over_tol": 0.074935
+      },
+      {
+        "label": "3-bit M=7 unit 2560x9728 (down_proj)",
+        "output_sha256": "d03a5827eb5df5d5e038d0a15edb6faf872206969a6fd7c53e6488ac5d40cd93",
+        "err": 0.0030241598283282656,
+        "tol": 0.03155749408339089,
+        "margin_err_over_tol": 0.09583
+      },
+      {
+        "label": "3-bit M=7 corpus 2560x9728 (down_proj)",
+        "output_sha256": "123871cba42cac5c34240008353a42f400ddb5c2a8871aec3ca5ac5d604af65d",
+        "err": 0.02951300368295051,
+        "tol": 0.30060587361296476,
+        "margin_err_over_tol": 0.098178
+      },
+      {
+        "label": "3-bit M=7 unit 151936x2560 (lm_head)",
+        "output_sha256": "c0ab966d6bd01e1c21ce2c87ff7a0c3a02ce5ebfa7af1d754fd52e53c0d5089a",
+        "err": 0.001918355279485695,
+        "tol": 0.019519065315265326,
+        "margin_err_over_tol": 0.098281
+      },
+      {
+        "label": "3-bit M=7 corpus 151936x2560 (lm_head)",
+        "output_sha256": "b38f77a456bfee4e5523a07668dffac7ab532d2f2fe0b61694e2e580d86ba33c",
+        "err": 0.015618383356923005,
+        "tol": 0.20685226092642034,
+        "margin_err_over_tol": 0.075505
       }
     ]
   }

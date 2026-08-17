@@ -1,10 +1,10 @@
 {
   "schema_version": 2,
-  "kernel": "kv_wide_qmv-BITS4-M4-R4",
+  "kernel": "kv_wide_qmv-BITS3-M10-R4",
   "kernel_family": "kv_wide_qmv",
   "byte_bound": {
     "_meaning": "these hashes identify WHAT was verified; they assert nothing about output values",
-    "translation_unit_sha256": "a24230727f204ddbc250622d73e224c61c1c3df8db468a0edc109c9aee9b8203",
+    "translation_unit_sha256": "cd94352e733f3fd0aed7af5435166f1cd3ae45ee8cb36178aea149f880af8788",
     "catalogue_fingerprint": "none: no mutation-scored fault catalogue exists for this operator yet",
     "harness_commit": "d4fee79",
     "contract_version": "MLX-affine quant contract, device-joined ensemble, K_QUANT=4 (ADR 0009/0012/0016)",
@@ -23,9 +23,9 @@
     "_assertion": "re-running the published protocol on a machine matching the recorded chip generation and toolchain reproduces these verdicts; output values are NOT asserted to be identical, which is not achievable on a GPU",
     "operator": "quantized_matmul",
     "policy": "pack-gate fixed-case sweep: 2 microbenchmark matrix shapes at every supported bit width, plus the six Qwen3-4B E2E decode dispatch shapes at 3 bits over each shape's OWN routed M values, x {unit, corpus} input scales per (BITS, M) specialization, judged against the shipped NATIVE_OPS['quantized_matmul'] reference and tolerance; artefact bytes checked identical to mx.quantize per (shape, bits). This is NOT the 16-eval mutation-scored battery, which has not run against this operator.",
-    "budget_evaluations_per_operator": 4,
-    "cases_run": 4,
-    "cases_passed": 4,
+    "budget_evaluations_per_operator": 2,
+    "cases_run": 2,
+    "cases_passed": 2,
     "all_passed": true,
     "seed_protocol": "weights: np.random.default_rng(7) per (shape, bits); inputs: np.random.default_rng(11) per (shape, bits), drawn M-major then {unit, corpus} scale, in bench/pack_wide_qmv.py verify()",
     "tolerance_model": {
@@ -80,50 +80,36 @@
     "elsewhere": "advisory: a mismatched chip generation or toolchain may move numerics legitimately, so a failure there is a new matrix row to investigate, not a refutation",
     "domain": {
       "tolerance_validity": "admissible class only (contract C1-C6): MLX's own batch-1 and batch-16 quantized-matmul kernels at fp16 activations are OUT of contract (ADR 0014: half-precision intermediates in affine_qmv/affine_qmm_t), so those cells carry no admissible device held-out evidence and the quant-tolerance attestation there is adequate-by-exclusion",
-      "BITS": 4,
-      "M": 4,
+      "BITS": 3,
+      "M": 10,
       "R": 4,
       "d_in": "any multiple of 64 (gate evidence at 2560 and 4096)",
       "d_out": "any positive count (out-of-range rows clamp-read, stores guarded; gate evidence at 2560 and 4096)",
-      "dispatch_boundary": "should_dispatch(m, bits, d_out, d_in) is per-shape and per-width: 4-bit is unpriced, so it routes nowhere and MLX serves every shape at this width until its own pricing run lands; a routing boundary, not a correctness bound - the certificate's correctness claim holds wherever this specialization is launched"
+      "dispatch_boundary": "should_dispatch(m, bits, d_out, d_in) is per-shape and per-width: at BITS=3, M=10 it routes here at 1 of the 6 priced dispatch shapes (151936x2560) and nowhere else, per bench/results/qmv-boundary-pricing-2026-08-15.json (2026-08-15, sha256 4a7c500fce9c); a routing boundary, not a correctness bound - the certificate's correctness claim holds wherever this specialization is launched"
     }
   },
   "performance": [],
   "notes": [
     "evidence source: the pack_wide_qmv pack gate, not the 16-eval mutation-scored battery; no fault catalogue has run against this operator yet (TODOS.md: pack-operator battery extension is the upgrade path)",
-    "extraction behaviorally validated on 2 of 4 gate cases (see validation_calls in the emitter)",
+    "extraction behaviorally validated on 2 of 2 gate cases (see validation_calls in the emitter)",
     "no timings recorded: certification may run under contention (D12.2), so no performance claim is made or implied"
   ],
   "advisory": {
     "_meaning": "advisory, NOT reproducible: GPU outputs are not bit-stable across runs, so these fingerprints and margins describe the certifying run only and are never a re-check criterion",
     "cases": [
       {
-        "label": "4-bit M=4 unit 2560x2560",
-        "output_sha256": "199e11a891c6b162f621e8e1d7af0b9381779bec4859153290be850b276a72b5",
-        "err": 0.0009761709025042364,
-        "tol": 0.014766059975123005,
-        "margin_err_over_tol": 0.066109
+        "label": "3-bit M=10 unit 151936x2560 (lm_head)",
+        "output_sha256": "f15d0a9fd2f4230eb972e5c70c1fdf11ae668249f6368765d284cc7afd7a8bde",
+        "err": 0.0019381361598789226,
+        "tol": 0.019899441008520327,
+        "margin_err_over_tol": 0.097397
       },
       {
-        "label": "4-bit M=4 corpus 2560x2560",
-        "output_sha256": "427de26bc355b993f09624be46b660aae90869d5d68af875742e0b5d546bcedd",
-        "err": 0.01495850074570626,
-        "tol": 0.14417193074622703,
-        "margin_err_over_tol": 0.103755
-      },
-      {
-        "label": "4-bit M=4 unit 4096x4096",
-        "output_sha256": "99dfaad15449756d6beb8ad2d0e2787a2a1684c7f89f18394798bf8949af17b4",
-        "err": 0.001951608239323832,
-        "tol": 0.019801766368326527,
-        "margin_err_over_tol": 0.098557
-      },
-      {
-        "label": "4-bit M=4 corpus 4096x4096",
-        "output_sha256": "15bd985cd176d6192baef4618cce56013f26df5febba840d35a4e8aa1bba4064",
-        "err": 0.015519814594881609,
-        "tol": 0.2122562792821969,
-        "margin_err_over_tol": 0.073118
+        "label": "3-bit M=10 corpus 151936x2560 (lm_head)",
+        "output_sha256": "99575a470e50bd430a4865a2cbc7bb48ddf01e603c147a5744fe2272d956ee7f",
+        "err": 0.01561599352862686,
+        "tol": 0.19760238992014154,
+        "margin_err_over_tol": 0.079027
       }
     ]
   }

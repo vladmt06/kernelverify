@@ -6,8 +6,8 @@
     "_meaning": "these hashes identify WHAT was verified; they assert nothing about output values",
     "translation_unit_sha256": "9cc57ac2b6d8bb6748cc0bdd61fd7448381dc9775b704de5018f70b43ff518c3",
     "catalogue_fingerprint": "none: no mutation-scored fault catalogue exists for this operator yet",
-    "harness_commit": "3806ca1",
-    "contract_version": "MLX-affine quant contract, device-joined ensemble, K_QUANT=4 (ADR 0009/0012)",
+    "harness_commit": "d4fee79",
+    "contract_version": "MLX-affine quant contract, device-joined ensemble, K_QUANT=4 (ADR 0009/0012/0016)",
     "compile_options": {
       "math_mode": "safe"
     },
@@ -22,7 +22,7 @@
   "protocol_bound": {
     "_assertion": "re-running the published protocol on a machine matching the recorded chip generation and toolchain reproduces these verdicts; output values are NOT asserted to be identical, which is not achievable on a GPU",
     "operator": "quantized_matmul",
-    "policy": "pack-gate fixed-case sweep: 2 matrix shapes x {unit, corpus} input scales per (BITS, M) specialization, judged against the shipped NATIVE_OPS['quantized_matmul'] reference and tolerance; artefact bytes checked identical to mx.quantize per (shape, bits). This is NOT the 16-eval mutation-scored battery, which has not run against this operator.",
+    "policy": "pack-gate fixed-case sweep: 2 microbenchmark matrix shapes at every supported bit width, plus the six Qwen3-4B E2E decode dispatch shapes at 3 bits over each shape's OWN routed M values, x {unit, corpus} input scales per (BITS, M) specialization, judged against the shipped NATIVE_OPS['quantized_matmul'] reference and tolerance; artefact bytes checked identical to mx.quantize per (shape, bits). This is NOT the 16-eval mutation-scored battery, which has not run against this operator.",
     "budget_evaluations_per_operator": 4,
     "cases_run": 4,
     "cases_passed": 4,
@@ -40,6 +40,8 @@
         "factored-serial",
         "lut-gather"
       ],
+      "ensemble_version": "quant-ensemble-v2",
+      "ensemble_source_sha256": "6942e41bbd3ce132b412d4c3a747a6407765d42c3e8895745dff2345399ae973",
       "form": "max(base_tol(dtype), K_QUANT * floor)"
     }
   },
@@ -70,19 +72,20 @@
       "chip_generation": "Apple M3 Pro",
       "toolchain": {
         "mlx": "0.32.0",
-        "python": "3.14.6",
+        "python": "3.12.13",
         "numpy": "2.5.2",
         "macos": "26.5.2"
       }
     },
     "elsewhere": "advisory: a mismatched chip generation or toolchain may move numerics legitimately, so a failure there is a new matrix row to investigate, not a refutation",
     "domain": {
+      "tolerance_validity": "admissible class only (contract C1-C6): MLX's own batch-1 and batch-16 quantized-matmul kernels at fp16 activations are OUT of contract (ADR 0014: half-precision intermediates in affine_qmv/affine_qmm_t), so those cells carry no admissible device held-out evidence and the quant-tolerance attestation there is adequate-by-exclusion",
       "BITS": 2,
       "M": 5,
       "R": 4,
       "d_in": "any multiple of 64 (gate evidence at 2560 and 4096)",
       "d_out": "any positive count (out-of-range rows clamp-read, stores guarded; gate evidence at 2560 and 4096)",
-      "dispatch_boundary": "should_dispatch: M >= 5; below it MLX already reads the weights once and 2-bit measures a loss - a routing boundary, not a correctness bound"
+      "dispatch_boundary": "should_dispatch(m, bits, d_out, d_in) is per-shape and per-width: 2-bit is unpriced, so it routes nowhere and MLX serves every shape at this width until its own pricing run lands; a routing boundary, not a correctness bound - the certificate's correctness claim holds wherever this specialization is launched"
     }
   },
   "performance": [],

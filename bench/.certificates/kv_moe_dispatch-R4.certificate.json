@@ -6,7 +6,7 @@
     "_meaning": "these hashes identify WHAT was verified; they assert nothing about output values",
     "translation_unit_sha256": "203daf8d65695e2866bce011420ac1b7fd4d11a8f429cfcac58b071d8df60802",
     "catalogue_fingerprint": "none: no mutation-scored fault catalogue exists for this operator yet",
-    "harness_commit": "3806ca1",
+    "harness_commit": "d4fee79",
     "contract_version": "moe_dispatch contract (NATIVE_OPS['moe_dispatch'], Qwen3-class routing over dense experts)",
     "compile_options": {
       "math_mode": "safe"
@@ -31,8 +31,8 @@
     "tolerance_model": {
       "anchor": "NATIVE_OPS['moe_dispatch'] fp64 reference",
       "floor": "operator ensemble floor",
-      "K_quant": 4.0,
-      "form": "max(base_tol(dtype), K_QUANT * floor)"
+      "K_native": 1.5,
+      "form": "max(base_tol(dtype), K_NATIVE * floor)"
     }
   },
   "attestation": {
@@ -62,13 +62,14 @@
       "chip_generation": "Apple M3 Pro",
       "toolchain": {
         "mlx": "0.32.0",
-        "python": "3.14.6",
+        "python": "3.12.13",
         "numpy": "2.5.2",
         "macos": "26.5.2"
       }
     },
     "elsewhere": "advisory: a mismatched chip generation or toolchain may move numerics legitimately, so a failure there is a new matrix row to investigate, not a refutation",
     "domain": {
+      "tolerance_validity": "admissible class only (contract C1-C6): MLX's own batch-1 and batch-16 quantized-matmul kernels at fp16 activations are OUT of contract (ADR 0014: half-precision intermediates in affine_qmv/affine_qmm_t), so those cells carry no admissible device held-out evidence and the quant-tolerance attestation there is adequate-by-exclusion",
       "R": 4,
       "BITS": 4,
       "experts": "MLX-affine 4-bit group-64 expert artefacts",
