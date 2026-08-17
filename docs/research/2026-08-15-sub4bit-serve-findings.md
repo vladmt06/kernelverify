@@ -152,7 +152,36 @@ Computing it from a single interleaved pass would be a redesign of the MDE and i
 
 Measured inputs to the derivation (from `bench/serve_sub4bit.py --mde`, quiet window only):
 
-<!-- MDE numbers go here -->
+Measured 2026-08-17 07:37 to 07:41 UTC by `bench/serve_sub4bit.py --mde` at the default 24.0 GB budget, exit 0, in one strong-idle window held by the detached runner.
+MLX 0.32.0, mlx_lm 0.31.3, Apple M3 Pro, 12 cores, 38.65 GB, Darwin 26.5.2 build 25F84.
+
+Interception cost, from B = 1 with arms interleaved over the 5 registered rounds: i = -0.0351 ms per step, against arm-4 and arm-2 spreads of 1.04% and 1.01%.
+The measured value is negative and an order of magnitude smaller than either arm's own round-to-round spread, so the honest reading is that the wrapper traversal is not resolvable at this precision, not that it is free or that it pays for itself.
+It enters the gain arithmetic as measured rather than clamped to zero, which makes every expected gain very slightly larger; the shift is under 0.13% of a step at every cell and moves no decider label.
+The wrapper traversal count is 252 per decode step, exactly as this section requires for i to transfer across the grid unchanged.
+
+Per-op probe, stock `mx.quantized_matmul` against the fused kernel at the seven true shapes, 3-bit g64, interleaved within rounds:
+
+| shape (d_in x d_out) | per layer | B = 5 stock / fused us | B = 6 stock / fused us | B = 8 stock / fused us |
+|---|---|---|---|---|
+| 2560x4096 | x1 | 56.5 / 52.0 | 76.1 / 61.8 | 94.4 / 75.5 |
+| 2560x1024 | x2 | 14.5 / 13.7 | 18.7 / 15.5 | 24.0 / 20.2 |
+| 4096x2560 | x1 | 56.8 / 51.6 | 72.6 / 58.8 | 95.8 / 74.7 |
+| 2560x9728 | x2 | 133.0 / 121.2 | 176.4 / 142.4 | 220.1 / 174.8 |
+| 9728x2560 | x1 | 132.5 / 119.3 | 175.7 / 141.6 | 221.4 / 182.3 |
+
+The fused path is faster at every shape and every in-zone B, and the margin widens with B, which is the re-read defect this kernel exists to remove behaving as the design predicted.
+
+Derivation per cell, over L = 36 layers:
+
+| B | saving(B) ms/step | i ms/step | t_step(B) ms, arm 2 | expected gain | noise floor | decider |
+|---|---|---|---|---|---|---|
+| 5 | 1.7384 | -0.0351 | 27.557 | 6.44% | 0.98% | yes |
+| 6 | 4.9218 | -0.0351 | 34.191 | 14.50% | 0.46% | yes |
+| 8 | 6.3847 | -0.0351 | 42.486 | 15.11% | 0.59% | yes |
+
+Every in-zone cell's expected gain clears its own noise floor by at least 6x, so all three are deciders under this section's rule and the A/B ran as a real test rather than as confirmation.
+Every row carries `"composition": "cross-pass"`, so each expected gain is read as an upper bound for both of the reasons named above.
 
 ## 6. Claim split and attribution (D3.3)
 
@@ -195,12 +224,121 @@ Corpus record, written before either perplexity number exists:
 - Both artifacts tokenize it identically: 299,078 tokens against the 98,304 the 96 registered windows need.
 - A plumbing check ran before this record: tokenizer identity plus a 2-window scoring pass on the 3-bit model only; the 4-bit side was deliberately not computed, so no preview of the registered pair exists.
 
-<!-- results from bench/serve_sub4bit.py --mde and --ppl go here -->
+MDE record, written 2026-08-17:
+
+- Run: `bench/serve_sub4bit.py --mde`, detached runner, strong-idle window held from 07:37:48 UTC, 4 minutes wall clock, exit 0, closing idle sample clean.
+- Budget: the default 24.0 GB; the footprint never approached it in this mode.
+- Decider labels persisted to `bench/.cache/serve_mde.json` under the pinned-artifact manifest they were derived on: B = 5, 6 and 8 all `true`.
+  `--ab` reads that record and refuses to start without it, so the A/B below is bound to these labels and to these artifacts.
+- The harness printed `DECIDERS: every MDE cell's expected gain cleared its own noise floor`, meaning no cell was pre-declared a non-decider and section 5's confirmation-only branch was not taken.
+- The numbers themselves are in section 5, beside the derivation they feed.
+
+Perplexity pair (T5), measured 2026-08-17 after the A/B:
+
+- Run: `bench/serve_sub4bit.py --ppl --corpus /Users/vlad/kv-baseline/bench/.corpus/ppl.txt`, exit 0, machine lock held, no idle gate by section 7's own rule that perplexity is not a timing.
+- The corpus read is not the path named above, which holds no file in this worktree, but a surviving copy under the `kv-baseline` worktree.
+  It hashes to the registered `173c87a5...` and the harness verifies that digest before loading either model, so the numbers bind to the registered CONTENT exactly as section 7 requires; the path difference is what this section already anticipated when it recorded that only the content identifies the corpus.
+- 299,078 tokens, byte-identical ids from both tokenizers, 96 non-overlapping windows of 1024, positions 2..1024 scored in float32.
+
+| artifact | perplexity |
+|---|---|
+| 3-bit g64 | 22.7069 |
+| 4-bit g64 | 15.2355 |
+
+The 3-bit artifact is 49.0% worse in perplexity than the 4-bit artifact on the registered corpus.
+That is the quality cost the capability claim in section 10 must always be read against, and it is large.
+
+A benign warning appears twice in the run log and is recorded so it is not mistaken later for a defect: transformers reports that 299,078 ids exceed the model's 131,072 maximum sequence length.
+It refers to the one-shot encode of the whole corpus file, not to anything the model is asked to process; every forward pass sees exactly one 1024-token window, so no indexing error is possible and none occurred.
 
 ## 9. The A/B grid
 
-<!-- results from bench/serve_sub4bit.py --ab go here -->
+Measured by `bench/serve_sub4bit.py --ab --budget-gb 30`, detached runner, 2026-08-17 15:53 to 16:27 UTC, 33 minutes, exit 0, idle clean before and after.
+Same pinned artifacts, same MLX and machine fingerprint as the MDE above.
+Per-stream throughput in tokens per second, medians over the 5 registered rounds; aggregate is B times per-stream and is reported in the same rows of the raw log.
+
+| B | zone | decider | arm 1 ours | arm 2 stock3 | arm 3 stock4 | arm 4 control | arm1/arm2 | noise floor |
+|---|---|---|---|---|---|---|---|---|
+| 1 | out | no | 64.745 | 64.681 | 52.285 | 64.649 | 1.0010 | 0.67% |
+| 4 | out | no | 43.178 | 43.143 | 43.710 | 43.159 | 1.0008 | 0.10% |
+| 5 | IN | yes | 38.554 | 36.476 | 36.935 | 36.501 | **1.0570** | 0.05% |
+| 6 | IN | yes | 33.548 | 29.252 | 30.647 | 29.247 | **1.1469** | 0.10% |
+| 8 | IN | yes | 27.248 | 23.561 | 24.517 | 23.558 | **1.1565** | 0.07% |
+| 11 | out | no | 16.847 | 16.849 | 16.936 | 16.845 | 0.9999 | 0.03% |
+| 12 | out | no | 16.458 | 16.462 | 16.572 | 16.462 | 0.9997 | 1.79% |
+| 16 | out | no | 16.064 | 15.820 | 15.821 | 16.065 | 1.0154 | 0.25% |
+
+Validity, per cell: no cell was withheld, every arm-2 spread sat far under the 10% canary limit, no hard fallback occurred anywhere, and every in-zone cell dispatched exactly 160,020 fused calls against 160,020 expected across 5 routed shapes.
+Every out-of-zone cell dispatched zero, as the edge cells require.
+
+Three runs were needed to produce this one, and all three are recorded because the discarded ones are evidence about the harness:
+
+| Run | Budget | Outcome | Why it is not the binding run |
+|---|---|---|---|
+| 1, 14:19 UTC | 24.0 GB default | refused at B = 12 arm 1, footprint 25.72 GB, `EXIT_BUDGET_REFUSAL` | The harness discards a run whose budget was crossed; six completed cells count for nothing by its own rule. |
+| 2, 14:48 UTC | 30.0 GB | all 8 cells completed, exit 1 | The closing idle sample caught WindowServer at 15% CPU, so `check_idle_after` marked the run non-binding. |
+| 3, 15:53 UTC | 30.0 GB | all 8 cells completed, exit 0 | This is the binding run and the table above. |
+
+Deviation from the registered default, recorded because section 3 pins it: the binding run used `--budget-gb 30` rather than the default 24.0.
+The reason is a defect in the harness rather than a property of the measurement.
+`mde()` and `ab()` never call `mx.clear_cache()`, so MLX's freed-buffer cache is never returned to the allocator, and `phys_footprint` counts those dead buffers; the footprint therefore ratchets upward across cells until it crosses any fixed budget, which it did at B = 12 in run 1.
+30.0 GB is the same ceiling the serving calibration already runs under and leaves roughly 8.6 GB of headroom on this 38.65 GB machine, so it widens the guard without disarming it.
+The fix is to clear the cache at each cell boundary and restore the 24.0 GB default; it is queued as its own change and is not made here, because editing the harness between the MDE and the A/B would have unbound the two.
+
+Reproducibility: run 2 and run 3 are independent quiet windows, and their in-zone ratios agree to 1.0566 vs 1.0570, 1.1455 vs 1.1469, and 1.1558 vs 1.1565.
+The verdicts below do not depend on which of the two is read.
 
 ## 10. Verdicts
 
-<!-- primary per-cell verdicts, patch cost, composed claim with its pre-stated attribution row, quality pair beside it -->
+PRIMARY CLAIM, the pack's contribution, arm 1 against arm 2, judged against each cell's own noise floor per section 6:
+
+| B | arm1/arm2 | noise floor | margin over floor | verdict |
+|---|---|---|---|---|
+| 5 | 1.0570 | 0.05% | 114x | **win** |
+| 6 | 1.1469 | 0.10% | 147x | **win** |
+| 8 | 1.1565 | 0.07% | 224x | **win** |
+
+`kv_wide_qmv` is a win at every cell of its re-registered dispatch zone, by 5.7%, 14.7% and 15.7% of per-stream throughput, each more than a hundred times its cell's noise floor.
+This is the pre-registered outcome under which the kernel STAYS in the pack for the multi-stream regime it was measured in.
+The retirement branch, which would have fired on a loss or a within-spread result at every routed batch, did not fire.
+Per section 5's own rule this says nothing whatever about batch 1, where the pack routes nothing by construction.
+
+Measured against the forecast, which was written before the A/B ran: expected 6.44 / 14.50 / 15.11%, measured 5.70 / 14.69 / 15.65%.
+Section 5 registered the expected gain as an upper bound for two named reasons, and B = 5 lands under its forecast as that framing predicts.
+B = 6 and B = 8 land marginally above theirs, by 0.19 and 0.54 points, which the upper-bound framing does not predict.
+That is recorded as an open discrepancy rather than explained away here: the two numbers are composed across passes, so a small excursion in either direction is within what the cross-pass composition can produce, and nothing in this document needs the forecast to have been tight.
+
+PATCH COST, arm 4 against arm 2, reported alongside per section 6: 1.0007, 0.9998 and 0.9999 at B = 5, 6 and 8.
+The patch's host cost is not resolvable at this precision in any in-zone cell, consistent with the interception cost measured in section 5.
+The 2026-08-15 kv_attention failure mode, a kernel win eaten by unmeasured interception overhead, does not occur here.
+
+OUT-OF-ZONE CELLS, none of which is a decider and none of which supports a claim:
+
+- B = 1: arm1/arm2 = 1.0010 inside a 0.67% floor, a null result and the correct one, since the pack routes nothing at B = 1 and arm 1 must therefore measure arm 2.
+- B = 4, 11, 12: null, all within their floors, and all dispatched zero fused calls as required.
+- B = 16: arm1/arm2 = 1.0154 against a 0.25% floor, which the harness labels a win.
+  It is not a kernel effect and must not be read as one.
+  The control arm moved with it, arm4/arm2 = 1.0155, and arm 4 routes nothing by construction, so the 1.5% is arm 2 running slightly slow in that cell rather than anything the kernel did.
+  The cell is a non-decider and is reported here only so the label in the raw row is not mistaken later for a finding.
+
+COMPOSED CLAIM, arm 1 against arm 3, with the attribution fixed in section 6 before any measurement: ratios 1.0438, 1.0947 and 1.1114 at B = 5, 6 and 8, each far beyond its floor, with arm2/arm3 at 0.9876, 0.9544 and 0.9610, all below 1.
+That is section 6's third row exactly: arm1 above arm3 beyond the floor while arm2 is not, so the attribution is JOINT.
+The 3-bit artifact alone is slower than stock 4-bit at every in-zone cell; with the kernel it is faster.
+The artifact supplies the memory saving and the kernel is what unlocks it.
+
+The quality pair section 6 requires beside this claim, from section 8: perplexity 22.7069 at 3 bits against 15.2355 at 4 bits, the 3-bit artifact 49.0% worse on the registered corpus.
+The composed claim is therefore published with its cost attached, and the cost dominates the benefit for any reader who cares about output quality: the capability is a 4.4 to 11.1% throughput win bought with a 49% perplexity regression.
+Section 7 registered this pair precisely so the capability claim could never travel without it, and this is the case that rule was written for.
+Nothing here argues the trade is worth making; that judgement belongs to whoever chooses the artifact, and this record's job is to make sure they see both numbers at once.
+
+THE BATCH-1 BASELINE, which is the number this plan exists to produce and the only one that speaks to the product's actual target:
+
+| Arm at B = 1 | per-stream tokens/s |
+|---|---|
+| stock 3-bit | 64.681 |
+| stock 4-bit | 52.285 |
+| ours, routing nothing | 64.745 |
+
+64.7 tokens per second on the 3-bit artifact is the end-to-end batch-1 figure every future kernel spike must beat, and the pack contributes nothing to it.
+The 3-bit artifact alone is 23.7% faster than stock 4-bit at batch 1, which is the bandwidth saving of the narrower weights and not a kernel result.
+This is a baseline, not a claim of speedup: nothing in this document makes single-user decode faster, and the research that intends to is opened by the literature review, not here.
