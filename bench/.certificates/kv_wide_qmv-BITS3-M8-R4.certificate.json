@@ -6,8 +6,8 @@
     "_meaning": "these hashes identify WHAT was verified; they assert nothing about output values",
     "translation_unit_sha256": "276b5cc0824c46fd9a365df99a8d633cd6238c508f67a5c196cae9e266be6f98",
     "catalogue_fingerprint": "none: no mutation-scored fault catalogue exists for this operator yet",
-    "harness_commit": "3806ca1",
-    "contract_version": "MLX-affine quant contract, device-joined ensemble, K_QUANT=4 (ADR 0009/0012)",
+    "harness_commit": "d4fee79",
+    "contract_version": "MLX-affine quant contract, device-joined ensemble, K_QUANT=4 (ADR 0009/0012/0016)",
     "compile_options": {
       "math_mode": "safe"
     },
@@ -22,10 +22,10 @@
   "protocol_bound": {
     "_assertion": "re-running the published protocol on a machine matching the recorded chip generation and toolchain reproduces these verdicts; output values are NOT asserted to be identical, which is not achievable on a GPU",
     "operator": "quantized_matmul",
-    "policy": "pack-gate fixed-case sweep: 2 matrix shapes x {unit, corpus} input scales per (BITS, M) specialization, judged against the shipped NATIVE_OPS['quantized_matmul'] reference and tolerance; artefact bytes checked identical to mx.quantize per (shape, bits). This is NOT the 16-eval mutation-scored battery, which has not run against this operator.",
-    "budget_evaluations_per_operator": 4,
-    "cases_run": 4,
-    "cases_passed": 4,
+    "policy": "pack-gate fixed-case sweep: 2 microbenchmark matrix shapes at every supported bit width, plus the six Qwen3-4B E2E decode dispatch shapes at 3 bits over each shape's OWN routed M values, x {unit, corpus} input scales per (BITS, M) specialization, judged against the shipped NATIVE_OPS['quantized_matmul'] reference and tolerance; artefact bytes checked identical to mx.quantize per (shape, bits). This is NOT the 16-eval mutation-scored battery, which has not run against this operator.",
+    "budget_evaluations_per_operator": 16,
+    "cases_run": 16,
+    "cases_passed": 16,
     "all_passed": true,
     "seed_protocol": "weights: np.random.default_rng(7) per (shape, bits); inputs: np.random.default_rng(11) per (shape, bits), drawn M-major then {unit, corpus} scale, in bench/pack_wide_qmv.py verify()",
     "tolerance_model": {
@@ -40,6 +40,8 @@
         "factored-serial",
         "lut-gather"
       ],
+      "ensemble_version": "quant-ensemble-v2",
+      "ensemble_source_sha256": "6942e41bbd3ce132b412d4c3a747a6407765d42c3e8895745dff2345399ae973",
       "form": "max(base_tol(dtype), K_QUANT * floor)"
     }
   },
@@ -70,25 +72,26 @@
       "chip_generation": "Apple M3 Pro",
       "toolchain": {
         "mlx": "0.32.0",
-        "python": "3.14.6",
+        "python": "3.12.13",
         "numpy": "2.5.2",
         "macos": "26.5.2"
       }
     },
     "elsewhere": "advisory: a mismatched chip generation or toolchain may move numerics legitimately, so a failure there is a new matrix row to investigate, not a refutation",
     "domain": {
+      "tolerance_validity": "admissible class only (contract C1-C6): MLX's own batch-1 and batch-16 quantized-matmul kernels at fp16 activations are OUT of contract (ADR 0014: half-precision intermediates in affine_qmv/affine_qmm_t), so those cells carry no admissible device held-out evidence and the quant-tolerance attestation there is adequate-by-exclusion",
       "BITS": 3,
       "M": 8,
       "R": 4,
       "d_in": "any multiple of 64 (gate evidence at 2560 and 4096)",
       "d_out": "any positive count (out-of-range rows clamp-read, stores guarded; gate evidence at 2560 and 4096)",
-      "dispatch_boundary": "should_dispatch: M >= 5; below it MLX already reads the weights once and 2-bit measures a loss - a routing boundary, not a correctness bound"
+      "dispatch_boundary": "should_dispatch(m, bits, d_out, d_in) is per-shape and per-width: at BITS=3, M=8 it routes here at 6 of the 6 priced dispatch shapes (4096x2560, 1024x2560, 2560x4096, 9728x2560, 2560x9728, 151936x2560) and nowhere else, per bench/results/qmv-boundary-pricing-2026-08-15.json (2026-08-15, sha256 4a7c500fce9c); a routing boundary, not a correctness bound - the certificate's correctness claim holds wherever this specialization is launched"
     }
   },
   "performance": [],
   "notes": [
     "evidence source: the pack_wide_qmv pack gate, not the 16-eval mutation-scored battery; no fault catalogue has run against this operator yet (TODOS.md: pack-operator battery extension is the upgrade path)",
-    "extraction behaviorally validated on 2 of 4 gate cases (see validation_calls in the emitter)",
+    "extraction behaviorally validated on 2 of 16 gate cases (see validation_calls in the emitter)",
     "no timings recorded: certification may run under contention (D12.2), so no performance claim is made or implied"
   ],
   "advisory": {
@@ -121,6 +124,90 @@
         "err": 0.015616132150171325,
         "tol": 0.20616945774754625,
         "margin_err_over_tol": 0.075744
+      },
+      {
+        "label": "3-bit M=8 unit 4096x2560 (q_proj)",
+        "output_sha256": "3cf17b2fa8a73a40e44f5ff51e283e57208aedbdced70c9032462f3b6a6fd85c",
+        "err": 0.001830976835663023,
+        "tol": 0.0194839344701753,
+        "margin_err_over_tol": 0.093974
+      },
+      {
+        "label": "3-bit M=8 corpus 4096x2560 (q_proj)",
+        "output_sha256": "1bac3a40d9d16f2175863090c89781beef17cf4c5f0638d0ae1dc4e680c3671d",
+        "err": 0.01486278063384816,
+        "tol": 0.1854093875614847,
+        "margin_err_over_tol": 0.080162
+      },
+      {
+        "label": "3-bit M=8 unit 1024x2560 (k_proj/v_proj)",
+        "output_sha256": "dca4ca45addaa031ea6f9cdc599e47ca88a64e6afd7462a0ff3a319a9ca09a6a",
+        "err": 0.001830976835663023,
+        "tol": 0.0194839344701753,
+        "margin_err_over_tol": 0.093974
+      },
+      {
+        "label": "3-bit M=8 corpus 1024x2560 (k_proj/v_proj)",
+        "output_sha256": "439ee3079257f561eceb7921c16c51ad0fcdd70373a684d3add4d2f6d687c0fd",
+        "err": 0.01418855506926775,
+        "tol": 0.17267042376799416,
+        "margin_err_over_tol": 0.082171
+      },
+      {
+        "label": "3-bit M=8 unit 2560x4096 (o_proj)",
+        "output_sha256": "cf808eb0126d99b83902283bdf80be83f5a8ad13b8ffac66e0e59999c76a4369",
+        "err": 0.001935860560479341,
+        "tol": 0.020173252529558913,
+        "margin_err_over_tol": 0.095962
+      },
+      {
+        "label": "3-bit M=8 corpus 2560x4096 (o_proj)",
+        "output_sha256": "705d279ffad77e16699c83f1c3a6a1e9d33f880d08ec5fc5f7ab2499300e0b4c",
+        "err": 0.015625196931068785,
+        "tol": 0.20904294097991327,
+        "margin_err_over_tol": 0.074746
+      },
+      {
+        "label": "3-bit M=8 unit 9728x2560 (gate_proj/up_proj)",
+        "output_sha256": "3fc82c96d3b1f5525d50cea4c1c2b9934eaddff41efe22902aaa58d94e586fd2",
+        "err": 0.001830976835663023,
+        "tol": 0.0194839344701753,
+        "margin_err_over_tol": 0.093974
+      },
+      {
+        "label": "3-bit M=8 corpus 9728x2560 (gate_proj/up_proj)",
+        "output_sha256": "7c039584e2c7fa3266eacf770a7d3adb9979d955a86a0921b8c786ef72c1b386",
+        "err": 0.01486278063384816,
+        "tol": 0.1854093875614847,
+        "margin_err_over_tol": 0.080162
+      },
+      {
+        "label": "3-bit M=8 unit 2560x9728 (down_proj)",
+        "output_sha256": "9f8f38a715f84f3b49d339fa468d8f3e094a2ae8a834ec8e99d42f2f19ac4f12",
+        "err": 0.0030555245702998945,
+        "tol": 0.03207640275997927,
+        "margin_err_over_tol": 0.095258
+      },
+      {
+        "label": "3-bit M=8 corpus 2560x9728 (down_proj)",
+        "output_sha256": "fca8fc7419639061b725af44133b48e60d1597c434bfd4cc21df47b7d414de65",
+        "err": 0.029893648345023394,
+        "tol": 0.3233819480975814,
+        "margin_err_over_tol": 0.092441
+      },
+      {
+        "label": "3-bit M=8 unit 151936x2560 (lm_head)",
+        "output_sha256": "6f36e42ff903a003f4f4e1abbb2a765d2dbfda2d0721a851ba46cb75f5f62031",
+        "err": 0.0019515955564202159,
+        "tol": 0.0194839344701753,
+        "margin_err_over_tol": 0.100164
+      },
+      {
+        "label": "3-bit M=8 corpus 151936x2560 (lm_head)",
+        "output_sha256": "c66775b2e03fe6ec78e689ee796205e7dd04537f7b3f53f99a018ed1ac524fe8",
+        "err": 0.015626410604454577,
+        "tol": 0.20598593514536834,
+        "margin_err_over_tol": 0.075862
       }
     ]
   }

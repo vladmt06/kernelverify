@@ -6,7 +6,7 @@
     "_meaning": "these hashes identify WHAT was verified; they assert nothing about output values",
     "translation_unit_sha256": "22d9c44d0c56853b2b07ce5d2e5144aa1375ffcd00af466c779cd9c81b31386e",
     "catalogue_fingerprint": "none: no mutation-scored fault catalogue exists for this operator yet",
-    "harness_commit": "3806ca1",
+    "harness_commit": "d4fee79",
     "contract_version": "moe_dispatch contract (NATIVE_OPS['moe_dispatch'], Qwen3-class routing over dense experts)",
     "compile_options": {
       "math_mode": "safe"
@@ -66,7 +66,7 @@
       "chip_generation": "Apple M3 Pro",
       "toolchain": {
         "mlx": "0.32.0",
-        "python": "3.14.6",
+        "python": "3.12.13",
         "numpy": "2.5.2",
         "macos": "26.5.2"
       }

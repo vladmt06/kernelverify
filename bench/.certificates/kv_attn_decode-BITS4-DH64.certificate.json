@@ -6,8 +6,8 @@
     "_meaning": "these hashes identify WHAT was verified; they assert nothing about output values",
     "translation_unit_sha256": "70ecbd2cf90fbcb716cff6e3ae8eb55e053fa8939812ac1b238f726e02858e8c",
     "catalogue_fingerprint": "none: no mutation-scored fault catalogue exists for this operator yet",
-    "harness_commit": "3806ca1",
-    "contract_version": "kv_attention contract (frozen at 8ec7eca; NATIVE_OPS['kv_attention'])",
+    "harness_commit": "d4fee79",
+    "contract_version": "kv_attention contract (frozen at 8ec7eca; NATIVE_OPS['kv_attention']); K borrowed from quantized_matmul, uncalibrated over KV_MEMBERS (ADR 0012/0016 derived it for that operator, not this one)",
     "compile_options": {
       "math_mode": "safe"
     },
@@ -68,13 +68,14 @@
       "chip_generation": "Apple M3 Pro",
       "toolchain": {
         "mlx": "0.32.0",
-        "python": "3.14.6",
+        "python": "3.12.13",
         "numpy": "2.5.2",
         "macos": "26.5.2"
       }
     },
     "elsewhere": "advisory: a mismatched chip generation or toolchain may move numerics legitimately, so a failure there is a new matrix row to investigate, not a refutation",
     "domain": {
+      "tolerance_validity": "admissible class only (contract C1-C6): MLX's own batch-1 and batch-16 quantized-matmul kernels at fp16 activations are OUT of contract (ADR 0014: half-precision intermediates in affine_qmv/affine_qmm_t), so those cells carry no admissible device held-out evidence and the quant-tolerance attestation there is adequate-by-exclusion",
       "BITS": 4,
       "DH": 64,
       "T": "1..1024 inclusive - a CORRECTNESS bound, not profitability: the T+1 softmax buffer is compile-time threadgroup memory (TCAP=1024) and both doors reject t > 1024 loudly",
