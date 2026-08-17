@@ -2,7 +2,10 @@
 
 Every heavy measurement harness refuses the same three ways - over its own
 footprint budget, behind the machine-wide measurement lock, or into a
-machine that has no room - and the 03:29 collapse on 2026-08-15 (a 39.5 GB
+machine that has no room - and a measurement CHILD refuses a fourth: as an
+orphan whose parent died out from under it (only the serving calibration
+spawns children today, so only it wires that one). The 03:29 collapse on
+2026-08-15 (a 39.5 GB
 serving calibration and a 27.9 GB pricing probe Jetsam-killed together on a
 36 GB machine) is what happens when each harness owns its own copy of that
 vocabulary: per-harness numbering and per-harness locks let two "protected"
@@ -119,9 +122,15 @@ class Orphaned(RuntimeError):
     is two heavy measurements on one machine with nothing left to notice.
 
     getppid() is the signal and it costs nothing: when the parent dies the
-    child is reparented (to launchd on macOS), so the value captured at startup
-    stops being true. Checked between records, where the budget is already
-    checked, because that is the last point at which stopping is still cheap.
+    child is reparented (to launchd on macOS), so getppid() stops matching the
+    pid the parent stamped into the task before forking. The comparison value
+    comes from the parent, never from the child reading getppid() at its own
+    startup - that read lands after fork, exec and a cold import of numpy and
+    MLX, and a parent dying inside those seconds is already replaced by the
+    time the child looks, so a startup capture records the REPARENT pid and
+    the check compares it against itself forever. Checked between records,
+    where the budget is already checked, because that is the last point at
+    which stopping is still cheap.
     """
 
     def __init__(self, cell: str, launching_pid: int, now_pid: int):
@@ -134,9 +143,15 @@ class Orphaned(RuntimeError):
 
 
 class BudgetGuard:
-    """The footprint cutoff, checked between cells and (per child) between
-    records. ``reader`` is injectable so the refusal path is testable without
-    allocating tens of GB."""
+    """Both reasons a run must stop where it stands, checked together between
+    cells and (per child) between records: the footprint cutoff, and - for a
+    child, which passes the pid its parent gave it - the parent going away.
+    They share a call because they share the one point where stopping is still
+    cheap, and the orphan check is first because a footprint reading taken for
+    a run nobody owns is not worth taking.
+
+    ``reader`` is injectable so the refusal path is testable without allocating
+    tens of GB."""
 
     def __init__(self, budget_gb: float, reader=None, parent_pid: int | None = None):
         self.budget_gb = budget_gb

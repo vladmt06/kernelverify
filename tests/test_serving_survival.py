@@ -161,6 +161,102 @@ def test_a_child_stops_at_the_next_record_once_its_parent_is_gone():
     assert "lm_head" in str(exc.value), "the cell it died on must be named"
 
 
+def test_the_parent_names_itself_rather_than_letting_the_child_look(
+        child_dir, popen_spy):
+    """The window that made the whole orphan check a no-op.
+
+    The child used to read getppid() for itself, which happens after fork,
+    exec and a cold import of numpy and MLX. A parent dying inside those
+    seconds is already replaced by the time the child looks, so the child
+    would capture the REPARENT pid and then compare it against itself forever
+    - the check silently disabled in precisely the case it exists for, and
+    the likeliest case at that, since Jetsam takes the largest process and the
+    parent holds every measured record while the child holds nothing yet.
+    """
+    harness.spawn_measurement("cell", {"kind": "noop"}, 24.0,
+                              command=_cmd(_WRITES_RESULT % "3.5"))
+    assert [t["parent_pid"] for t in popen_spy["tasks"]] == [os.getpid()], (
+        "the task must carry the pid of the process that wrote it")
+
+
+def test_a_child_whose_parent_died_during_startup_still_notices(
+        tmp_path, monkeypatch, capsys):
+    """The same window, from the child's side, through child_main itself.
+
+    The task carries the pid of a parent that is already gone, so the live
+    getppid() never matches it and the first guard check refuses before a
+    single record is measured. This is the test the old design passes and the
+    fix fails FOR: a child that captured getppid() at startup would capture
+    the reparent pid, compare it against itself, measure everything, and
+    exit 0 - the task's stamp ignored entirely.
+    """
+    measured = []
+
+    def _grid(name, d_out, d_in, draw, seed, batches, session, guard, verbose):
+        for cell in ("record-0", "record-1"):
+            guard.check(cell)
+            measured.append(cell)
+        return {"records": measured}
+
+    monkeypatch.setattr(harness, "DeviceMemberSession", lambda: object())
+    monkeypatch.setattr(harness, "grid_iteration", _grid)
+
+    task_path, out_path = tmp_path / "task.json", tmp_path / "out.json"
+    task_path.write_text(json.dumps({
+        "kind": "grid", "name": "tiny", "d_out": 8, "d_in": 64,
+        "draw": "normal-0.02", "seed": 0, "batches": [1], "budget_gb": 24.0,
+        "cell": "grid tiny 8x64 normal-0.02 s0",
+        "parent_pid": 424242}))  # a parent that no longer exists
+
+    class _Args:
+        child_task = str(task_path)
+        child_out = str(out_path)
+
+    assert harness.child_main(_Args()) == EXIT_ORPHANED
+    assert measured == [], "nothing an unowned child measures may be kept"
+    assert not out_path.exists()
+    assert "ORPHAN STOP" in capsys.readouterr().out
+
+
+def test_the_continuity_child_checks_its_guard_between_cases(
+        tmp_path, monkeypatch):
+    """The continuity path was the one child with NO checks at all.
+
+    It hands its session to the device harness's measure(), which takes no
+    guard parameter, so an orphaned continuity child ran all 64 GPU records to
+    completion against a lock its dead parent had released. The guard now
+    rides the session: every case asks it for a compiled kernel first, and
+    that is where the refusal fires.
+    """
+    asked = []
+
+    class _Session:
+        def compiled(self, member, x_dtype):
+            asked.append(member)
+            return object()
+
+    def _anchor(session):
+        for member in ("device-serial", "device-pairwise", "device-simd"):
+            session.compiled(member, "float32")
+        return True, "3 records reproduced exactly"
+
+    monkeypatch.setattr(harness, "DeviceMemberSession", _Session)
+    monkeypatch.setattr(harness, "continuity_anchor", _anchor)
+
+    task_path, out_path = tmp_path / "task.json", tmp_path / "out.json"
+    task_path.write_text(json.dumps({
+        "kind": "continuity", "budget_gb": 24.0, "cell": "continuity",
+        "parent_pid": 424242}))  # a parent that no longer exists
+
+    class _Args:
+        child_task = str(task_path)
+        child_out = str(out_path)
+
+    assert harness.child_main(_Args()) == EXIT_ORPHANED
+    assert asked == [], "an unowned continuity child still reached the GPU"
+    assert not out_path.exists()
+
+
 def test_an_orphaned_child_stops_through_child_main_and_writes_nothing(
         tmp_path, monkeypatch, capsys):
     """The whole orphan path, not just the guard that starts it.
@@ -179,15 +275,16 @@ def test_an_orphaned_child_stops_through_child_main_and_writes_nothing(
             measured.append(cell)
         return {"records": measured}
 
-    # The parent dies after the first record: getppid stops returning the pid
-    # captured at startup, which is precisely what reparenting looks like from
-    # inside the child. Call 1 is child_main's own capture, call 2 clears the
-    # first record, call 3 is the death.
+    # The parent dies after the first record: getppid stops matching the pid
+    # the task carries, which is precisely what reparenting looks like from
+    # inside the child. Every call is a guard check now that child_main takes
+    # the parent's pid from the task rather than looking it up, so call 1
+    # clears the first record and call 2 is the death.
     real_getppid, calls = os.getppid, []
 
     def _getppid():
         calls.append(None)
-        return real_getppid() if len(calls) <= 2 else 1
+        return real_getppid() if len(calls) <= 1 else 1
 
     monkeypatch.setattr(harness, "DeviceMemberSession", lambda: object())
     monkeypatch.setattr(harness, "grid_iteration", _grid)
@@ -197,7 +294,8 @@ def test_an_orphaned_child_stops_through_child_main_and_writes_nothing(
     task_path.write_text(json.dumps({
         "kind": "grid", "name": "tiny", "d_out": 8, "d_in": 64,
         "draw": "normal-0.02", "seed": 0, "batches": [1], "budget_gb": 24.0,
-        "cell": "grid tiny 8x64 normal-0.02 s0"}))
+        "cell": "grid tiny 8x64 normal-0.02 s0",
+        "parent_pid": real_getppid()}))
 
     class _Args:
         child_task = str(task_path)
@@ -727,14 +825,20 @@ def test_child_exit_zero_without_result_is_a_death(child_dir):
 
 @pytest.fixture
 def popen_spy(monkeypatch):
-    """Every child the harness spawns: the kwargs it asked for and the process
-    it got back. Neither is reachable from spawn_measurement's return value,
-    and both are what the child-lifetime tests are about."""
-    seen = {"kwargs": [], "procs": []}
+    """Every child the harness spawns: the kwargs it asked for, the task file
+    it was handed, and the process it got back. None of the three is reachable
+    from spawn_measurement's return value, and all three are what the
+    child-lifetime tests are about. The task is read HERE because this is the
+    only moment it exists - the parent deletes it in the same finally that
+    reaps the child - and it is the moment the child reads it too."""
+    seen = {"kwargs": [], "tasks": [], "procs": []}
     real_popen = harness.subprocess.Popen
 
     def spy(argv, **kwargs):
         seen["kwargs"].append(kwargs)
+        if "--child-task" in argv:
+            seen["tasks"].append(json.loads(
+                Path(argv[argv.index("--child-task") + 1]).read_text()))
         proc = real_popen(argv, **kwargs)
         seen["procs"].append(proc)
         return proc

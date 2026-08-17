@@ -300,12 +300,17 @@ defeats the lock rather than the budget.
 
 Two halves, and neither is sufficient alone:
 
-1. The child captures ``os.getppid()`` before any work and re-reads it where
-   it already re-reads the budget, between records. When the parent dies the
-   child is reparented (to launchd on macOS), so the captured value stops
-   being true - a free signal at a point where stopping is still cheap. It
-   stops with EXIT_ORPHANED, its own number, because exit 1 already means
-   measured-and-stopped and would read as the opposite of what happened.
+1. The PARENT stamps its own pid into the task file before forking, and the
+   child compares ``os.getppid()`` against that stamp where it already checks
+   the budget, between records. When the parent dies the child is reparented
+   (to launchd on macOS), so the comparison stops holding - a free signal at a
+   point where stopping is still cheap. The stamp must come from the parent
+   rather than the child reading getppid() at its own startup: that read lands
+   after fork, exec and a cold import of numpy and MLX, and a parent dying
+   inside those seconds is already replaced by the time the child looks, so a
+   startup capture records the reparent pid and never diverges from it again.
+   The child stops with EXIT_ORPHANED, its own number, because exit 1 already
+   means measured-and-stopped and would read as the opposite of what happened.
 
 2. The parent spawns with ``start_new_session=True`` and sweeps the child's
    process group in a ``finally``. This is the path for a parent that merely
@@ -941,14 +946,26 @@ def _child_death_reason(returncode: int) -> str:
 
 
 def _reap(proc) -> None:
-    """Leave no child behind, and no descendant of it either.
+    """Leave no live child behind.
 
-    The child's getppid check is the backstop for a parent that dies without
+    The child's parent-pid check is the backstop for a parent that dies without
     running this; this is the path for a parent that merely STOPS - a raised
     refusal, a KeyboardInterrupt, a wall-cap timeout - where the child would
     otherwise keep the GPU and keep allocating against a lock that no longer
-    exists. SIGTERM first so the child can unwind, SIGKILL five seconds later
-    if it did not.
+    exists.
+
+    SIGTERM before SIGKILL by convention, not because the child unwinds on it:
+    nothing here installs a handler, so the default disposition ends the
+    process without running a finally block or flushing stdout. The five-second
+    wait absorbs the normal lag between signal and reaped exit; a child still
+    alive after it gets the SIGKILL no process can ignore.
+
+    A child that has already exited is left alone, which does mean nothing
+    sweeps its group on that path. The group's only other member is transient -
+    the footprint self-report shells out to ``ps`` for its RSS half, bounded by
+    its own ten-second timeout - so the leak this can leave is one dying ``ps``,
+    not a worker holding the GPU. That judgement is the thing to revisit if
+    this child ever spawns a process that outlives a progress line.
     """
     if proc.poll() is not None:
         return
@@ -1010,8 +1027,17 @@ def spawn_measurement(cell: str, task: dict, budget_gb: float,
     result_path = CHILD_DIR / _CHILD_RESULT_NAME
     task_path.parent.mkdir(parents=True, exist_ok=True)
     result_path.unlink(missing_ok=True)
+    # The parent stamps its OWN pid, rather than letting the child read
+    # getppid() for itself. The child's read happens after fork, exec, and a
+    # cold import of numpy and MLX - seconds, not milliseconds - and a parent
+    # that dies inside that window is already reparented by the time the child
+    # looks, so the child would capture the reparent pid and its orphan check
+    # could never fire again. That window is not a corner: Jetsam takes the
+    # largest process, and while a child is still importing, the parent (which
+    # holds the checkpoint and every measured record) is the larger one.
     task_path.write_text(json.dumps({**task, "cell": cell,
-                                     "budget_gb": budget_gb}))
+                                     "budget_gb": budget_gb,
+                                     "parent_pid": os.getpid()}))
     argv = list(command) if command is not None else [
         sys.executable, str(Path(__file__).resolve())]
     argv += ["--child-task", str(task_path), "--child-out", str(result_path)]
@@ -1060,6 +1086,29 @@ def refuse_child(exc: ChildRefusal, fingerprint: dict, steps: dict) -> int:
     return refuse(exc.exit_for_parent, str(exc), fingerprint, marked)
 
 
+class _GuardedSession:
+    """The guard, riding the one seam this file owns on the continuity path.
+
+    The continuity child hands its session to the device harness's measure(),
+    which takes no guard parameter and lives in a file another lane owns - so
+    the grid and probe children checked between records while the continuity
+    child checked nowhere, and an orphaned one ran its 64 GPU records to
+    completion against a lock its dead parent had already released. Every case
+    that loop measures asks the session for a compiled kernel first, so
+    checking here restores the same between-cases cadence without touching the
+    other lane's file.
+    """
+
+    def __init__(self, session, guard, cell: str):
+        self._session = session
+        self._guard = guard
+        self._cell = cell
+
+    def compiled(self, member: str, x_dtype: str):
+        self._guard.check(self._cell)
+        return self._session.compiled(member, x_dtype)
+
+
 def child_main(args) -> int:
     """The child half of the isolation protocol: run ONE measurement
     iteration, self-guard the budget between records, self-report footprint
@@ -1067,10 +1116,13 @@ def child_main(args) -> int:
     holds it), no checkpoint (the parent owns it), fresh DeviceMemberSession
     per child by design (seconds of compile, ruled acceptable under D3)."""
     task = json.loads(Path(args.child_task).read_text())
-    # Captured at startup, before any work: this is the parent that owns the
-    # lock, the checkpoint and the results file. If it changes, we are an
-    # orphan and every record we go on to measure is unowned.
-    guard = BudgetGuard(task["budget_gb"], parent_pid=os.getppid())
+    # The parent that owns the lock, the checkpoint and the results file, named
+    # by the parent itself before the fork. If getppid() stops matching it, we
+    # are an orphan and every record we go on to measure is unowned. Reading
+    # getppid() here instead would be too late to be true (spawn_measurement
+    # explains why), so a missing key is a hard failure rather than a fallback:
+    # a silently disabled orphan check is the whole defect.
+    guard = BudgetGuard(task["budget_gb"], parent_pid=task["parent_pid"])
     cell = task.get("cell", task["kind"])
     verbose = task.get("verbose", False)
     print(f"  child {cell}: start ({footprint_line()})", flush=True)
@@ -1081,7 +1133,7 @@ def child_main(args) -> int:
         return EXIT_NO_DEVICE
     try:
         if task["kind"] == "continuity":
-            ok, detail = continuity_anchor(session)
+            ok, detail = continuity_anchor(_GuardedSession(session, guard, cell))
             payload = {"ok": ok, "detail": detail}
         elif task["kind"] == "probe":
             report = probe_batch_regimes(
