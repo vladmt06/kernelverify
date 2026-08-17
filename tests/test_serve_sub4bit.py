@@ -535,6 +535,19 @@ def test_timed_modes_refuse_when_the_machine_lock_is_held(monkeypatch, mode):
 
 
 def test_smoke_never_takes_the_lock(monkeypatch):
+    """main() reaches smoke BEFORE it builds the lock - and only that.
+
+    smoke() is replaced here because the real one loads two models and
+    dispatches, so this test can say nothing about what smoke itself does: it
+    would pass just as happily if smoke took the lock on its first line, or had
+    been reduced to a stub. The property it does pin is main()'s ordering,
+    which is where the lock decision actually lives.
+
+    The other half - that nothing smoke calls can take the lock - is
+    tests/test_serving_survival.py::test_nothing_reachable_from_smoke_can_take_the_machine_lock,
+    which walks the call graph because a lock inside a helper is exactly what
+    this test cannot see.
+    """
     _pins_ok(monkeypatch)
 
     def _boom(self):

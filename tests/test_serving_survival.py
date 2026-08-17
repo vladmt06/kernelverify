@@ -1373,3 +1373,64 @@ def test_clearing_the_cache_returns_what_the_footprint_counts():
     assert cached > 0, "freed buffers are supposed to sit in the cache"
     mx.clear_cache()
     assert mx.get_cache_memory() < cached, "clear_cache must release them"
+
+
+def _reachable_from(source: str, root: str) -> set[str]:
+    """Every function in `source` reachable from `root` by direct call.
+
+    Names only, which is enough here: this module defines its helpers at module
+    scope and calls them by name. The point is to follow the graph rather than
+    read one function body, because a harness that took the lock through a
+    helper would satisfy any check that only looked at the entry point.
+    """
+    tree = ast.parse(source)
+    defs = {n.name: n for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    seen, queue = set(), [root]
+    while queue:
+        name = queue.pop()
+        if name in seen or name not in defs:
+            continue
+        seen.add(name)
+        for node in ast.walk(defs[name]):
+            if isinstance(node, ast.Name):
+                queue.append(node.id)
+            elif isinstance(node, ast.Attribute):
+                queue.append(node.attr)
+    return seen
+
+
+def _names_used_by(source: str, functions: set[str]) -> set[str]:
+    tree = ast.parse(source)
+    used = set()
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in functions:
+            for node in ast.walk(n):
+                if isinstance(node, ast.Name):
+                    used.add(node.id)
+                elif isinstance(node, ast.Attribute):
+                    used.add(node.attr)
+    return used
+
+
+def test_nothing_reachable_from_smoke_can_take_the_machine_lock():
+    """The half of the smoke contract that stubbing smoke() cannot check.
+
+    tests/test_serve_sub4bit.py drives main(["--smoke"]) with smoke() replaced,
+    which proves main() reaches smoke BEFORE it builds the lock - and proves
+    nothing at all about smoke itself, because the real one never runs there.
+    Running the real one needs two models and a GPU, so the reachable call
+    graph is checked instead: smoke, and everything smoke calls, must never
+    name MeasurementLock. Following the graph rather than reading smoke's own
+    body is the point - a lock taken inside a helper is the case a single-body
+    check misses.
+    """
+    reachable = _reachable_from(SERVE_SRC, "smoke")
+    assert "smoke" in reachable and len(reachable) > 1, \
+        "the call graph walk found nothing; the parse or the root name is wrong"
+    used = _names_used_by(SERVE_SRC, reachable)
+    assert "MeasurementLock" not in used, (
+        "something reachable from smoke() names MeasurementLock; smoke is the "
+        "one mode that must run while a measurement holds the machine")
+    assert "acquire" not in used, (
+        "something reachable from smoke() calls acquire(); see above")
