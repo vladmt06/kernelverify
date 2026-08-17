@@ -55,6 +55,23 @@ def fatal(status: RunStatus, detail: str) -> int:
     return 0
 
 
+def compiled_event(spec_index: int, kernel) -> dict:
+    """The 'compiled' wire event, spelled once for both modes: the parent keys
+    on these exact fields (compile_options, execution width), so batch and
+    stream must report them identically."""
+    return {"event": "compiled", "spec": spec_index,
+            "max_threads_per_threadgroup": kernel.max_threads,
+            "thread_execution_width": kernel.execution_width,
+            "compile_options": {"math_mode": kernel.math_mode}}
+
+
+def spec_failed_event(spec_index: int, status: RunStatus, detail: str) -> dict:
+    """The 'spec_failed' wire event: the spec cannot run at all, which fails
+    every case it owns and is final for that spec."""
+    return {"event": "spec_failed", "spec": spec_index,
+            "result": RunResult(status=status, detail=detail).to_json()}
+
+
 def _run_case(kernel, raw_case: dict, warmup: int, repeats: int) -> RunResult:
     """Run one case on a compiled kernel, folding every failure into a result."""
     try:
@@ -107,17 +124,13 @@ def main(argv: list[str]) -> int:
         try:
             spec = KernelSpec.from_json(entry["spec"])
         except (SpecError, KeyError, TypeError) as error:
-            emit({"event": "spec_failed", "spec": spec_index,
-                  "result": RunResult(status=RunStatus.INVALID_SPEC,
-                                      detail=str(error)).to_json()})
+            emit(spec_failed_event(spec_index, RunStatus.INVALID_SPEC, str(error)))
             continue
 
         try:
             kernel = device.compile(spec, math_mode=math_mode)
         except CompileError as error:
-            emit({"event": "spec_failed", "spec": spec_index,
-                  "result": RunResult(status=RunStatus.COMPILE_ERROR,
-                                      detail=str(error)).to_json()})
+            emit(spec_failed_event(spec_index, RunStatus.COMPILE_ERROR, str(error)))
             continue
         # Compilation is the one unbounded-but-legitimate wait per spec.
         # Saying so lets the parent stop granting the start-up budget to the
@@ -126,10 +139,7 @@ def main(argv: list[str]) -> int:
         # The compile options are echoed rather than assumed, so the parent
         # records what the shader was actually built with; a certificate cites
         # them as inputs.
-        emit({"event": "compiled", "spec": spec_index,
-              "max_threads_per_threadgroup": kernel.max_threads,
-              "thread_execution_width": kernel.execution_width,
-              "compile_options": {"math_mode": kernel.math_mode}})
+        emit(compiled_event(spec_index, kernel))
 
         for index, raw_case in enumerate(entry.get("cases", [])):
             result = _run_case(kernel, raw_case, warmup, repeats)
@@ -166,10 +176,7 @@ def stream(device) -> int:
         kernel = device.compile(spec, math_mode=header.get("math_mode", "safe"))
     except CompileError as error:
         return fatal(RunStatus.COMPILE_ERROR, str(error))
-    emit({"event": "compiled", "spec": 0,
-          "max_threads_per_threadgroup": kernel.max_threads,
-          "thread_execution_width": kernel.execution_width,
-          "compile_options": {"math_mode": kernel.math_mode}})
+    emit(compiled_event(0, kernel))
 
     for line in sys.stdin:
         if not line.strip():

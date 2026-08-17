@@ -33,8 +33,6 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from kernelverify.extraction.surface import LiveCall
-
 __all__ = [
     "CaseEvidence",
     "GateEvidence",
@@ -109,11 +107,6 @@ class SpecializationEvidence:
     @property
     def ok(self) -> bool:
         return bool(self.cases) and self.cases_passed == self.cases_run
-
-    def add_case(self, case: CaseEvidence, call: LiveCall | None = None) -> None:
-        self.cases.append(case)
-        if call is not None:
-            self.calls.append(call)
 
 
 @dataclass

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import functools
 import math
 import os
 import subprocess
@@ -58,8 +59,18 @@ EXIT_NOT_IDLE = 9         # the machine is not quiet: transient, come back
 EXIT_ORPHANED = 10        # the child outlived the parent that owned the lock
 
 
+@functools.cache
 def machine_ram_gb() -> float:
-    """Total unified memory in decimal GB, from sysctl hw.memsize."""
+    """Total unified memory in decimal GB, from sysctl hw.memsize.
+
+    Cached: hw.memsize cannot change while this process lives, and the
+    available-memory gate calls it on every check - once per cell in the
+    serving grid and once per arm in the A/B - so an uncached read spawns a
+    subprocess inside the loop the budget exists to protect. The Jetsam meter
+    itself (kern.memorystatus_level) is deliberately NOT cached: that one
+    moves, and reading a stale copy is how a doomed allocation gets waved
+    through.
+    """
     out = subprocess.run(["sysctl", "-n", "hw.memsize"],
                          capture_output=True, text=True)
     return int(out.stdout.strip()) / 1e9

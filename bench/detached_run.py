@@ -45,6 +45,7 @@ from memory_guard import (
     EXIT_LOW_MEMORY,
     EXIT_NO_DEVICE,
     EXIT_NOT_IDLE,
+    EXIT_ORPHANED,
     EXIT_PRECONDITION,
 )
 
@@ -52,10 +53,6 @@ ROOT = Path(__file__).resolve().parent.parent
 BASELINES = ROOT / "bench" / ".baselines"
 STATUS_DIR = BASELINES
 HARNESS = ROOT / "bench" / "measure_baselines.py"
-
-# I5 owns the constant in memory_guard. I2 still names its already-allocated
-# value explicitly so an orphaned child is never mistaken for an unknown code.
-EXIT_ORPHANED = 10
 
 STRONG_IDLE_SAMPLES = 5      # consecutive clean samples before starting
 SAMPLE_INTERVAL_S = 30       # between clean samples (2 min of held quiet)

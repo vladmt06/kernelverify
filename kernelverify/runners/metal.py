@@ -91,7 +91,6 @@ class BatchResult:
 class _Session:
     """What one worker process reported before it finished, died, or hung."""
 
-    saw_device: bool = False
     device: DeviceInfo | None = None
     fatal: RunResult | None = None
     done: bool = False
@@ -204,7 +203,7 @@ class MetalRunner:
                 _fill_remaining(batches, runnable, spec_cursor, case_cursor, slots,
                                 session.fatal.status, session.fatal.detail)
                 break
-            if not session.saw_device:
+            if session.device is None:
                 # The environment, not the candidate, is broken; resuming
                 # would spawn one doomed worker per case.
                 status, detail = _no_device_verdict(session)
@@ -304,7 +303,6 @@ class MetalRunner:
                     break
                 kind = event.get("event")
                 if kind == "device":
-                    outcome.saw_device = True
                     outcome.device = DeviceInfo.from_json(event["device"])
                 elif kind == "compiled":
                     entry = _mapped(event, mapping)
@@ -373,27 +371,8 @@ class MetalRunner:
 
     # -- process plumbing --------------------------------------------------
     def _spawn(self, probe: bool = False, stream: bool = False) -> subprocess.Popen:
-        environment = dict(os.environ)
-        existing = environment.get("PYTHONPATH", "")
-        environment["PYTHONPATH"] = (
-            f"{REPO_ROOT}{os.pathsep}{existing}" if existing else str(REPO_ROOT)
-        )
-        command = [self.python, "-m", WORKER_MODULE]
-        if probe:
-            command.append("--probe")
-        if stream:
-            command.append("--stream")
-        return subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            cwd=str(REPO_ROOT),
-            env=environment,
-            start_new_session=True,  # so a hung kernel can be killed by group
-        )
+        args = (["--probe"] if probe else []) + (["--stream"] if stream else [])
+        return spawn_isolated(self.python, WORKER_MODULE, args, bufsize=1)
 
     def _terminate(self, process: subprocess.Popen) -> None:
         if process.poll() is None:
@@ -410,6 +389,36 @@ class MetalRunner:
                     pipe.close()
             except OSError:
                 pass
+
+
+def spawn_isolated(python: str, module: str, args=(), **popen_kwargs) -> subprocess.Popen:
+    """Start `python -m module *args` as a worker the parent can kill by group.
+
+    This is the one child-isolation contract every worker spawner in the repo
+    shares: the repo root is prepended to PYTHONPATH so the child imports the
+    same tree as the parent, cwd is the repo root, all three standard streams
+    are text pipes, and the child gets its own session
+    (`start_new_session=True`) so a hung kernel can be killed by group.
+    AGENTS.md records that `start_new_session` is a PRECONDITION of a group
+    sweep: without it the child sits in the parent's group and the reaper's
+    `killpg` fails silently. `popen_kwargs` (e.g. `bufsize`) pass through.
+    """
+    environment = dict(os.environ)
+    existing = environment.get("PYTHONPATH", "")
+    environment["PYTHONPATH"] = (
+        f"{REPO_ROOT}{os.pathsep}{existing}" if existing else str(REPO_ROOT)
+    )
+    return subprocess.Popen(
+        [python, "-m", module, *args],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=str(REPO_ROOT),
+        env=environment,
+        start_new_session=True,  # so a hung kernel can be killed by group
+        **popen_kwargs,
+    )
 
 
 def _validate(spec: KernelSpec, cases: list[RunCase]) -> str | None:
@@ -433,27 +442,29 @@ def _mapped(event: dict, mapping: list) -> tuple[int, tuple[int, int]] | None:
     return request_index, mapping[request_index]
 
 
-def _first_hole(batches, runnable, slots, spec_cursor, case_cursor):
-    """The earliest case at or after the cursor that never reported."""
+def _holes(batches, runnable, slots, spec_cursor, case_cursor):
+    """Every (runnable position, case index) at or after the cursor that
+    never reported, in run order. Filling a yielded slot is safe: the
+    generator has already moved past it and never re-tests it."""
     for rpos in range(spec_cursor, len(runnable)):
         position = runnable[rpos]
         start = case_cursor if rpos == spec_cursor else 0
         for index in range(start, len(batches[position][1])):
             if slots[position][index] is None:
-                return rpos, index
-    return None
+                yield rpos, index
+
+
+def _first_hole(batches, runnable, slots, spec_cursor, case_cursor):
+    """The earliest case at or after the cursor that never reported."""
+    return next(_holes(batches, runnable, slots, spec_cursor, case_cursor), None)
 
 
 def _fill_remaining(batches, runnable, spec_cursor, case_cursor, slots,
                     status: RunStatus, detail: str) -> None:
-    for rpos in range(spec_cursor, len(runnable)):
-        position = runnable[rpos]
-        cases = batches[position][1]
-        start = case_cursor if rpos == spec_cursor else 0
-        for index in range(start, len(cases)):
-            if slots[position][index] is None:
-                slots[position][index] = RunResult(status=status, detail=detail,
-                                                   label=cases[index].label)
+    for rpos, index in _holes(batches, runnable, slots, spec_cursor, case_cursor):
+        cases = batches[runnable[rpos]][1]
+        slots[runnable[rpos]][index] = RunResult(status=status, detail=detail,
+                                                 label=cases[index].label)
 
 
 def _tail(stderr: str) -> str:

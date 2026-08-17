@@ -36,8 +36,7 @@ from interleave import (  # noqa: E402
     MAX_CANARY_SPREAD,
     MIN_SAMPLE_MS,
     arms_agree,
-    calibrate_copies,
-    dispatch,
+    interleaved_samples,
 )
 from kernelverify.extraction.surface import LiveCall  # noqa: E402
 from kernelverify.pack.evidence import (  # noqa: E402
@@ -253,12 +252,7 @@ def time_row(kernel, b, h, t, dh, bits) -> tuple:
 
     agree = arms_agree(ours(0), theirs(0))
 
-    mx.synchronize()
-    copies = calibrate_copies(lambda c: dispatch(ours, c))
-    a_samples, b_samples = [], []
-    for _ in range(ROUNDS):
-        a_samples.append(dispatch(ours, copies) / copies)
-        b_samples.append(dispatch(theirs, copies) / copies)
+    a_samples, b_samples = interleaved_samples(ours, theirs, ROUNDS)
     spread = max(b_samples) / min(b_samples)
     if spread > MAX_CANARY_SPREAD:
         return None, spread, agree

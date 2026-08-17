@@ -19,6 +19,7 @@ independent implementation in tests (MLX's own ops where they exist).
 
 from __future__ import annotations
 
+import weakref
 from dataclasses import dataclass
 from typing import Callable
 
@@ -31,6 +32,7 @@ from kernelverify.schemas.quant_contract import (
     canonical_quantize,
     r_contract,
 )
+from kernelverify.tolerance.floor import floored_tolerance
 
 # Re-derived at 4.0 by the device-arithmetic calibration (ADR 0012): a correct
 # device kernel (simdgroup-factored) legitimately exceeds the CPU-calibrated
@@ -46,11 +48,6 @@ _EPS = {"float16": 9.77e-4, "float32": 1.19e-7}
 def _base_tol(dtype: str, ref: np.ndarray) -> float:
     scale = float(np.max(np.abs(ref))) if ref.size else 0.0
     return 4.0 * _EPS[dtype] * scale
-
-
-def _max_err(candidate: np.ndarray, ref: np.ndarray) -> float:
-    diff = np.abs(candidate.astype(np.float64) - ref.astype(np.float64))
-    return float(diff.max()) if diff.size else 0.0
 
 
 @dataclass(frozen=True)
@@ -95,23 +92,32 @@ QUANTIZED_MATMUL_META = {
 # lm_head group, whose transients the 2026-08-15 pricing instrumentation
 # measured at 14-22 GB of ratcheted footprint.
 #
-# Keyed by IDENTITY, not by a content hash. The memo's strong reference keeps
-# the array alive, so no later array can occupy its address and a hit can only
-# ever be the same object - the anchoring property survives exactly as a hash
-# would preserve it. Hashing would additionally cost a full copy of the weight
-# bytes per case (`tobytes` always copies; 778 MB at lm_head in fp16), which is
-# the transient this memo exists to avoid. Every caller holds one weight matrix
-# across its case group and passes that same object in, so identity hits.
+# Keyed by IDENTITY, not by a content hash. The slot holds a WEAK reference to
+# the weight matrix whose callback clears the slot the moment the caller drops
+# the matrix, so no later array can occupy a dead referent's address and be
+# mistaken for it: a hit can only ever be the same, still-live object, and the
+# anchoring property survives exactly as a hash would preserve it. Hashing would
+# additionally cost a full copy of the weight bytes per case (`tobytes` always
+# copies; 778 MB at lm_head in fp16), which is the transient this memo exists
+# to avoid. Every caller holds one weight matrix across its case group and
+# passes that same object in, so identity hits; and once the caller moves on,
+# the weights and their artefact (~2.3 GB at lm_head) go with it instead of
+# sitting resident under whatever runs next in the process.
 _qmm_memo: tuple | None = None
+
+
+def _forget_qmm_memo(_ref):
+    global _qmm_memo
+    _qmm_memo = None
 
 
 def _qmm_artefact(inputs):
     global _qmm_memo
     w, bits = inputs["w"], int(inputs["bits"][0])
-    if _qmm_memo is not None and _qmm_memo[0] is w and _qmm_memo[1] == bits:
+    if _qmm_memo is not None and _qmm_memo[0]() is w and _qmm_memo[1] == bits:
         return _qmm_memo[2]
     artefact = canonical_quantize(w, QuantContract(bits=bits, group_size=64))
-    _qmm_memo = (w, bits, artefact)
+    _qmm_memo = (weakref.ref(w, _forget_qmm_memo), bits, artefact)
     return artefact
 
 
@@ -121,9 +127,9 @@ def qmm_reference(inputs) -> np.ndarray:
 
 def qmm_tolerance(case, inputs, ref) -> float:
     artefact = _qmm_artefact(inputs)
-    floor = max(_max_err(fn(inputs["x"], artefact), ref)
-                for fn in QUANT_ENSEMBLE.values())
-    return max(_base_tol(case.dtype, ref), K_QUANT * floor)
+    return floored_tolerance(_base_tol(case.dtype, ref), K_QUANT,
+                             (fn(inputs["x"], artefact) for fn in QUANT_ENSEMBLE.values()),
+                             ref)
 
 
 WEIGHT_SCALE = 0.05
@@ -184,12 +190,12 @@ MOE_DISPATCH_META = {
 }
 
 
-def moe_reference(inputs) -> np.ndarray:
-    """The routing contract in fp64, sharing the kernel's tie-break helper so
-    exact ties (every logit, on constant-rows inputs) resolve identically."""
-    x = inputs["x"].astype(np.float64)
-    router = inputs["router"].astype(np.float64)
-    experts = inputs["experts"].astype(np.float64)
+def _moe_route(inputs, dtype):
+    """Softmax over all experts, top-k by probability (ties low, through the
+    kernel's tie-break helper), renormalise: the routing contract at `dtype`.
+    Returns (x cast to dtype, top indices, renormalised top-k weights)."""
+    x = inputs["x"].astype(dtype)
+    router = inputs["router"].astype(dtype)
     logits = x @ router.T
     shifted = logits - logits.max(axis=-1, keepdims=True)
     probs = np.exp(shifted)
@@ -197,30 +203,34 @@ def moe_reference(inputs) -> np.ndarray:
     top = _topk_by_prob(probs, TOP_K, tie_high=False)
     weights = np.take_along_axis(probs, top, axis=-1)
     weights = weights / weights.sum(axis=-1, keepdims=True)
-    out = np.zeros((x.shape[0], experts.shape[1]), dtype=np.float64)
+    return x, top, weights
+
+
+def _moe_combine(x, experts, top, weights, slots, dtype):
+    """Accumulate weight * (x @ expert.T) per row over `slots`, in that order.
+    `slots` is walked once PER ROW, so it must be a re-iterable sequence (a
+    range), never an iterator such as reversed(range(...))."""
+    out = np.zeros((x.shape[0], experts.shape[1]), dtype=dtype)
     for row in range(x.shape[0]):
-        for slot in range(TOP_K):
+        for slot in slots:
             out[row] += weights[row, slot] * (x[row] @ experts[int(top[row, slot])].T)
     return out
+
+
+def moe_reference(inputs) -> np.ndarray:
+    """The routing contract in fp64, sharing the kernel's tie-break helper so
+    exact ties (every logit, on constant-rows inputs) resolve identically."""
+    x, top, weights = _moe_route(inputs, np.float64)
+    experts = inputs["experts"].astype(np.float64)
+    return _moe_combine(x, experts, top, weights, range(TOP_K), np.float64)
 
 
 def _moe_member_reversed(inputs) -> np.ndarray:
     """Legitimate variant: expert contributions accumulated in reverse slot
     order at fp32 (a second member of the combine-order class)."""
-    x = inputs["x"].astype(np.float32)
-    router = inputs["router"].astype(np.float32)
+    x, top, weights = _moe_route(inputs, np.float32)
     experts = inputs["experts"].astype(np.float32)
-    logits = x @ router.T
-    shifted = logits - logits.max(axis=-1, keepdims=True)
-    probs = np.exp(shifted)
-    probs /= probs.sum(axis=-1, keepdims=True)
-    top = _topk_by_prob(probs, TOP_K, tie_high=False)
-    weights = np.take_along_axis(probs, top, axis=-1)
-    weights = weights / weights.sum(axis=-1, keepdims=True)
-    out = np.zeros((x.shape[0], experts.shape[1]), dtype=np.float32)
-    for row in range(x.shape[0]):
-        for slot in reversed(range(TOP_K)):
-            out[row] += weights[row, slot] * (x[row] @ experts[int(top[row, slot])].T)
+    out = _moe_combine(x, experts, top, weights, range(TOP_K - 1, -1, -1), np.float32)
     return out.astype(inputs["x"].dtype)
 
 
@@ -238,8 +248,8 @@ MOE_ENSEMBLE_VERSION = "moe-ensemble-v1"
 
 
 def moe_tolerance(case, inputs, ref) -> float:
-    floor = max(_max_err(fn(inputs), ref) for fn in MOE_MEMBERS.values())
-    return max(_base_tol(case.dtype, ref), K_NATIVE * floor)
+    return floored_tolerance(_base_tol(case.dtype, ref), K_NATIVE,
+                             (fn(inputs) for fn in MOE_MEMBERS.values()), ref)
 
 
 # ---------------------------------------------------------------------------
@@ -358,7 +368,8 @@ KV_MEMBERS = {
 
 # Same discipline as MOE_ENSEMBLE_VERSION above. This ensemble shares
 # `_kv_member` and `_cache_dequant` with the reference, so a change to either
-# moves every member at once under four unchanged names.
+# moves every member at once under four unchanged names (the MoE ensemble
+# shares `_moe_route` and `_moe_combine` with its reference the same way).
 KV_ENSEMBLE_VERSION = "kv-ensemble-v1"
 
 
@@ -378,9 +389,9 @@ def kv_tolerance(case, inputs, ref) -> float:
     whether 4.0 is loose, tight, or beside the point for an operator whose
     floor also carries a softmax. Calibrating it is queued in TODOS.md.
     """
-    floor = max(_max_err(_kv_member(inputs, **kw), ref)
-                for kw in KV_MEMBERS.values())
-    return max(_base_tol(case.dtype, ref), K_QUANT * floor)
+    return floored_tolerance(_base_tol(case.dtype, ref), K_QUANT,
+                             (_kv_member(inputs, **kw) for kw in KV_MEMBERS.values()),
+                             ref)
 
 
 NATIVE_OPS = {

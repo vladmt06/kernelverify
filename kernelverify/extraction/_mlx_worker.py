@@ -40,7 +40,7 @@ def _flush_c_stdout() -> None:
     ctypes.CDLL(None).fflush(None)
 
 
-def _template_args(call: LiveCall, mx):
+def _template_args(call: LiveCall):
     resolved = [(name, _MX_DTYPES.get(value, value) if isinstance(value, str) else value)
                 for name, value in call.template]
     return resolved or None
@@ -55,7 +55,7 @@ def _run_call(kernel, surface: MLXKernelSurface, call: LiveCall, mx, verbose: bo
         output_dtypes=[_MX_DTYPES[dtype] for _, dtype in call.output_shapes],
         grid=tuple(call.grid),
         threadgroup=tuple(call.threadgroup),
-        template=_template_args(call, mx),
+        template=_template_args(call),
         verbose=verbose,
     )
     mx.eval(*outputs)

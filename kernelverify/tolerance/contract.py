@@ -85,7 +85,13 @@ import numpy as np
 from kernelverify.reference.kernels import (
     L2NORM_EPS,
     RMSNORM_EPS,
+    _pad_block,
+    _rows,
+    flash_attention,
+    gelu,
+    leaky_relu,
     next_pow2,
+    silu,
 )
 
 # Bumping this invalidates any cached calibration, the way the catalogue
@@ -222,10 +228,6 @@ def _f32(a):
     return a.astype(np.float32)
 
 
-def _rows(x):
-    return np.ascontiguousarray(x).reshape(-1, x.shape[-1]).astype(np.float32), x.shape
-
-
 # -- elementwise -------------------------------------------------------------
 # No reduction exists, so the only freedom is C2 reassociation of the specified
 # expression plus C1's licence to compute wider than binary32.
@@ -348,11 +350,7 @@ def _softmax_variant(order: Order, pad_to_pow2: bool) -> Callable:
         flat, shape = _rows(x)
         n_cols = flat.shape[1]
         block = next_pow2(n_cols) if pad_to_pow2 else n_cols
-        if block != n_cols:
-            padded = np.full((flat.shape[0], block), -np.inf, np.float32)
-            padded[:, :n_cols] = flat
-        else:
-            padded = flat
+        padded = _pad_block(flat, block, -np.inf) if block != n_cols else flat
         shifted = padded - padded.max(axis=1, keepdims=True)
         e = np.exp(shifted)
         y = e[:, :n_cols] / order.fn(e, 1)[:, None]
@@ -460,8 +458,6 @@ def _attention_blas(inputs):
 
 
 def _flash_variant(block_n_cap: int) -> Callable:
-    from kernelverify.reference.kernels import flash_attention
-
     def impl(inputs):
         return flash_attention(inputs, block_n_cap=block_n_cap)
 
@@ -546,13 +542,10 @@ def _population(op: str, *, n_random: int, seed: int) -> list[tuple[str, Callabl
        on the reduction-heavy operators and which no fixed list reaches.
     """
     if op == "gelu_triton":
-        from kernelverify.reference.kernels import gelu
         return [("reference", gelu)] + _gelu_variants()
     if op == "silu_triton":
-        from kernelverify.reference.kernels import silu
         return [("reference", silu)] + _silu_variants()
     if op == "leaky_relu_triton":
-        from kernelverify.reference.kernels import leaky_relu
         return [("reference", leaky_relu)] + _leaky_relu_variants()
 
     orders = reduction_orders(n_random, seed)

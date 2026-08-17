@@ -263,7 +263,7 @@ class CompiledKernel:
             buffers[index] = buffer
         return buffers, scalars, output_indices
 
-    def _check_launch(self, grid, group, memory) -> None:
+    def _check_launch(self, group, memory) -> None:
         threads = group[0] * group[1] * group[2]
         if threads > self.max_threads:
             raise LaunchError(
@@ -316,7 +316,7 @@ class CompiledKernel:
 
         try:
             with objc.autorelease_pool():
-                self._check_launch(grid, group, memory)
+                self._check_launch(group, memory)
                 buffers, scalars, output_indices = self._make_buffers(case)
                 for slot, index in enumerate(output_indices):
                     _zero(buffers[index], *case.output_shapes[slot])
