@@ -283,10 +283,11 @@ Deviation from the registered default, recorded because section 3 pins it: the b
 The reason is a defect in the harness rather than a property of the measurement.
 `mde()` and `ab()` never call `mx.clear_cache()`, so MLX's freed-buffer cache is never returned to the allocator, and `phys_footprint` counts those dead buffers; the footprint therefore ratchets upward across cells until it crosses any fixed budget, which it did at B = 12 in run 1.
 30.0 GB is the same ceiling the serving calibration already runs under and leaves roughly 8.6 GB of headroom on this 38.65 GB machine, so it widens the guard without disarming it.
-The fix is to clear the cache at each cell boundary and restore the 24.0 GB default; it is queued as its own change and is not made here, because editing the harness between the MDE and the A/B would have unbound the two.
+The fix is to clear the cache at each cell boundary and restore the 24.0 GB default; it is queued in `TODOS.md` as its own change and is not made here, because editing the harness between the MDE and the A/B would have unbound the two.
 
-Reproducibility: run 2 and run 3 are independent quiet windows, and their in-zone ratios agree to 1.0566 vs 1.0570, 1.1455 vs 1.1469, and 1.1558 vs 1.1565.
-The verdicts below do not depend on which of the two is read.
+Reproducibility, stated at the grade the evidence actually carries: run 3 is the binding run and the only one, and run 2 is a NON-BINDING run whose in-zone ratios agree with it to 1.0566 vs 1.0570, 1.1455 vs 1.1469 and 1.1558 vs 1.1565.
+An earlier draft of this paragraph called the two "independent quiet windows", which contradicted this section's own run table three paragraphs above: the harness marked run 2 non-binding because its closing idle sample caught WindowServer at 15% CPU, and section 3 registers that a timing mode's window must be clean before AND after.
+The agreement is therefore corroboration that the harness reproduces itself, not a second measurement, and every verdict below rests on run 3 alone.
 
 ## 10. Verdicts
 
@@ -340,5 +341,8 @@ THE BATCH-1 BASELINE, which is the number this plan exists to produce and the on
 | ours, routing nothing | 64.745 |
 
 64.7 tokens per second on the 3-bit artifact is the end-to-end batch-1 figure every future kernel spike must beat, and the pack contributes nothing to it.
-The 3-bit artifact alone is 23.7% faster than stock 4-bit at batch 1, which is the bandwidth saving of the narrower weights and not a kernel result.
+The 3-bit artifact alone is 23.7% faster than stock 4-bit at batch 1 (arm 2 against arm 3), which is the bandwidth saving of the narrower weights and not a kernel result.
+That sentence compares the two artifacts, so section 6's rule binds it exactly as it binds the composed claim, and the pair travels with it here rather than being left to the reader to fetch: perplexity 22.7069 at 3 bits against 15.2355 at 4 bits, the 3-bit artifact 49.0% worse on the registered corpus.
+Read together, the batch-1 picture is that the 3-bit artifact buys 23.7% of throughput with 49.0% of perplexity, and the kernel changes neither number.
 This is a baseline, not a claim of speedup: nothing in this document makes single-user decode faster, and the research that intends to is opened by the literature review, not here.
+The out-of-zone cells above support no claim about the KERNEL, which is what that sentence means; the artifact-versus-artifact comparison in this table is a different question and is qualified by its own cost.
