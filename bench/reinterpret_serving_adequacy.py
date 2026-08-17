@@ -52,12 +52,18 @@ OUT_PATH = Path(__file__).with_name("results") / "quant_serving_reinterpretation
 
 # The modules a derived number passes through; a change to any of them is a
 # different interpretation and must read as one in the artifact header.
+# native_ops.py is in the set because K_SHIP is an import alias for its
+# K_QUANT: since the literal left the serving harness, the effective K lives
+# THERE, and a K change with an unchanged hash is precisely the silent drift
+# this header exists to refuse. Found by the fresh-eyes review of 2026-08-17,
+# introduced by the very change that removed the literal.
 INTERPRETATION_PATHS = (
     Path(__file__).resolve(),
     Path(__file__).with_name("calibrate_quant_serving.py"),
     Path(__file__).with_name("calibrate_quant_device.py"),
     Path(__file__).with_name("calibrate_quant_bits.py"),
     Path(__file__).resolve().parents[1] / "kernelverify" / "schemas" / "heldout_eligibility.py",
+    Path(__file__).resolve().parents[1] / "kernelverify" / "schemas" / "native_ops.py",
     Path(__file__).resolve().parents[1] / "kernelverify" / "schemas" / "quant_contract.py",
 )
 

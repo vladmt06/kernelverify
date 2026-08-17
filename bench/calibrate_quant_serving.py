@@ -144,10 +144,14 @@ RSS already 2.4 GB early in the step and no log line naming the shape that
 was live. Authorized by the coordinator and recorded here before the rerun:
 
 1. STEP 2 announces every shape and every (dtype, implementation) as it
-   starts and finishes, each line carrying an RSS self-report (current and
-   peak), and each shape's report carries ``rss_gb`` into the JSON. The
-   memory hypothesis is then confirmed or refuted by the next run's log
-   rather than argued about.
+   starts and finishes, each line carrying a memory self-report, and each
+   shape's report carries that pair into the JSON. The memory hypothesis is
+   then confirmed or refuted by the next run's log rather than argued about.
+   (Amended 2026-08-17: the self-report was RSS alone when this was written.
+   It now leads with phys_footprint, the number Jetsam kills on, and carries
+   RSS after it - both halves of both pairs, since current answers "how big
+   is this shape" and peak answers "did something spike". The JSON carries
+   ``footprint_gb`` beside ``rss_gb`` for the same reason.)
 
 2. A per-step checkpoint at ``.cache/quant_serving_partial.json``, written
    atomically (temp then replace, so a SIGKILL mid-write cannot leave a file
@@ -287,6 +291,49 @@ pre-ruling reading). The committed evidence lives at
 ``bench/reinterpret_serving_adequacy.py`` derives the ruled reading from it
 without touching it.
 
+AMENDMENT, 2026-08-16 (fifth): the child's lifetime is bound to the parent's
+---------------------------------------------------------------------------
+The second amendment built the isolation boundary and left one hole in it,
+recorded at the time as a TODO rather than fixed: a parent killed mid-child
+(Jetsam, or a coordinator stopping a lane) left the child running with the
+GPU and its whole footprint, while the machine-wide lock the parent held was
+released by that same death - so the next harness acquired the freed lock and
+started measuring beside the orphan. That is the two-large-Pythons failure
+this harness exists to prevent, reached from the opposite direction, and it
+defeats the lock rather than the budget.
+
+Two halves, and neither is sufficient alone:
+
+1. The PARENT stamps its own pid into the task file before forking, and the
+   child compares ``os.getppid()`` against that stamp where it already checks
+   the budget, between records. When the parent dies the child is reparented
+   (to launchd on macOS), so the comparison stops holding - a free signal at a
+   point where stopping is still cheap. The stamp must come from the parent
+   rather than the child reading getppid() at its own startup: that read lands
+   after fork, exec and a cold import of numpy and MLX, and a parent dying
+   inside those seconds is already replaced by the time the child looks, so a
+   startup capture records the reparent pid and never diverges from it again.
+   The child stops with EXIT_ORPHANED, its own number, because exit 1 already
+   means measured-and-stopped and would read as the opposite of what happened.
+   The comparison runs between grid records, between every probe evaluator
+   (a probe child holds one shape, so a per-shape check would be its last),
+   and once more before the result file is published - finished work belongs
+   to a parent that is still alive to read it, and an orphan's late write
+   could otherwise replace a restarted run's owned result.
+
+2. The parent spawns with ``start_new_session=True`` and sweeps the child's
+   process group in a ``finally``. This is the path for a parent that merely
+   STOPS - a raised refusal, a KeyboardInterrupt, a wall-cap timeout - where
+   the child never sees a reparenting because the parent never died. It also
+   repairs a behaviour the Popen switch introduced: ``subprocess.run`` killed
+   its child on timeout, ``proc.wait(timeout=)`` does not.
+
+The session flag is a PRECONDITION of the group sweep, not a companion to it,
+so the reaper reads the group back and compares before signalling: with the
+flag dropped the child sits in the parent's group, its pid names no group,
+and ``killpg`` would raise ESRCH into the swallow that every reaper needs for
+the child that legitimately just exited. The hole would be silent.
+
 Machine discipline
 ------------------
 One measuring lane at a time: the full run executes only in the
@@ -317,7 +364,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 BITS = 3
 BASE_BATCHES = (1, 2, 8, 16)
 PROBE_BATCH_MAX = 16
-K_SHIP = 4.0  # ADR 0012: the shipped K over the three-class nine-name floor
+# The shipped K, imported rather than copied: a literal here would be a second
+# source for a number the verifier already owns, and this harness's whole STEP 4
+# is "what does the grid demand of the K that ships" (ADR 0012, ADR 0016).
+from kernelverify.schemas.native_ops import K_QUANT as K_SHIP  # noqa: E402
 
 ARTIFACT_DIR = Path("/Users/vlad/kernelverify/bench/.models/qwen3-4b-3bit-g64")
 OUT_PATH = Path(__file__).with_name(".cache") / "quant_serving_adequacy.json"
@@ -684,6 +734,19 @@ def footprint_line() -> str:
     return f"footprint {current:.2f} GB (peak {peak:.2f} GB); {rss_line()}"
 
 
+def summary_line(footprint_peak_gb: float, rss_peak_gb: float) -> str:
+    """The closing line of a run, from an explicit reading rather than a call.
+
+    It used to be `print(f"peak footprint: {rss_line()}")`, which labelled
+    itself `peak footprint` and printed `ru_maxrss` - the one number in the
+    whole log that a reader is most likely to trust and least able to act on.
+    Taking the two peaks as arguments names them at the call site and makes the
+    line testable without allocating 22 GB to produce one.
+    """
+    return (f"peak footprint: {footprint_peak_gb:.2f} GB; "
+            f"rss {rss_peak_gb:.2f} GB")
+
+
 # The modules a measured record's value passes through: the harness itself,
 # the runner that dispatches on the GPU, the device members and the contract
 # they implement, and the three standing bench modules whose functions this
@@ -777,9 +840,11 @@ from memory_guard import (  # noqa: E402
     EXIT_LOCK_HELD,
     EXIT_LOW_MEMORY,
     EXIT_NO_DEVICE,
+    EXIT_ORPHANED,
     BudgetExceeded,
     BudgetGuard,
     LowMemoryRefusal,
+    Orphaned,
     available_memory_gb,
     budget_gb_arg,
     machine_ram_gb,
@@ -889,6 +954,70 @@ def _child_death_reason(returncode: int) -> str:
     return f"died with exit {returncode}"
 
 
+def _reap(proc) -> None:
+    """Leave no live child behind.
+
+    The child's parent-pid check is the backstop for a parent that dies without
+    running this; this is the path for a parent that merely STOPS - a raised
+    refusal, a KeyboardInterrupt, a wall-cap timeout - where the child would
+    otherwise keep the GPU and keep allocating against a lock that no longer
+    exists.
+
+    SIGTERM before SIGKILL by convention, not because the child unwinds on it:
+    nothing here installs a handler, so the default disposition ends the
+    process without running a finally block or flushing stdout. The five-second
+    wait absorbs the normal lag between signal and reaped exit; a child still
+    alive after it gets the SIGKILL no process can ignore.
+
+    A child that has already exited is left alone, which does mean nothing
+    sweeps its group on that path. The group's only other member is transient -
+    the footprint self-report shells out to ``ps`` for its RSS half, bounded by
+    its own ten-second timeout - so the leak this can leave is one dying ``ps``,
+    not a worker holding the GPU. That judgement is the thing to revisit if
+    this child ever spawns a process that outlives a progress line.
+    """
+    if proc.poll() is not None:
+        return
+    _signal_child(proc, signal.SIGTERM)
+    try:
+        proc.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        _signal_child(proc, signal.SIGKILL)
+
+
+def _signal_child(proc, signum) -> None:
+    """The child's whole process group when it leads one, the child alone when
+    it does not.
+
+    The group is the target because anything the child spawns inherits it, and
+    the pgid naming that group is the child's own pid - true only because
+    start_new_session made the child a group leader. That flag is a
+    PRECONDITION, so it is read back and compared rather than assumed: drop it
+    and the child sits in OUR group, its pid names no group at all, and killpg
+    raises ESRCH - which a reaper must swallow, because the child it is chasing
+    may legitimately have just exited. The hole would therefore be silent, and
+    it is the exact hole this reaper exists to close.
+
+    Comparing the group is safe. PASSING the read-back value to killpg is the
+    lethal version, because with the flag dropped it names the parent's own
+    group and takes out the parent, its siblings and the foreground job.
+    """
+    try:
+        leads_own_group = os.getpgid(proc.pid) == proc.pid
+    except (ProcessLookupError, PermissionError):
+        return
+    try:
+        if leads_own_group:
+            os.killpg(proc.pid, signum)
+        else:
+            print(f"  reaper: child {proc.pid} does not lead its own process "
+                  f"group - start_new_session was dropped, so only the child "
+                  f"itself can be stopped", flush=True)
+            os.kill(proc.pid, signum)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
 def spawn_measurement(cell: str, task: dict, budget_gb: float,
                       wall_cap_s: float | None = None,
                       command: list | None = None) -> tuple[dict, dict]:
@@ -907,17 +1036,34 @@ def spawn_measurement(cell: str, task: dict, budget_gb: float,
     result_path = CHILD_DIR / _CHILD_RESULT_NAME
     task_path.parent.mkdir(parents=True, exist_ok=True)
     result_path.unlink(missing_ok=True)
+    # The parent stamps its OWN pid, rather than letting the child read
+    # getppid() for itself. The child's read happens after fork, exec, and a
+    # cold import of numpy and MLX - seconds, not milliseconds - and a parent
+    # that dies inside that window is already reparented by the time the child
+    # looks, so the child would capture the reparent pid and its orphan check
+    # could never fire again. That window is not a corner: Jetsam takes the
+    # largest process, and while a child is still importing, the parent (which
+    # holds the checkpoint and every measured record) is the larger one.
     task_path.write_text(json.dumps({**task, "cell": cell,
-                                     "budget_gb": budget_gb}))
+                                     "budget_gb": budget_gb,
+                                     "parent_pid": os.getpid()}))
     argv = list(command) if command is not None else [
         sys.executable, str(Path(__file__).resolve())]
     argv += ["--child-task", str(task_path), "--child-out", str(result_path)]
+    # start_new_session makes the child a session and process-group leader, so
+    # its pgid IS its pid. That is a PRECONDITION for the kill below, not a
+    # companion to it: without it the child shares OUR group, and signalling
+    # "the child's group" would signal ourselves, every sibling, and in a
+    # foreground run the whole job. It also means a terminal SIGINT no longer
+    # reaches the child, which is precisely why the parent must now clean up.
+    proc = subprocess.Popen(argv, start_new_session=True)
     try:
-        proc = subprocess.run(argv, timeout=wall_cap_s)
+        proc.wait(timeout=wall_cap_s)
     except subprocess.TimeoutExpired:
         raise ChildRefusal(cell, EXIT_CHILD_DEATH,
                            f"hit the {wall_cap_s:.0f}s wall cap")
     finally:
+        _reap(proc)
         task_path.unlink(missing_ok=True)
     if proc.returncode == EXIT_BUDGET_REFUSAL:
         raise ChildRefusal(cell, EXIT_BUDGET_REFUSAL,
@@ -949,6 +1095,29 @@ def refuse_child(exc: ChildRefusal, fingerprint: dict, steps: dict) -> int:
     return refuse(exc.exit_for_parent, str(exc), fingerprint, marked)
 
 
+class _GuardedSession:
+    """The guard, riding the one seam this file owns on the continuity path.
+
+    The continuity child hands its session to the device harness's measure(),
+    which takes no guard parameter and lives in a file another lane owns - so
+    the grid and probe children checked between records while the continuity
+    child checked nowhere, and an orphaned one ran its 64 GPU records to
+    completion against a lock its dead parent had already released. Every case
+    that loop measures asks the session for a compiled kernel first, so
+    checking here restores the same between-cases cadence without touching the
+    other lane's file.
+    """
+
+    def __init__(self, session, guard, cell: str):
+        self._session = session
+        self._guard = guard
+        self._cell = cell
+
+    def compiled(self, member: str, x_dtype: str):
+        self._guard.check(self._cell)
+        return self._session.compiled(member, x_dtype)
+
+
 def child_main(args) -> int:
     """The child half of the isolation protocol: run ONE measurement
     iteration, self-guard the budget between records, self-report footprint
@@ -956,7 +1125,13 @@ def child_main(args) -> int:
     holds it), no checkpoint (the parent owns it), fresh DeviceMemberSession
     per child by design (seconds of compile, ruled acceptable under D3)."""
     task = json.loads(Path(args.child_task).read_text())
-    guard = BudgetGuard(task["budget_gb"])
+    # The parent that owns the lock, the checkpoint and the results file, named
+    # by the parent itself before the fork. If getppid() stops matching it, we
+    # are an orphan and every record we go on to measure is unowned. Reading
+    # getppid() here instead would be too late to be true (spawn_measurement
+    # explains why), so a missing key is a hard failure rather than a fallback:
+    # a silently disabled orphan check is the whole defect.
+    guard = BudgetGuard(task["budget_gb"], parent_pid=task["parent_pid"])
     cell = task.get("cell", task["kind"])
     verbose = task.get("verbose", False)
     print(f"  child {cell}: start ({footprint_line()})", flush=True)
@@ -967,7 +1142,7 @@ def child_main(args) -> int:
         return EXIT_NO_DEVICE
     try:
         if task["kind"] == "continuity":
-            ok, detail = continuity_anchor(session)
+            ok, detail = continuity_anchor(_GuardedSession(session, guard, cell))
             payload = {"ok": ok, "detail": detail}
         elif task["kind"] == "probe":
             report = probe_batch_regimes(
@@ -981,6 +1156,27 @@ def child_main(args) -> int:
                 verbose=verbose)
         else:
             raise ValueError(f"unknown child task kind {task['kind']!r}")
+    except BudgetExceeded as exc:
+        print(f"  child {cell}: BUDGET REFUSAL - {exc}", flush=True)
+        return EXIT_BUDGET_REFUSAL
+    except Orphaned as exc:
+        # Named and numbered like every other refusal. Without this branch the
+        # orphan stop leaves a traceback and exit 1, and 1 already means
+        # measured-and-stopped - the coordinator would read the one condition
+        # that means "nothing was measured" as the one that means it was.
+        print(f"  child {cell}: ORPHAN STOP - {exc}", flush=True)
+        return EXIT_ORPHANED
+    # The last window: the work is finished but not yet published. A parent
+    # that died during the final record leaves an orphan holding a COMPLETE
+    # result, and publishing it is worse than losing it - a restarted run's
+    # child writes the same result path, and whichever write lands second is
+    # the one the new parent reads, so an unowned measurement could replace
+    # an owned one. Finished work belongs to a parent alive to read it.
+    try:
+        guard.check(f"{cell}: publish")
+    except Orphaned as exc:
+        print(f"  child {cell}: ORPHAN STOP - {exc}", flush=True)
+        return EXIT_ORPHANED
     except BudgetExceeded as exc:
         print(f"  child {cell}: BUDGET REFUSAL - {exc}", flush=True)
         return EXIT_BUDGET_REFUSAL
@@ -1171,11 +1367,15 @@ def probe_batch_regimes(shapes, session: DeviceMemberSession,
     Evaluates one (implementation, dtype) at a time across B = 1..16 and ANDs
     its pairwise matrix into the joint one, bounding residency at lm_head.
 
-    Every stage announces itself with its RSS: this step died three times
-    under SIGKILL with nothing in the log past the header, so the last line
-    printed has to name the shape and the implementation that was live.
-    ``guard`` (when given) is checked before each shape starts, so an
-    over-budget process refuses before the next cell rather than mid-way.
+    Every stage announces itself with its footprint: this step died three
+    times under SIGKILL with nothing in the log past the header, so the last
+    line printed has to name the shape and the implementation that was live.
+    ``guard`` (when given) is checked before each shape starts and again
+    between every (dtype, implementation) pair. Per-shape alone is not a
+    cadence for the child that runs this: a probe child holds exactly ONE
+    shape, so its single up-front check was the last one it would ever make,
+    and an orphaned probe ran every remaining evaluator against a lock its
+    dead parent had already released.
     """
     contract = QuantContract(scheme="mlx-affine", bits=BITS, group_size=GROUP_SIZE)
     report = {}
@@ -1183,7 +1383,7 @@ def probe_batch_regimes(shapes, session: DeviceMemberSession,
         if guard is not None:
             guard.check(f"probe {name} {d_out}x{d_in}")
         if verbose:
-            print(f"  {name} {d_out}x{d_in}: quantizing ({rss_line()})",
+            print(f"  {name} {d_out}x{d_in}: quantizing ({footprint_line()})",
                   flush=True)
         rng = np.random.default_rng(10_000 + PROBE_SEED)
         w = make_w(d_out, d_in, "normal-0.02", rng)
@@ -1195,7 +1395,7 @@ def probe_batch_regimes(shapes, session: DeviceMemberSession,
         carrier = _carrier(artefact)
         w_q, scales, biases = mlx_quantize_hoist(w)
         if verbose:
-            print(f"    hoists + carrier built ({rss_line()})", flush=True)
+            print(f"    hoists + carrier built ({footprint_line()})", flush=True)
         # rng order pinned: float32 then float16
         x16 = {d: make_x(PROBE_BATCH_MAX, d_in, _np_dtype(d), "unit", rng)
                for d in ("float32", "float16")}
@@ -1221,12 +1421,15 @@ def probe_batch_regimes(shapes, session: DeviceMemberSession,
                 "boundary-fp16-dequant": lambda xb: eval_boundary(xb, hoists.w16_32),
             }
             for impl_name, fn in evaluators.items():
+                if guard is not None:
+                    guard.check(f"probe {name} {dtype_name} {impl_name}")
                 outs = {B: fn(x_full[:B]) for B in range(1, PROBE_BATCH_MAX + 1)}
                 matrix &= match_matrix([outs])
                 del outs
                 if verbose:
-                    print(f"    {dtype_name} {impl_name} done ({rss_line()})",
+                    print(f"    {dtype_name} {impl_name} done ({footprint_line()})",
                           flush=True)
+        fp_now, fp_peak = phys_footprint_gb()
         current, peak = rss_gb()
         report[name] = {
             "g0_exact": True,
@@ -1234,6 +1437,7 @@ def probe_batch_regimes(shapes, session: DeviceMemberSession,
             "components": [sorted(c) for c in match_components(matrix)],
             "joins": coverage_joins(matrix, BASE_BATCHES),
             "weak_prefix_covered": weak_prefix_cover(matrix, BASE_BATCHES),
+            "footprint_gb": {"current": fp_now, "peak": fp_peak},
             "rss_gb": {"current": current, "peak": peak},
         }
         del hoists, carrier, w_q, scales, biases
@@ -1308,7 +1512,7 @@ def grid_iteration(name: str, d_out: int, d_in: int, draw: str, seed: int,
         }
         block.append((record, x, ref))
         if verbose:
-            print(f"    {label} done ({rss_line()})", flush=True)
+            print(f"    {label} done ({footprint_line()})", flush=True)
     for fault_name, w_fault32 in fault_dequants(artefact):
         for record, x, ref in block:
             record["faults"][fault_name] = err(
@@ -1342,7 +1546,7 @@ def measure_serving(shapes, batches, session: DeviceMemberSession,
                 records.extend(block["records"])
             if verbose:
                 print(f"    {name} {d_out}x{d_in} {draw} done "
-                      f"({len(records)} records, {rss_line()})", flush=True)
+                      f"({len(records)} records, {footprint_line()})", flush=True)
             if on_block is not None:
                 on_block(records)
     return {"records": records, "bit_exact": all(exactness),
@@ -1863,7 +2067,7 @@ def _locked_main(args) -> int:
     print("serving shapes: "
           + ", ".join(f"{n} {d_out}x{d_in}" for n, (d_out, d_in) in shapes))
     print(f"budget: {args.budget_gb:.1f} GB phys_footprint on a "
-          f"{machine_ram_gb():.1f} GB machine; start {rss_line()}")
+          f"{machine_ram_gb():.1f} GB machine; start {footprint_line()}")
 
     fingerprint = checkpoint_fingerprint(provenance, shapes)
     saved = read_checkpoint(CHECKPOINT_PATH, fingerprint) if args.resume else {}
@@ -2104,7 +2308,8 @@ def _run_measured_steps(args, shapes, spawn, saved, steps, resumed,
         "records": records,
     }, default=float))
     print(f"\nrecords: {OUT_PATH}")
-    print(f"peak footprint: {rss_line()}")
+    print(summary_line(footprint_peak_gb=phys_footprint_gb()[1],
+                       rss_peak_gb=rss_gb()[1]))
     if resumed:
         print(f"RESUMED steps (not re-measured in this process): {resumed}; "
               f"ADR 0013 must say so")
@@ -2116,7 +2321,7 @@ def _run_measured_steps(args, shapes, spawn, saved, steps, resumed,
               f"here - membership before K, renegotiated with the "
               f"coordinator, never resolved inside this harness")
         return 1
-    print(f"VERDICT: {'K=4 COVERS THE SERVING SHAPES - attestation holds' if attested else 'INADEQUATE somewhere - see the tables'}")
+    print(f"VERDICT: {f'K={K_SHIP:g} COVERS THE SERVING SHAPES - attestation holds' if attested else 'INADEQUATE somewhere - see the tables'}")
     return 0 if attested else 1
 
 
@@ -2127,13 +2332,36 @@ def _print_probe(probe: dict) -> None:
             continue
         components = p["components"]
         weak = p["weak_prefix_covered"]
-        rss = p.get("rss_gb")
-        rss_note = (f" [rss {rss['current']:.2f} GB, "
-                    f"peak {rss['peak']:.2f} GB]" if rss else "")
+        # Footprint leads and RSS trails, the same order and the SAME WORDING
+        # as every other progress line (I4). Both halves of each pair are
+        # printed: current answers "how big is this shape", peak answers "did
+        # something transient spike", and rss_gb's own docstring is explicit
+        # that only the pair answers the memory hypothesis.
+        #
+        # This line narrated RSS alone until the fresh-eyes review of
+        # 2026-08-17 found it hiding from the AST test, which sees rss_line()
+        # calls and not a dict formatted by hand. The first repair then
+        # printed the RSS PEAK under a bare `rss` label, the token every other
+        # line in the same stream uses for CURRENT - which is this file's own
+        # recorded mistake (a line LABELLED peak footprint while printing
+        # ru_maxrss) committed a second time, in the same function, one round
+        # apart. Hence: no bare labels, no dropped halves.
+        #
+        # footprint_gb is indexed, not .get(): every payload that reaches here
+        # has passed the g0_exact continue above, and probe_batch_regimes
+        # writes footprint_gb and rss_gb into the same dict literal. A missing
+        # key is a producer that stopped emitting it, and a KeyError says so
+        # at once - where a fallback would silently restore the RSS-alone
+        # narration this whole repair exists to remove.
+        fp, rss = p["footprint_gb"], p["rss_gb"]
+        mem_note = (f" [footprint {fp['current']:.2f} GB, "
+                    f"peak {fp['peak']:.2f} GB; "
+                    f"rss {rss['current']:.2f} GB, "
+                    f"peak {rss['peak']:.2f} GB]")
         print(f"  {name}: {len(components)} regime component(s) "
               f"{[f'{min(c)}..{max(c)}' for c in components]}, "
               f"joins {p['joins'] or 'none'}, "
-              f"weak-prefix covered {weak or 'none'}{rss_note}")
+              f"weak-prefix covered {weak or 'none'}{mem_note}")
 
 
 if __name__ == "__main__":

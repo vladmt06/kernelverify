@@ -8,6 +8,9 @@ dying at 39.5 GB footprint, so RSS survives only as a secondary print and no
 gate reads it.
 """
 
+import ast
+import inspect
+import json
 import math
 import os
 import struct
@@ -26,9 +29,11 @@ from calibrate_quant_serving import (
     EXIT_LOCK_HELD,
     EXIT_LOW_MEMORY,
     EXIT_NO_DEVICE,
+    EXIT_ORPHANED,
     BudgetExceeded,
     BudgetGuard,
     LowMemoryRefusal,
+    Orphaned,
     available_memory_gb,
     build_parser,
     machine_ram_gb,
@@ -62,6 +67,68 @@ def test_machine_ram_reading_is_plausible():
 
 
 # ---------------------------------------------------------------------------
+# T1b: what the progress lines SAY. The reader being truthful is not enough if
+# the narration prints the other number. Three SIGKILLs were narrated by lines
+# reporting RSS, which under-read a 52 GB footprint as 8 GB, so the log showed
+# an idle-looking run right up to the kill.
+# ---------------------------------------------------------------------------
+def test_no_progress_line_prints_rss_alone():
+    """Every print goes through footprint_line().
+
+    Checked against the syntax tree, not the text. A text scan gets this wrong
+    twice over: counting `rss_line()` reads 2 when the change is complete (the
+    definition line contains its own name, and footprint_line keeps one call to
+    carry RSS as its tail), and grepping lines that hold both `print(` and
+    `rss_line()` flags a docstring that QUOTES the old line. The tree answers
+    the question actually being asked: does any print statement, anywhere,
+    still reach rss_line?
+    """
+    tree = ast.parse(inspect.getsource(harness))
+    offenders = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "print"):
+            continue
+        for inner in ast.walk(node):
+            if (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
+                    and inner.func.id == "rss_line"):
+                offenders.append(node.lineno)
+    assert offenders == [], offenders
+
+    # and the demotion is real rather than a rename: the ONE surviving caller is
+    # footprint_line, which is what keeps RSS visible as a second number. Named
+    # rather than counted, because a count of 1 would also be satisfied by the
+    # call moving somewhere RSS leads again.
+    callers = set()
+    for outer in ast.walk(tree):
+        if not isinstance(outer, ast.FunctionDef):
+            continue
+        for inner in ast.walk(outer):
+            if (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
+                    and inner.func.id == "rss_line"):
+                callers.add(outer.name)
+    assert callers == {"footprint_line"}, callers
+
+
+def test_footprint_line_still_carries_rss_second():
+    """RSS is not deleted, it is demoted. A line that dropped it would lose the
+    comparison that shows the two readings diverging."""
+    line = harness.footprint_line()
+    assert line.startswith("footprint ")
+    assert "rss " in line
+    assert line.index("footprint") < line.index("rss")
+
+
+def test_the_final_summary_reports_the_footprint_peak_not_ru_maxrss():
+    """The closing line was labelled `peak footprint:` and printed ru_maxrss -
+    a mislabel, and the single most misleading number in the whole log."""
+    line = harness.summary_line(footprint_peak_gb=22.4, rss_peak_gb=2.4)
+    assert line.startswith("peak footprint: 22.4")
+    assert "rss 2.4" in line
+    assert line.index("footprint") < line.index("rss")
+
+
+# ---------------------------------------------------------------------------
 # T1: the budget guard. Refusal, never silent grid shrinking.
 # ---------------------------------------------------------------------------
 def test_budget_guard_refuses_over_budget_and_names_the_cell():
@@ -79,13 +146,348 @@ def test_budget_guard_passes_under_budget():
     assert guard.check("grid lm_head normal-0.02 s0") == 10.0
 
 
+# ---------------------------------------------------------------------------
+# T1c: the orphan hole. A child outlives a killed parent, keeps the GPU, and
+# keeps allocating - while the machine lock the PARENT held has already been
+# released by its death, so the next harness starts on top of it. The child
+# must notice and stop. getppid() is the signal: when the parent dies the
+# child is reparented, so the value it saw at startup stops being true.
+# ---------------------------------------------------------------------------
+def test_a_child_stops_at_the_next_record_once_its_parent_is_gone():
+    guard = BudgetGuard(24.0, reader=lambda: (1.0, 1.0),
+                        parent_pid=os.getppid() + 100000)  # never our real parent
+    with pytest.raises(Orphaned) as exc:
+        guard.check("grid lm_head normal-0.02 s0")
+    assert "lm_head" in str(exc.value), "the cell it died on must be named"
+
+
+def test_the_parent_names_itself_rather_than_letting_the_child_look(
+        child_dir, popen_spy):
+    """The window that made the whole orphan check a no-op.
+
+    The child used to read getppid() for itself, which happens after fork,
+    exec and a cold import of numpy and MLX. A parent dying inside those
+    seconds is already replaced by the time the child looks, so the child
+    would capture the REPARENT pid and then compare it against itself forever
+    - the check silently disabled in precisely the case it exists for, and
+    the likeliest case at that, since Jetsam takes the largest process and the
+    parent holds every measured record while the child holds nothing yet.
+    """
+    harness.spawn_measurement("cell", {"kind": "noop"}, 24.0,
+                              command=_cmd(_WRITES_RESULT % "3.5"))
+    assert [t["parent_pid"] for t in popen_spy["tasks"]] == [os.getpid()], (
+        "the task must carry the pid of the process that wrote it")
+
+
+def test_a_child_whose_parent_died_during_startup_still_notices(
+        tmp_path, monkeypatch, capsys):
+    """The same window, from the child's side, through child_main itself.
+
+    The task carries the pid of a parent that is already gone, so the live
+    getppid() never matches it and the first guard check refuses before a
+    single record is measured. This is the test the old design passes and the
+    fix fails FOR: a child that captured getppid() at startup would capture
+    the reparent pid, compare it against itself, measure everything, and
+    exit 0 - the task's stamp ignored entirely.
+    """
+    measured = []
+
+    def _grid(name, d_out, d_in, draw, seed, batches, session, guard, verbose):
+        for cell in ("record-0", "record-1"):
+            guard.check(cell)
+            measured.append(cell)
+        return {"records": measured}
+
+    monkeypatch.setattr(harness, "DeviceMemberSession", lambda: object())
+    monkeypatch.setattr(harness, "grid_iteration", _grid)
+
+    task_path, out_path = tmp_path / "task.json", tmp_path / "out.json"
+    task_path.write_text(json.dumps({
+        "kind": "grid", "name": "tiny", "d_out": 8, "d_in": 64,
+        "draw": "normal-0.02", "seed": 0, "batches": [1], "budget_gb": 24.0,
+        "cell": "grid tiny 8x64 normal-0.02 s0",
+        "parent_pid": 424242}))  # a parent that no longer exists
+
+    class _Args:
+        child_task = str(task_path)
+        child_out = str(out_path)
+
+    assert harness.child_main(_Args()) == EXIT_ORPHANED
+    assert measured == [], "nothing an unowned child measures may be kept"
+    assert not out_path.exists()
+    assert "ORPHAN STOP" in capsys.readouterr().out
+
+
+def test_a_child_orphaned_after_its_last_record_does_not_publish(
+        tmp_path, monkeypatch, capsys):
+    """The publish window: work finished, result not yet written.
+
+    A parent dying during the FINAL record used to leave an orphan that
+    completed, published, and exited 0 - and its late write to the shared
+    result path could replace a restarted run's owned result. The work here
+    completes untouched; only the publish is refused.
+    """
+    measured = []
+
+    def _grid(name, d_out, d_in, draw, seed, batches, session, guard, verbose):
+        for cell in ("record-0", "record-1"):
+            guard.check(cell)
+            measured.append(cell)
+        return {"records": measured}
+
+    # Calls 1 and 2 clear both records; call 3 is the publish gate, by which
+    # time the parent is gone.
+    real_getppid, calls = os.getppid, []
+
+    def _getppid():
+        calls.append(None)
+        return real_getppid() if len(calls) <= 2 else 1
+
+    monkeypatch.setattr(harness, "DeviceMemberSession", lambda: object())
+    monkeypatch.setattr(harness, "grid_iteration", _grid)
+    monkeypatch.setattr(harness.os, "getppid", _getppid)
+
+    task_path, out_path = tmp_path / "task.json", tmp_path / "out.json"
+    task_path.write_text(json.dumps({
+        "kind": "grid", "name": "tiny", "d_out": 8, "d_in": 64,
+        "draw": "normal-0.02", "seed": 0, "batches": [1], "budget_gb": 24.0,
+        "cell": "grid tiny 8x64 normal-0.02 s0",
+        "parent_pid": real_getppid()}))
+
+    class _Args:
+        child_task = str(task_path)
+        child_out = str(out_path)
+
+    assert harness.child_main(_Args()) == EXIT_ORPHANED
+    assert measured == ["record-0", "record-1"], "the work itself finished"
+    assert not out_path.exists(), (
+        "an orphan published a result nobody owns")
+    assert "publish" in capsys.readouterr().out, (
+        "the stop must name the publish gate it refused at")
+
+
+def test_the_probe_checks_its_guard_between_every_evaluator(monkeypatch):
+    """A probe child holds exactly ONE shape, so the old per-shape check was
+    the last it would ever make: an orphaned probe ran every remaining
+    (dtype, implementation) pair against a lock its dead parent had released.
+    The cadence has to live INSIDE the shape.
+    """
+    checked = []
+
+    class _SpyGuard:
+        def check(self, cell):
+            checked.append(cell)
+            return 1.0
+
+    class _Hoists:
+        w32 = w_lut32 = qg32 = scales32 = biases32 = w16_32 = None
+
+    # Signatures differ across evaluators (the device one takes the session
+    # first), so the stub finds the batch array by its shape wherever it sits.
+    zeros = lambda *a, **k: np.zeros(
+        (next(x for x in a if hasattr(x, "shape")).shape[0], 8), np.float32)
+    for fn in ("eval_pairwise", "eval_serial_chunked", "eval_lut",
+               "eval_factored_groups", "eval_factored_serial",
+               "eval_block_tiled", "eval_boundary", "mlx_qmm_heldout",
+               "_device_member_output"):
+        monkeypatch.setattr(harness, fn, zeros)
+    monkeypatch.setattr(harness, "verify_against_mlx",
+                        lambda w, contract: (object(), True))
+    monkeypatch.setattr(harness, "ArtefactHoists", lambda a: _Hoists())
+    monkeypatch.setattr(harness, "_carrier", lambda a: {})
+    monkeypatch.setattr(harness, "mlx_quantize_hoist",
+                        lambda w: (None, None, None))
+    monkeypatch.setattr(harness, "serial_chunk_rows", lambda *a: 1)
+
+    harness.probe_batch_regimes([("tiny", (8, 64))], session=object(),
+                                verbose=False, guard=_SpyGuard())
+
+    # Exact, not a floor. A `>= 20` version of this passed while the single
+    # longest-running evaluator went unchecked - four checks of slack is
+    # wider than a whole evaluator, and mlx-on-device is exactly where an
+    # orphan burns the most GPU. Every (dtype, implementation) pair must be
+    # checked once, so the two dtypes must agree on the set.
+    per_pair = [c.split() for c in checked if "float" in c]
+    by_dtype = {}
+    for cell in per_pair:
+        by_dtype.setdefault(cell[-2], set()).add(cell[-1])
+
+    assert set(by_dtype) == {"float32", "float16"}, (
+        f"a dtype ran with no checks at all: {sorted(by_dtype)}")
+    assert by_dtype["float32"] == by_dtype["float16"], (
+        f"the dtypes disagree on which evaluators were checked: "
+        f"{by_dtype['float32'] ^ by_dtype['float16']}")
+    assert len(per_pair) == 2 * len(by_dtype["float32"]), (
+        f"{len(per_pair)} checks for "
+        f"{2 * len(by_dtype['float32'])} pairs: some pair was skipped or "
+        f"checked twice")
+    assert {"mlx-on-device", "boundary-fp16-dequant"} <= by_dtype["float32"], (
+        "the held-out evaluators are the longest-running ones and the most "
+        "expensive to leave unguarded")
+
+
+def test_the_probe_summary_names_every_memory_number_it_prints(capsys):
+    """The probe summary narrated RSS ALONE until 2026-08-17: it formats a
+    dict by hand, so the AST test that bans rss_line() inside print never saw
+    it. Behavioural instead of syntactic, because the lie was in the output.
+
+    The first repair then printed the RSS PEAK under a bare `rss` label - the
+    token every other line uses for CURRENT - and dropped current entirely.
+    That is this file's own recorded mistake a second time, so the four
+    numbers are given four distinct values here and each is pinned to the
+    word in front of it.
+    """
+    harness._print_probe({"lm_head": {
+        "g0_exact": True, "components": [[1, 2]], "joins": [],
+        "weak_prefix_covered": [],
+        "footprint_gb": {"current": 21.4, "peak": 22.0},
+        "rss_gb": {"current": 2.4, "peak": 9.9}}})
+    line = capsys.readouterr().out
+    assert "footprint 21.40 GB, peak 22.00 GB" in line, (
+        "the Jetsam number leads, and its peak is named as a peak")
+    assert "rss 2.40 GB, peak 9.90 GB" in line, (
+        "RSS trails with BOTH halves, worded exactly as rss_line() words "
+        "them - a bare `rss` carrying the peak is the mislabel this pins")
+    assert line.index("footprint") < line.index("rss"), (
+        "RSS may trail the footprint, never lead it")
+
+
+def test_a_probe_payload_missing_its_footprint_fails_loudly(capsys):
+    """No silent fallback. A producer that stopped emitting footprint_gb must
+    raise here, because the alternative - quietly reverting to the RSS-alone
+    line - is the exact regression the repair above removed, and a green
+    suite would hide it."""
+    with pytest.raises(KeyError):
+        harness._print_probe({"lm_head": {
+            "g0_exact": True, "components": [[1, 2]], "joins": [],
+            "weak_prefix_covered": [],
+            "rss_gb": {"current": 2.4, "peak": 9.9}}})
+
+
+def test_the_continuity_child_checks_its_guard_between_cases(
+        tmp_path, monkeypatch):
+    """The continuity path was the one child with NO checks at all.
+
+    It hands its session to the device harness's measure(), which takes no
+    guard parameter, so an orphaned continuity child ran all 64 GPU records to
+    completion against a lock its dead parent had released. The guard now
+    rides the session: every case asks it for a compiled kernel first, and
+    that is where the refusal fires.
+    """
+    asked = []
+
+    class _Session:
+        def compiled(self, member, x_dtype):
+            asked.append(member)
+            return object()
+
+    def _anchor(session):
+        for member in ("device-serial", "device-pairwise", "device-simd"):
+            session.compiled(member, "float32")
+        return True, "3 records reproduced exactly"
+
+    monkeypatch.setattr(harness, "DeviceMemberSession", _Session)
+    monkeypatch.setattr(harness, "continuity_anchor", _anchor)
+
+    task_path, out_path = tmp_path / "task.json", tmp_path / "out.json"
+    task_path.write_text(json.dumps({
+        "kind": "continuity", "budget_gb": 24.0, "cell": "continuity",
+        "parent_pid": 424242}))  # a parent that no longer exists
+
+    class _Args:
+        child_task = str(task_path)
+        child_out = str(out_path)
+
+    assert harness.child_main(_Args()) == EXIT_ORPHANED
+    assert asked == [], "an unowned continuity child still reached the GPU"
+    assert not out_path.exists()
+
+
+def test_an_orphaned_child_stops_through_child_main_and_writes_nothing(
+        tmp_path, monkeypatch, capsys):
+    """The whole orphan path, not just the guard that starts it.
+
+    The guard's own test proves Orphaned is RAISED; this proves child_main
+    CATCHES it. Until it did, the exception propagated out of child_main and
+    the run ended in a traceback and exit 1 - and 1 already means
+    measured-and-stopped, so the one code meaning "nothing was measured" read
+    as the one meaning it was.
+    """
+    measured = []
+
+    def _grid(name, d_out, d_in, draw, seed, batches, session, guard, verbose):
+        for cell in ("record-0", "record-1", "record-2"):
+            guard.check(cell)
+            measured.append(cell)
+        return {"records": measured}
+
+    # The parent dies after the first record: getppid stops matching the pid
+    # the task carries, which is precisely what reparenting looks like from
+    # inside the child. Every call is a guard check now that child_main takes
+    # the parent's pid from the task rather than looking it up, so call 1
+    # clears the first record and call 2 is the death.
+    real_getppid, calls = os.getppid, []
+
+    def _getppid():
+        calls.append(None)
+        return real_getppid() if len(calls) <= 1 else 1
+
+    monkeypatch.setattr(harness, "DeviceMemberSession", lambda: object())
+    monkeypatch.setattr(harness, "grid_iteration", _grid)
+    monkeypatch.setattr(harness.os, "getppid", _getppid)
+
+    task_path, out_path = tmp_path / "task.json", tmp_path / "out.json"
+    task_path.write_text(json.dumps({
+        "kind": "grid", "name": "tiny", "d_out": 8, "d_in": 64,
+        "draw": "normal-0.02", "seed": 0, "batches": [1], "budget_gb": 24.0,
+        "cell": "grid tiny 8x64 normal-0.02 s0",
+        "parent_pid": real_getppid()}))
+
+    class _Args:
+        child_task = str(task_path)
+        child_out = str(out_path)
+
+    assert harness.child_main(_Args()) == EXIT_ORPHANED
+    assert measured == ["record-0"], "it kept measuring after it was orphaned"
+    assert not out_path.exists(), "an orphaned child must leave no result behind"
+    out = capsys.readouterr().out
+    assert "ORPHAN STOP" in out and "record-1" in out, (
+        "the stop must name itself and the cell it died on")
+
+
+def test_a_child_whose_parent_is_alive_keeps_going():
+    guard = BudgetGuard(24.0, reader=lambda: (1.0, 1.0), parent_pid=os.getppid())
+    assert guard.check("grid lm_head normal-0.02 s0") == 1.0
+
+
+def test_the_parent_side_guard_has_no_parent_to_lose():
+    """The same guard runs in the parent's own in-process path, where an
+    orphan check would be meaningless - and would fire on any process whose
+    own parent exits, which is every detached run."""
+    guard = BudgetGuard(24.0, reader=lambda: (1.0, 1.0))
+    assert guard.check("probe lm_head") == 1.0
+
+
 def test_refusal_exit_codes_are_distinct_and_leave_the_existing_ones_alone():
-    codes = {EXIT_BUDGET_REFUSAL, EXIT_LOCK_HELD, EXIT_LOW_MEMORY,
-             EXIT_CHILD_DEATH, EXIT_NO_DEVICE}
-    assert len(codes) == 5
-    assert not codes & {0, 1, 2}, (
+    # Derived from the module, never hand-copied. Two rounds of review hit
+    # this same test: the first version listed six of the eight codes, so
+    # EXIT_ORPHANED = 8 would have passed while aliasing a precondition
+    # refusal; listing all eight fixed that instance and left the CLASS
+    # alone, since the ninth code added would alias just as silently.
+    # Reading the table itself is the only version that stays true.
+    import memory_guard
+    table = {name: value for name, value in vars(memory_guard).items()
+             if name.startswith("EXIT_")}
+    assert len(set(table.values())) == len(table), (
+        f"two refusals share an exit code, so the coordinator cannot tell "
+        f"them apart: {sorted(table.items(), key=lambda kv: kv[1])}")
+    assert not set(table.values()) & {0, 1, 2}, (
         "0 and 1 already mean attested/measured-and-stopped, and 2 is "
         "argparse's own exit - a gate sharing it is unreadable")
+    # and the codes this harness itself returns are all in that table
+    assert {EXIT_BUDGET_REFUSAL, EXIT_LOCK_HELD, EXIT_LOW_MEMORY,
+            EXIT_CHILD_DEATH, EXIT_NO_DEVICE,
+            EXIT_ORPHANED} <= set(table.values())
 
 
 # ---------------------------------------------------------------------------
@@ -578,6 +980,98 @@ def test_child_exit_zero_without_result_is_a_death(child_dir):
                                   budget_gb=24.0, command=_cmd("pass"))
     assert exc.value.exit_for_parent == EXIT_CHILD_DEATH
     assert "no result" in exc.value.reason
+
+
+@pytest.fixture
+def popen_spy(monkeypatch):
+    """Every child the harness spawns: the kwargs it asked for, the task file
+    it was handed, and the process it got back. None of the three is reachable
+    from spawn_measurement's return value, and all three are what the
+    child-lifetime tests are about. The task is read HERE because this is the
+    only moment it exists - the parent deletes it in the same finally that
+    reaps the child - and it is the moment the child reads it too."""
+    seen = {"kwargs": [], "tasks": [], "procs": []}
+    real_popen = harness.subprocess.Popen
+
+    def spy(argv, **kwargs):
+        seen["kwargs"].append(kwargs)
+        if "--child-task" in argv:
+            seen["tasks"].append(json.loads(
+                Path(argv[argv.index("--child-task") + 1]).read_text()))
+        proc = real_popen(argv, **kwargs)
+        seen["procs"].append(proc)
+        return proc
+
+    monkeypatch.setattr(harness.subprocess, "Popen", spy)
+    return seen
+
+
+def test_the_child_is_spawned_into_its_own_session(child_dir, popen_spy):
+    """start_new_session is what makes the group kill target the child alone.
+
+    Pinned because the two halves are strictly ordered: without the session,
+    the child shares the parent's process group, its pid names no group, and
+    the reaper falls back to signalling the one process - so anything the
+    child spawned would survive it.
+    """
+    harness.spawn_measurement("cell", {"kind": "noop"}, 24.0,
+                              command=_cmd(_WRITES_RESULT % "3.5"))
+    assert [kw.get("start_new_session") for kw in popen_spy["kwargs"]] == [True]
+
+
+def test_the_reaper_will_not_killpg_a_child_that_does_not_lead_its_group(
+        monkeypatch):
+    """The one line that could kill the whole foreground job.
+
+    killpg(child.pid) names the child's group only while the child LEADS one.
+    Drop start_new_session and the child sits in our group instead, its pid
+    naming no group at all - so the reaper reads the group back, sees the
+    child is not its leader, and signals that one process rather than a pgid
+    nobody meant.
+
+    The child here is a real process spawned without the flag, because that is
+    a real kernel state; the earlier version of this test fabricated a proc
+    whose pid equalled our own pgid, which the kernel cannot produce (a pgid
+    is reserved while its group has members, and we are a member of ours), so
+    it certified the guard from a state production could never enter.
+    """
+    killed_groups = []
+    monkeypatch.setattr(harness.os, "killpg",
+                        lambda pgid, sig: killed_groups.append(pgid))
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert os.getpgid(proc.pid) != proc.pid, (
+            "this child must share OUR group for the test to mean anything")
+        harness._reap(proc)
+        assert killed_groups == [], "the reaper signalled a group it does not lead"
+        assert proc.poll() is not None, (
+            "refusing to killpg must not mean refusing to stop the child")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+def test_a_parent_that_stops_does_not_leave_the_child_running(child_dir,
+                                                              popen_spy):
+    """The hole itself. A child outliving its parent keeps the GPU and keeps
+    allocating, while the machine lock the parent held was released by its
+    death - so the next harness starts on top of it.
+
+    This also pins a behaviour change the Popen switch introduced: `subprocess
+    .run` killed its child on timeout, `proc.wait(timeout=)` does not. Without
+    the reaper the wall-cap path would leak a live child on every refusal.
+    """
+    with pytest.raises(harness.ChildRefusal):
+        harness.spawn_measurement("cell", {"kind": "noop"}, 24.0,
+                                  command=_cmd("import time\ntime.sleep(60)\n"),
+                                  wall_cap_s=0.5)
+
+    spawned = popen_spy["procs"]
+    assert len(spawned) == 1
+    assert spawned[0].poll() is not None, (
+        "the wall-capped child is still running: the refusal returned and "
+        "left it holding the machine")
 
 
 def test_wall_capped_child_is_a_death_naming_the_cap(child_dir):
