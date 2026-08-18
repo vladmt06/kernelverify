@@ -1,0 +1,116 @@
+# The K=6 meeting point: does routing a verification step buy anything?
+
+Status: written 2026-08-18.
+Sections 1 to 5 fix the method and the outcomes and were composed before the harness was run.
+They were also committed in the SAME commit as the harness (`ecaa676`), so the history does not by itself evidence that they preceded the code, and a later reader should read that ordering as asserted rather than proven.
+The A/B re-run recorded in the findings doc the same night did split its pre-registration into its own commit (`62b06f9`, half an hour before the run), which is the discipline this document should have followed and did not.
+
+## 1. The question
+
+A speculative decoder drafts K tokens and verifies them in one pass.
+At K = 6 that pass presents 7 tokens of one stream to every projection, shape (1, 7, d_in).
+This repo's `wide_qmv` kernel routes M = 5..9 and the binding A/B of 2026-08-17 measured it 14.69% faster than stock at M = 6 and 15.65% at M = 8, so M = 7 sits inside the window and between two wins.
+
+The gate refuses that shape today.
+`_RoutedLinear._ineligible` returns `prefill-L{n}` for any 3-D input whose sequence length is not 1, before it computes M or consults `should_dispatch`, so a verification step falls back to stock while the A/B's B = 7 cell - the same (7, d_in) matmul, spelled (7, 1, d_in) - routes.
+
+The question this spike answers is narrow and it is NOT "is speculative decoding faster".
+It is: **if the gate let the verification shape through, would the step get faster?**
+
+## 2. What is already known, and must not be re-derived
+
+- The kernel does identical work for both spellings. `_fused` flattens with `x.reshape(-1, d_in)` before dispatch, so (1, 7, d_in) and (7, 1, d_in) produce the same kernel call on the same array. There is therefore NO kernel-level question here and this spike must not pretend to measure one.
+- What differs is everything around the projection: a 7-token step has 7 query positions against the KV cache where a 7-stream step has one each. The projections are the same; attention and cache handling are not.
+- So the only honest question is at the step level, and the answer could be a win, a null, or a loss even though the kernel is faster in isolation.
+
+## 3. Method
+
+One model (the pinned 3-bit artifact), one stream, a cache primed by a prompt, then repeated 7-token forward passes - the shape a K = 6 verification produces.
+
+Two arms, interleaved within every round so drift cannot land on one of them:
+
+- arm S (spec-routed): projections routed through `wide_qmv` when the flattened M is in the routed window, sequence spelling allowed.
+- arm T (stock): the same model, unpatched.
+
+The spike installs its OWN interception, not `serve_sub4bit`'s.
+`bench/serve_sub4bit.py` is the harness whose grid was re-measured on 2026-08-17 and it is left untouched, so this spike cannot move a published number by editing the thing that produced it.
+
+Fixed before running: 5 rounds, the same round count the A/B registers; median over rounds; per-arm spread reported and a cell withheld if either arm's spread exceeds the win it claims.
+
+## 4. Pre-registered outcomes
+
+- **GO**: arm S beats arm T by more than both arms' spread. The eligibility rule is worth changing under its own pre-registration, and a draft/verify loop becomes worth building.
+- **NO-GO**: arm S is at or below arm T beyond spread. The meeting point is refuted at the step level despite the kernel winning in isolation, the finding is recorded, and the K = 6 branch is closed for a measured reason rather than an argued one.
+- **INCONCLUSIVE**: the difference sits inside the spread. Recorded as inconclusive and NOT read as either outcome; the honest next move would be more rounds, not a re-reading of these.
+
+The kernel's isolated win at M = 5..9 does NOT license reading a null here as a win.
+If the step does not get faster, the step does not get faster, and no amendment may explain that away by pointing at the projection-level number.
+
+## 5. What this spike does not claim
+
+It does not measure acceptance rates, drafting cost, or end-to-end speculative-decode throughput.
+Those need a draft model and a draft/verify loop, neither of which exists here, and both of which are only worth building if this comes back GO.
+
+## 6. Result
+
+Measured by `bench/spike_spec_verify.py`, detached runner, 2026-08-18 00:21 UTC, exit 0, AC power, display asleep, five consecutive clean idle samples before the start.
+Two attempts, recorded the way section 9 of the findings doc records its own: attempt 1 at 00:16 UTC CRASHED before any timing, on `TypeError: 'BudgetGuard' object is not callable` at the opening budget check, and attempt 2 at 00:21 UTC is the run above.
+The crash was a wiring defect in the harness rather than anything measured, and it took no timing with it, but a run table that omits a failed attempt is the kind of record this repo has decided not to keep.
+That run also had no closing idle sample: `check_idle_after` was added afterwards, at the merge gate that reviewed this document, so the eight seconds of timing above are covered by the opening window only.
+Same pinned 3-bit artifact and machine fingerprint as the 2026-08-17 A/B.
+
+**Verdict: GO.**
+
+| quantity | value |
+|---|---|
+| arm S, spec-routed, median | 33.711 ms |
+| arm T, stock, median | 39.252 ms |
+| ratio stock/spec | 1.1644 |
+| gain, throughput (`stock / spec - 1`) | 16.44% |
+| the same gain read as cost (`(stock - spec) / stock`) | 14.12% |
+| arm S spread | 0.327% |
+| arm T spread | 0.280% |
+| noise floor | 0.327% |
+
+The gain is 50 times the noise floor, so the pre-registered INCONCLUSIVE branch does not apply and the NO-GO branch is refuted.
+
+The premise held too, and it was checked before the timing rather than assumed.
+The premise probe runs two verification passes, a compile warm-up and one timed step, and they routed 504 calls across 252 wrapped sites: every site, in both passes.
+Every fallback in that probe was the 64-token prompt prefill, 252 of them, refused by name as `m-64-outside-dispatch-<shape>`.
+That is the relaxed rule behaving as TODOS argued it would: the verification shape opens, and real prefill is still refused - not by a blunt sequence check, but by `should_dispatch` on the merits, because a 64-token prefill is far outside the routed window of 5..9.
+
+The number sits beside evidence collected independently and earlier, and the comparison has to be stated carefully.
+The 2026-08-17 A/B's binding grid measured 14.69% at M = 6 and 15.65% at M = 8 in the BATCH spelling; this run measures 16.44% at M = 7 in the SEQUENCE spelling.
+An earlier draft of this paragraph called those three points a monotone trend with M = 7 bracketed by its neighbours, and the numbers refute it: 16.44% is ABOVE both neighbours, so the points do not lie on a monotone curve in M and M = 7 is not bracketed by anything.
+It also quoted 14.61% and 15.64%, which are the cache-fix confirmation re-run's ratios, not the published grid's; section 9 of the findings doc records that re-run as confirmation and says section 10's verdicts stand as written, so the published grid is the number to cite.
+What the three points do agree on is sign and order of magnitude: three wins between 14% and 17%, from two harnesses, at three widths inside the routed window.
+The meeting-point argument predicted a win at M = 7 and a win is what was measured, but it predicted nothing about the size, and nothing here explains why the sequence spelling beats both batch neighbours instead of sitting between them.
+That gap is an open question about the two harnesses rather than a result, and it is recorded as one.
+
+### Two deviations from sections 1 to 5, named rather than smoothed over
+
+Section 3 says a cell is "withheld if either arm's spread exceeds the win it claims".
+The harness does not withhold anything: it prints every quantity and labels the cell INCONCLUSIVE, which is the same decision reported differently and is the more useful behaviour, since a withheld number cannot be argued with while a labelled one can.
+Recorded here rather than by editing section 3, because a pre-registration that is rewritten to match its code has stopped being one.
+
+Section 4's three outcomes are the only ones the verdict arithmetic produces, but the harness has a fourth exit that is not a verdict: if the verification shape routes nothing, it stops before timing and returns 1.
+That is a premise check rather than a result, and no reading of the outcomes depends on it.
+
+### What this does NOT establish
+
+It does not say speculative decoding is faster end to end.
+Drafting costs time and acceptance is fractional; arXiv 2607.17283's own measurement is that three of five configurations DECELERATE, and nothing here contradicts that.
+This measures one half of the ledger and the other half needs a draft model and an acceptance rate.
+The half measured is the verification step, and its size has to be spelled the way it was computed: 16.44% is `stock / spec - 1`, a THROUGHPUT speedup, so the step runs 16.44% faster.
+Its cost falls by less, `(stock - spec) / stock` = 14.12%, and an earlier draft of this section called it "16.44% cheaper", which mixes the two and overstates the saving by 2.3 points.
+The A/B's neighbours quoted above are `ratio - 1` as well, so 14.69 / 16.44 / 15.65 are comparable to each other; none of them is a cost reduction.
+
+The timed block is also a fixed 7-token pattern replayed against a growing cache, where a real decoder verifies different drafted tokens each round.
+The projections see the same shapes either way, which is what the routing decision turns on, but a full loop is what would settle the end-to-end question.
+
+### What it licenses next, per section 4
+
+The eligibility rule is worth changing under its own pre-registration: `_RoutedLinear._ineligible` should compute the flattened M and let `should_dispatch` decide, rather than refusing every sequence step before it asks.
+That change re-opens a harness whose grid was re-measured on 2026-08-17, so it needs its own pre-registration and a re-run of the A/B to show the published grid is unmoved - the same discipline the `mx.clear_cache()` fix went through, and for the same reason.
+
+A draft/verify loop is now worth building, which it was not before this run.

@@ -4,8 +4,12 @@ __pycache__/
 .pytest_cache/
 .hypothesis/
 bench/.cache/
-bench/.baselines/detached.log
-bench/.baselines/detached_status.json
+# Detached-run artifacts. Since I2 the runner writes one pair per harness
+# (detached-<stem>.log, detached_status-<stem>.json), so the patterns are
+# globs: the two bare names below predate that and matched nothing after it,
+# leaving live run artifacts untracked where a careless add would sweep them in.
+bench/.baselines/detached*.log
+bench/.baselines/detached_status*.json
 
 # Spartan AI config (contains API keys)
 .spartan/ai.env

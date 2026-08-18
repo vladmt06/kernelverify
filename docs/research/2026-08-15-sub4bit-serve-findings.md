@@ -285,6 +285,41 @@ The reason is a defect in the harness rather than a property of the measurement.
 30.0 GB is the same ceiling the serving calibration already runs under and leaves roughly 8.6 GB of headroom on this 38.65 GB machine, so it widens the guard without disarming it.
 The fix is to clear the cache at each cell boundary and restore the 24.0 GB default; it is queued in `TODOS.md` as its own change and is not made here, because editing the harness between the MDE and the A/B would have unbound the two.
 
+### Amendment, 2026-08-17: the cache fix is made, and this re-run is pre-registered before it is taken
+
+The defect named above is now fixed: `mde()` and `ab()` call `mx.clear_cache()` at each cell boundary, immediately BEFORE the guard reads the footprint, and the 24.0 GB default is pinned by a test.
+Section 3's registered budget therefore applies again, and this re-run is taken at that default with no flag.
+
+The outcome is pre-registered here, before the run, because a re-run of a grid whose numbers are already published can be rationalised after the fact in either direction.
+
+- The budget must hold. Eight cells complete at the registered 24.0 GB default and the run exits 0. If it refuses at 24.0 GB the fix did not work and the grid below stands unchanged.
+- The in-zone ratios must not move beyond the spread this document already records. The binding run's arm1/arm2 at B = 5, 6 and 8 were 1.0570, 1.1469 and 1.1565, and run 2 agreed to within 0.0014. A re-run landing inside that band confirms the fix is numerically inert and section 10's verdicts stand as written.
+- A ratio that moves outside that band is a FINDING, not a tuning knob, and it is the one outcome that changes the verdicts. `mx.clear_cache()` discards warmed allocations, so the first dispatch of each cell may pay an allocation cost the published grid did not. The per-cell warm-up already precedes the timed rounds, which is why inertness is the expectation rather than the hope - but if the numbers move, this document records the new grid and section 10 is re-derived from it. No amendment may explain a moved ratio away.
+- The verdict on `wide_qmv` staying in the pack is NOT reopened by this run unless a ratio crosses 1.0 or its cell's noise floor. This run tests the harness, not the kernel.
+
+### Result of the 2026-08-17 re-run, against the outcome pre-registered above
+
+Measured by `bench/serve_sub4bit.py --ab`, detached runner, 2026-08-17 23:28 to 2026-08-18 00:01 UTC, 33 minutes, exit 0, AC power, no browser, display asleep, five consecutive clean idle samples before the start.
+No `--budget-gb` flag: the registered 24.0 GB default, which is the point of the run.
+Same pinned artifacts and the same machine fingerprint as the binding run above, so the two are directly comparable.
+
+The budget held.
+All eight cells completed at 24.0 GB where run 1 refused at B = 12 with 25.72 GB against that same default, so the ratchet the fix targets is gone and the deviation to 30.0 GB is retired.
+
+The three in-zone ratios landed inside the pre-registered band, so the fix is numerically inert and section 10's verdicts stand unchanged.
+
+| B | binding run (published) | re-run after the fix | delta | inside the +/- 0.0014 band |
+|---|---|---|---|---|
+| 5 | 1.0570 | 1.0576 | +0.0006 | yes |
+| 6 | 1.1469 | 1.1461 | -0.0008 | yes |
+| 8 | 1.1565 | 1.1564 | -0.0001 | yes |
+
+The concern that motivated the band did not materialise.
+`mx.clear_cache()` discards warmed allocations, so the first dispatch of each cell could have paid an allocation cost the published grid did not; the per-cell warm-up that already precedes the timed rounds absorbed it, and the largest movement is 0.0008 against noise floors of 0.26%, 0.12% and 0.07%.
+
+Everything else the A/B asserts is unchanged: dispatch counts exact at all three in-zone cells (160020 fused calls against 160020 expected), zero hard fallbacks, `primary_verdict` "win" at B = 5, 6 and 8 and "null" everywhere else, and every MDE cell's expected gain cleared its own noise floor.
+The batch-1 baseline is unchanged at 64.49 tokens per second per stream for arm 1 and 64.40 for arm 2.
+
 Reproducibility, stated at the grade the evidence actually carries: run 3 is the binding run and the only one, and run 2 is a NON-BINDING run whose in-zone ratios agree with it to 1.0566 vs 1.0570, 1.1455 vs 1.1469 and 1.1558 vs 1.1565.
 An earlier draft of this paragraph called the two "independent quiet windows", which contradicted this section's own run table three paragraphs above: the harness marked run 2 non-binding because its closing idle sample caught WindowServer at 15% CPU, and section 3 registers that a timing mode's window must be clean before AND after.
 The agreement is therefore corroboration that the harness reproduces itself, not a second measurement, and every verdict below rests on run 3 alone.

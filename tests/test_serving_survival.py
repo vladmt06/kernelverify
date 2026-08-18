@@ -21,6 +21,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from conftest import requires_metal
 import calibrate_quant_serving as harness
 from calibrate_quant_serving import (
     DEFAULT_BUDGET_GB,
@@ -1291,3 +1292,222 @@ def test_real_child_grid_iteration_round_trips_bit_exactly(child_dir):
                                   session)
     assert len(payload["records"]) == len(ours["records"]) == 8
     _assert_bit_identical(payload["records"], ours["records"])
+
+
+# ---------------------------------------------------------------------------
+# The A/B harness's own budget discipline. These read serve_sub4bit's SOURCE
+# rather than importing it: that module imports mlx.nn, which aborts the
+# interpreter where no device can be created, and the property under test is
+# structural, so it should hold on any machine.
+# ---------------------------------------------------------------------------
+SERVE_SRC = (BENCH_DIR / "serve_sub4bit.py").read_text()
+
+
+def _cell_loop_order(func_name: str) -> tuple[int, int]:
+    """(index of mx.clear_cache(), index of guard(...)) in the cell loop.
+
+    The cell loop is the `for` whose body calls guard() with an f-string - the
+    per-B budget check. Returns the statement positions so the caller can pin
+    the ORDER, which is the whole property: clearing after the guard reads the
+    footprint would leave the guard measuring the previous cell's dead buffers.
+    """
+    tree = ast.parse(SERVE_SRC)
+    func = next(n for n in ast.walk(tree)
+                if isinstance(n, ast.FunctionDef) and n.name == func_name)
+    for loop in (n for n in ast.walk(func) if isinstance(n, ast.For)):
+        guard_at = clear_at = None
+        for i, stmt in enumerate(loop.body):
+            if not isinstance(stmt, ast.Expr) or not isinstance(stmt.value, ast.Call):
+                continue
+            call = stmt.value
+            if isinstance(call.func, ast.Name) and call.func.id == "guard" \
+                    and guard_at is None:
+                guard_at = i
+            # The RECEIVER is pinned, not just the method name: `mx` is what
+            # holds the buffers phys_footprint counts, and a check that
+            # accepted any `.clear_cache()` would stay green against a no-op
+            # object - a test that cannot fail from a production change.
+            if isinstance(call.func, ast.Attribute) \
+                    and call.func.attr == "clear_cache" \
+                    and isinstance(call.func.value, ast.Name) \
+                    and call.func.value.id == "mx" and clear_at is None:
+                clear_at = i
+        if guard_at is not None:
+            return clear_at, guard_at
+    raise AssertionError(f"no cell loop found in {func_name}()")
+
+
+@pytest.mark.parametrize("func_name", ["mde", "ab"])
+def test_the_timed_modes_clear_the_buffer_cache_before_the_budget_reads(func_name):
+    """MLX keeps freed buffers rather than returning them, and phys_footprint
+    counts them, so a budget that reads before clearing measures memory nothing
+    is using. On 2026-08-17 that refused a run at B=12 (25.72 GB against the
+    registered 24.0 GB) after six cells had already completed, and the binding
+    run had to be taken at --budget-gb 30 - a registered parameter deviated
+    from by a defect rather than by the measurement.
+    """
+    clear_at, guard_at = _cell_loop_order(func_name)
+    assert clear_at is not None, (
+        f"{func_name}() never clears the buffer cache at its cell boundary")
+    assert clear_at < guard_at, (
+        f"{func_name}() clears the cache AFTER the budget reads the footprint, "
+        "so the guard still sees the previous cell's freed buffers")
+
+
+def test_the_registered_budget_default_is_the_one_the_ab_was_priced_at():
+    """The 24.0 GB default is registered; --budget-gb 30 was a deviation forced
+    by the cache defect above, and it must not become the default by drift."""
+    tree = ast.parse(SERVE_SRC)
+    assigned = {t.id: n.value for n in ast.walk(tree)
+                if isinstance(n, ast.Assign) for t in n.targets
+                if isinstance(t, ast.Name)}
+    assert "AB_BUDGET_GB" in assigned
+    assert assigned["AB_BUDGET_GB"].value == 24.0
+
+
+@requires_metal
+def test_clearing_the_cache_returns_what_the_footprint_counts():
+    """The premise the fix rests on, measured rather than assumed: freed MLX
+    buffers stay in the cache and phys_footprint counts them until cleared."""
+    import mlx.core as mx      # not importorskip: this module imports
+    mx.clear_cache()             # calibrate_quant_serving, and so mlx, at line 25
+    for _ in range(3):                       # a few cells' worth of churn
+        big = mx.zeros((2048, 2048), dtype=mx.float32)
+        mx.eval(big)
+        del big
+    cached = mx.get_cache_memory()
+    assert cached > 0, "freed buffers are supposed to sit in the cache"
+    mx.clear_cache()
+    assert mx.get_cache_memory() < cached, "clear_cache must release them"
+
+
+def _reachable_from(source: str, root: str) -> set[str]:
+    """Every function in `source` reachable from `root` by direct call.
+
+    Names only, which is enough here: this module defines its helpers at module
+    scope and calls them by name. The point is to follow the graph rather than
+    read one function body, because a harness that took the lock through a
+    helper would satisfy any check that only looked at the entry point.
+    """
+    tree = ast.parse(source)
+    defs = {n.name: n for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    seen, queue = set(), [root]
+    while queue:
+        name = queue.pop()
+        if name in seen or name not in defs:
+            continue
+        seen.add(name)
+        for node in ast.walk(defs[name]):
+            if isinstance(node, ast.Name):
+                queue.append(node.id)
+            elif isinstance(node, ast.Attribute):
+                queue.append(node.attr)
+    return seen
+
+
+def _names_used_by(source: str, functions: set[str]) -> set[str]:
+    tree = ast.parse(source)
+    used = set()
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in functions:
+            for node in ast.walk(n):
+                if isinstance(node, ast.Name):
+                    used.add(node.id)
+                elif isinstance(node, ast.Attribute):
+                    used.add(node.attr)
+    return used
+
+
+def test_nothing_reachable_from_smoke_can_take_the_machine_lock():
+    """The half of the smoke contract that stubbing smoke() cannot check.
+
+    tests/test_serve_sub4bit.py drives main(["--smoke"]) with smoke() replaced,
+    which proves main() reaches smoke BEFORE it builds the lock - and proves
+    nothing at all about smoke itself, because the real one never runs there.
+    Running the real one needs two models and a GPU, so the reachable call
+    graph is checked instead: smoke, and everything smoke calls, must never
+    name MeasurementLock. Following the graph rather than reading smoke's own
+    body is the point - a lock taken inside a helper is the case a single-body
+    check misses.
+    """
+    reachable = _reachable_from(SERVE_SRC, "smoke")
+    assert "smoke" in reachable and len(reachable) > 1, \
+        "the call graph walk found nothing; the parse or the root name is wrong"
+    used = _names_used_by(SERVE_SRC, reachable)
+    assert "MeasurementLock" not in used, (
+        "something reachable from smoke() names MeasurementLock; smoke is the "
+        "one mode that must run while a measurement holds the machine")
+    assert "acquire" not in used, (
+        "something reachable from smoke() calls acquire(); see above")
+
+
+SPIKE_SRC = (BENCH_DIR / "spike_spec_verify.py").read_text()
+
+
+def test_the_spike_closes_its_quiet_window_as_well_as_opening_it():
+    """A timing mode's window must be clean before AND after.
+
+    The spike shipped with `require_idle` at the start and nothing at the end,
+    so contention arriving after the first sample could not invalidate a GO.
+    That is not hypothetical here: the A/B's run 2 completed all eight cells
+    and was marked NON-BINDING by exactly this closing sample, which caught
+    WindowServer at 15% CPU.
+
+    Checked on the success path specifically, because the refusal paths return
+    their own numbered exits and must NOT be wrapped - a refusal is already a
+    verdict about the machine.
+    """
+    tree = ast.parse(SPIKE_SRC)
+    main = next(n for n in ast.walk(tree)
+                if isinstance(n, ast.FunctionDef) and n.name == "main")
+    # The try that owns the timed section is the one with the finally that
+    # releases the machine lock, NOT main()'s first try, which only wraps the
+    # pin check and returns EXIT_PRECONDITION.
+    tries = [n for n in ast.walk(main)
+             if isinstance(n, ast.Try) and n.finalbody]
+    assert len(tries) == 1, (
+        "expected exactly one try/finally in main(); the one holding the "
+        "machine lock is what owns the timed section")
+    last = tries[0].body[-1]
+    assert isinstance(last, ast.Return), (
+        "the timed section no longer ends in a return; find where the success "
+        "path leaves and check that it still closes the window")
+    call = last.value
+    assert isinstance(call, ast.Call) and isinstance(call.func, ast.Name) \
+        and call.func.id == "check_idle_after", (
+            "the spike's success path returns without a closing idle sample, "
+            "so a run that went non-idle mid-way still exits 0")
+
+
+def test_the_spike_refuses_a_median_over_samples_that_disagree():
+    """The relative rule alone would read a dispersed run.
+
+    A gain is called readable when it exceeds both arms' spread, which is a
+    RATIO test: two arms dispersed 12% each with a 20% gap between their
+    medians satisfy it, while machine_state's absolute gate rejects any spread
+    over MAX_SPREAD_PCT because such a median is not a quantity. Both arms are
+    gated, and before the verdict is computed rather than after.
+    """
+    tree = ast.parse(SPIKE_SRC)
+    main = next(n for n in ast.walk(tree)
+                if isinstance(n, ast.FunctionDef) and n.name == "main")
+    # Ordered by source line, not by ast.walk's index: walk is breadth-first,
+    # so its enumeration says nothing about which statement runs first.
+    gated, verdicts = [], []
+    for node in ast.walk(main):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id == "dispersion_verdict":
+            gated.append(node.lineno)
+        if isinstance(node, ast.Assign) \
+                and any(isinstance(t, ast.Name) and t.id == "verdict"
+                        for t in node.targets):
+            verdicts.append(node.lineno)
+    gated_at = min(gated) if gated else None
+    verdict_at = min(verdicts) if verdicts else None
+    assert gated_at is not None, (
+        "main() no longer consults machine_state.dispersion_verdict, so a run "
+        "whose samples disagree can still publish a verdict")
+    assert verdict_at is not None and gated_at < verdict_at, (
+        "the dispersion gate runs after the verdict is chosen, so a verdict "
+        "exists for samples the gate would have refused")
