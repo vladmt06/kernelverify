@@ -68,6 +68,32 @@ Every round must have zero hard fallbacks.
 Registered routing-table declines and arm 4's forced-stock decisions are not hard fallbacks, but any other fallback invalidates the round.
 A hard-fallback-invalid round is ineligible for every outcome.
 
+### Amendment, 2026-08-18: what the counter actually sees, and what it can and cannot measure
+
+Found by the dispatched writer refusing a second time, and reproduced here against `mlx_lm` 0.31.3's source before either point was admitted.
+Sections 4 and 5 described a seam that does not exist, and the host-side tests written before the harness encoded the same fiction, so a harness that satisfied those tests would have produced two wrong quantities on the real machine and no test could have failed.
+
+**The target is called with token identifiers, not activations.**
+`speculative_generate_step` verifies with `logits = model(y[None], cache=cache)` where `y` holds the K + 1 candidate tokens, so `Model.__call__` receives an integer array of shape `(1, K + 1)` with no feature dimension at all; the embedding happens inside the model, below the seam the counter wraps.
+Section 4 said "flattened width" and the rules module computed it as `prod(shape[:-1])`, which is the right rule for the activation a projection sees and gives 1 for every pass at this seam.
+From this amendment the width of an observed pass is `prod(shape)` over the token-identifier array, so a `(1, 7)` verification pass is width 7 and the 64-token prefill, which `_prefill` presents as `(1, 63)`, is width 63 and routes nothing.
+`expected_routed_calls` now refuses any shape that is not rank 2, because the only seam this experiment counts is that one and a rank-3 shape reaching it means the assumption moved.
+
+**Wall time taken around that call measures graph construction, not execution.**
+MLX is lazy: `model(y[None], cache=cache)` returns as soon as the graph is built, and `speculative_generate_step` does not force evaluation until `mx.eval(tokens, draft_tokens)` after the draft graph is built too.
+A timer around the class dunder therefore measures Python and graph-building cost, which is neither proportional to the target's work nor a share of anything.
+Left as registered it would have understated `verify_share` by roughly an order of magnitude, driven every `ceiling_pct` below its noise floor, and made every O2 cell read `not-a-decider` - a run that answers nothing while exiting 0.
+
+From this amendment the timed rounds record passes and shapes only, and the counter takes no time in them.
+Each `(draft, K)` cell instead runs ONE probe generation outside the timed rounds, in which the counter forces `mx.eval` on the target's output and records the elapsed per pass.
+The cell's share is `verify_share = median_probe_pass_seconds * verify_passes / generation_time`, where the per-pass cost comes from the probe and `verify_passes` and `generation_time` come from that cell's O2-eligible timed rounds.
+The probe's own `generation_tps` is discarded and enters no outcome, because forcing a synchronisation inside the generation loop changes the thing being timed.
+Forcing evaluation is confined to the probe for exactly that reason: a synchronisation applied to every arm would perturb `generation_tps` in all five, and O3 quotes an absolute throughput a user would see rather than a ratio, so a uniform perturbation would not cancel there.
+
+The bias this leaves is stated rather than hidden.
+The probe measures the target's forward in isolation, while in the timed rounds that forward can in principle overlap other work, so the per-pass cost is an upper bound and `verify_share` and `ceiling_pct` are therefore upper bounds too.
+The direction matters: an overstated ceiling can call a cell a decider when its true expected gain sits below the floor, which weakens the safeguard rather than manufacturing a win, since the ceiling enters no verdict's numerator or denominator and only decides whether a cell is read at all.
+
 ### Token identity
 
 Every arm's complete token sequence is recorded for every round.
@@ -91,6 +117,7 @@ No outcome is read from a round that its corresponding identity rule excludes.
 MLX resets that response's clock at the first generated token, so arm 0 is measured in this experiment instead of being compared directly with the earlier A/B's `decode_window` result.
 
 `verify_passes` and `verify_time` come from the target-only class-level counter.
+The 2026-08-18 amendment at the foot of section 4 supersedes the `verify_time` half of that sentence and the `verify_share` definition three lines below it: the counter takes no time in a timed round, and the per-pass cost comes from a per-cell probe instead.
 For every speculative arm, `accepted_per_pass = generation_tokens / verify_passes`.
 Zero verification passes is a typed refusal rather than a division by zero.
 For arm 2, `verify_share = verify_time / generation_time`.
@@ -149,7 +176,7 @@ That is not an estimate of a different quantity.
 `stream_generate` resets its clock immediately after the first generated token and then emits `generation_tokens = n + 1` beside `generation_tps = (n + 1) / (perf_counter() - tic)`, so dividing the first by the second returns the very elapsed window `mlx_lm` measured, to float precision.
 Any wall clock the harness started itself would instead include prefill and the first token, which this section already excludes on purpose, so the derived value is the more faithful of the two and not merely the available one.
 
-Second, this section requires `verify_time` and `generation_time` to be summed over the O2-eligible arm 2 rounds, and the rules module kept its eligibility filter private.
+Second, this section requires the share's inputs to be taken over the O2-eligible arm 2 rounds - `verify_passes` and `generation_time`, once the amendment at the foot of section 4 moves the per-pass cost to a probe - and the rules module kept its eligibility filter private.
 A harness that reproduced the filter would hold a second copy of the exclusion rule, which is the duplication this experiment already removed once from the attribution rule.
 From this amendment `spec_decode_rules` exposes that selection publicly as `eligible_rounds(rounds, outcome)`, the harness calls it for the share, and the verdict functions keep calling the same code for their medians, so the two can never disagree.
 
