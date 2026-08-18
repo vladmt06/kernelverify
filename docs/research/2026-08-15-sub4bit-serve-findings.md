@@ -349,6 +349,26 @@ Reproducibility, stated at the grade the evidence actually carries: run 3 is the
 An earlier draft of this paragraph called the two "independent quiet windows", which contradicted this section's own run table three paragraphs above: the harness marked run 2 non-binding because its closing idle sample caught WindowServer at 15% CPU, and section 3 registers that a timing mode's window must be clean before AND after.
 The agreement is therefore corroboration that the harness reproduces itself, not a second measurement, and every verdict below rests on run 3 alone.
 
+### Pre-registered outcome for the 2026-08-18 re-run, after the flattened-width rule
+
+Written before that run is armed, for the same reason the last one was: a grid whose numbers are already published can be rationalised in either direction once they arrive.
+
+What changed since the binding run, and why inertness is the expectation rather than the hope.
+`_ineligible` no longer refuses a 3-D input on its sequence length, so it computes M at every input rank.
+Every timed step in this A/B is (B, 1, d_in), which that rule does not touch, and the only 3-D input the harness presents is the 64-token prompt prefill outside the timed window, refused before the change as `prefill-L64` and after it as `m-64-outside-dispatch-{d_out}x{d_in}` - a different string for the same fallback.
+`PINNED_ZONE` also widened from {5, 6, 8} to {5, 6, 7, 8, 9} and `pack_zone` now scans widths 1 through 16 rather than filtering `B_GRID`.
+That is a refusal gate, not a timed path, and it got stricter rather than looser, so it can only refuse a run the old one would have passed, never move a number.
+
+"Unmoved by construction" is exactly the reasoning this record has learned not to trust, which is why the run happens anyway.
+
+The registered outcome:
+
+- The budget must hold. Eight cells complete at the registered 24.0 GB default with no `--budget-gb` flag, and the run exits 0.
+- The three in-zone ratios must land inside +/- 0.0014 of the BINDING run's 1.0570 at B = 5, 1.1469 at B = 6 and 1.1565 at B = 8. That band is the one the 2026-08-17 re-run was read against and it is not widened here.
+- `require_pinned_zone` must pass at the widened registration, and the per-cell dispatch counts must stay exact.
+- A ratio outside the band is a FINDING, not a tuning knob. It re-derives section 10 from the new grid, and no amendment may explain it away by pointing at the eligibility change being "obviously" inert on batch shapes.
+- A ratio crossing 1.0 or its cell's noise floor reopens the verdict on `wide_qmv` staying in the pack. Nothing short of that does.
+
 ## 10. Verdicts
 
 PRIMARY CLAIM, the pack's contribution, arm 1 against arm 2, judged against each cell's own noise floor per section 6:
