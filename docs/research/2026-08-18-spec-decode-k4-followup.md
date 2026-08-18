@@ -1,8 +1,8 @@
 # End-to-end speculative decode at K = 4: the pre-registered follow-up
 
-Status: pre-registered 2026-08-18, before any measurement.
-Sections 1 through 6 fix the primary cell and the outcomes.
-Sections 7 and 8 remain placeholders until the binding run has completed.
+Status: pre-registered 2026-08-18; measured and read 2026-08-18.
+Sections 1 through 6 fix the primary cell and the outcomes before any measurement exists.
+Sections 7 and 8 carry the binding run and the verdict read off it, against the outcomes fixed above.
 
 ## 1. Why this exists, and what it is not allowed to do
 
@@ -85,8 +85,101 @@ Landing near them is not the criterion for GO and is not a result; the criterion
 
 ## 7. Measurements
 
-This section is filled after the registered run.
+Measured by `bench/serve_spec_decode.py --primary-k 4` through the detached runner on 2026-08-18, 17:19:27 to 17:33:53 UTC, 14 minutes, first attempt of three, harness exit 0.
+Five consecutive clean idle samples were held before the start and the closing sample was clean, so the run passed `check_idle_after` and is binding.
+MLX 0.32.0, mlx-lm 0.31.3, Apple M3 Pro, Mac15,7, Darwin 26.5.2 build 25F84, the same four pinned models, budget 24.0 GB with no flag.
+Every `RESULT:` line for O3 and O4 carries `primary_k: 4`, which is the registered flag reaching the verdicts.
+
+### Interception accounting and divergence
+
+Every cell's arm 1 routed exactly what its observed passes predicted and arm 4 routed nothing, cell for cell identical to the parent run: 54180 and 51660 at K = 4, 46620 and 42840 at K = 6, 44100 and 40320 at K = 8, zero at K = 2, and 1260 at the 1.7B K = 10 cell where one short in-window pass per round routes.
+No round in the run recorded a hard fallback, no `kernel-diverged` label and no `mlx-m-dependent` label fired anywhere, and arm 4 matched arm 2 to the token in every cell.
+All five rounds were eligible for every outcome in all ten cells.
+The divergence report is therefore "none", and it is present because section 4 of the parent requires it to be present even when it is.
+
+### The replication check, read first as section 6 requires
+
+| quantity, 0.6B K = 6 | parent | this run | difference | band | inside |
+|---|---|---|---|---|---|
+| O2, `D(1, 2)` | +12.56% | +12.65% | 0.09 pts | 2.96 pts | yes |
+| O3, `D(1, 0)` | -6.11% | -5.62% | 0.49 pts | 4.18 pts | yes |
+
+Both land well inside the larger of the two runs' floors, so the two binding runs agree at the parent's own primary cell and nothing casts doubt on the K = 4 reading below.
+
+The agreement is much stronger than the check demanded.
+Every one of the six O2 point estimates reproduced to within 0.10 percentage points: at K = 4, +4.02% against +3.98% on the 0.6B draft and +2.59% against +2.61% on the 1.7B; at K = 6, +12.56% against +12.65% and +9.20% against +9.18%; at K = 8, +10.59% against +10.64% and +7.58% against +7.60%.
+The primary cell's own composed number reproduced to within 0.05 points, +10.22% against +10.17%, with speculation at +5.96% against +5.95% and the kernel term at +4.02% against +3.98%.
+
+### The primary cell
+
+| quantity, 0.6B K = 4 | value |
+|---|---|
+| arm 0, plain stock | 66.77 tokens per second |
+| arm 1, ours | 73.56 |
+| arm 2, stock 3-bit speculative | 70.74 |
+| arm 3, stock 4-bit speculative | 76.46 |
+| composed, `D(1, 0)` | +10.17% |
+| speculation alone, `D(2, 0)` | +5.95% |
+| kernel on top, `D(1, 2)` | +3.98% |
+| `F_O3'` and `F_O2` | 5.32% |
+| ceiling at this cell | 4.16% |
+| attribution, reported only | `artifact-alone` |
+
+### Why the floor is 5.32% and the parent's was 0.14%
+
+The point estimates replicated and the floor did not, so the floor is where this run differs, and the cause is one sample.
+Arm 1's five rounds at this cell were 69.71, 73.44, 73.62, 73.56 and 73.62 tokens per second.
+Rounds two through five span 0.24%; round one sits 5.3% below their median, and `spread_pct` is `(max - min) / median`, which has no resistance to a single outlier at all.
+The median barely moved, 73.56 against the parent's 73.60, which is why every point estimate above replicated while the floor rose thirty-eightfold.
+
+That cold first round is sporadic rather than systematic, and it is present in both runs.
+Comparing each arm-cell's first sample against the median of its remaining four, the parent had four of fifty arm-cells more than 1% cold and this run had three of fifty, and they land on different cells each time: the parent's worst were the 1.7B K = 10 arm 3 at -2.99% and the 0.6B K = 6 arm 1 at -2.60%, while this run's worst were the 0.6B K = 4 arm 1 at -5.27% and the 0.6B K = 6 arm 4 at -3.73%.
+Nothing about arm 1, about K = 4, or about the probe that runs before the rounds predicts where it lands.
+
+The consequence is structural and is the honest reading of this run.
+A cold first round of two to five percent inflates whichever cell's floor it lands in to its own size.
+The K = 6 cell's ceiling is around 11%, so it survives one and stays a decider, which is exactly what happened in the parent where the cold round landed there.
+The K = 4 cell's ceiling is 4.16%, which is the same order as the artefact itself, so a single cold round is enough to make that cell unreadable.
+The K = 4 cell is therefore under-powered against a failure mode that occurs in roughly one arm-cell in fifteen, and this run is the case where it occurred there.
+
+### The secondary cells
+
+The 1.7B draft's K = 4 cell, which is secondary by section 4, read O2 `WIN` at +2.61% against a 0.13% floor with a 3.21% ceiling and `decider` true, and its O3' composed number was -20.55%.
+The whole-grid readings were O1 `WIN` at K = 2 for the 0.6B draft and `INCONCLUSIVE` for the 1.7B, and O2 `WIN` at K = 6 and K = 8 on both drafts with the K = 2 and K = 10 null cells reading `NULL` and, at 1.7B K = 10, `NULL-uncontrolled` again.
+None of these is the claim and none is quoted as one.
 
 ## 8. Verdicts
 
-This section is filled after the registered run.
+### O3', the product number at the registered primary cell
+
+**NO-GO.**
+
+| registered GO condition, section 5 | result |
+|---|---|
+| `D(1, 0) > F_O3'`: composed beats plain decode beyond the floor | met, +10.17% against 5.32% |
+| `D(1, 2) > F_O2`: the kernel's own term is a WIN by the O2 rule | NOT met, +3.98% against 5.32%, so `not-a-decider` rather than `WIN` |
+| that O2 cell is a decider, so the second condition could have failed | NOT met, ceiling 4.16% against floor 5.32% |
+
+Two of the three registered conditions failed, so the outcome is NO-GO, and by section 5 that closes the K = 4 question on this stack.
+
+The reason for the NO-GO is recorded exactly, because it is not the reason a reader would assume.
+The composed effect did not fail to appear; it reproduced to within 0.05 percentage points of the parent's exploratory value, and so did the kernel's contribution.
+What failed is that this run could not tell the kernel's 3.98% from its own noise, because one cold first round put the floor at 5.32% and the cell's ceiling is 4.16%.
+A cell whose registered ceiling is smaller than a single cold round can produce is a cell this design cannot reliably read, and that is what the third condition was written to detect.
+
+This is a NO-GO on the design as registered, and it is not a licence to re-read this data with a different floor, a dropped round, or a different criterion.
+The number that would come out of any of those is the number the choice was made to produce, which is what sections 1 and 6 exist to prevent.
+
+### O4' at the registered primary cell
+
+Reported and not decisive, as registered: arm 1 at 73.56 against stock 4-bit speculative at 76.46, ratio 0.9620, composed -3.80% and base -7.48% against a 5.32% floor, attribution `inconclusive`.
+On the 1.7B draft the same cell read ratio 1.0603 with attribution `artifact-alone`.
+
+### What this run establishes
+
+It establishes that the kernel's O2 wins are reproducible to a degree the parent could not show alone: six of six point estimates within 0.10 percentage points across two independent binding runs, at every routed width and on both drafts.
+It establishes that the composed product at K = 4 with the 0.6B draft is around +10% against plain decode on both runs, and that speculation alone accounts for around +6 of that.
+It does not establish that the kernel's contribution at that cell is distinguishable from noise, because on this run it was not.
+
+It leaves one thing that is a defect in this experiment rather than a fact about the kernel: `spread_pct` is `(max - min) / median` over five rounds, which a single cold sample dominates, and the warm-up before the rounds does not reliably prevent one.
+Fixing that is a different experiment with its own pre-registration, not a third reading of this cell, and it is queued in `TODOS.md` as such.
