@@ -78,6 +78,27 @@ def test_a_busy_machine_is_transient(monkeypatch):
     assert h.main([]) == h.EXIT_NOT_IDLE
 
 
+# Passing a refusal through check_idle_after makes this red. The three tests
+# above only catch it on a machine that happens to be non-idle, because there
+# check_idle_after rewrites the code to 1; this one catches it anywhere. What it
+# costs is not cosmetic: detached_run.judge_exit_code reads EXIT_NOT_IDLE as
+# "waiting" and spends no attempt, while it reads 1 as "stopped" and spends one,
+# so a busy machine would burn all three attempts without measuring anything.
+def test_refusals_do_not_pass_through_the_closing_idle_check(monkeypatch):
+    _pins_ok(monkeypatch, h)
+    _lock_granted(monkeypatch, h)
+    monkeypatch.setattr(
+        h, "require_idle", _raise(h.NotIdle("WindowServer at 30%"))
+    )
+    monkeypatch.setattr(h, "load_model", _never_load)
+    monkeypatch.setattr(
+        h,
+        "check_idle_after",
+        _raise(AssertionError("a refusal was passed through the idle check")),
+    )
+    assert h.main([]) == h.EXIT_NOT_IDLE
+
+
 def _models_loaded(monkeypatch):
     monkeypatch.setattr(h, "require_idle", lambda label: {"idle": True})
     monkeypatch.setattr(h, "provenance", lambda manifest: {"pins": manifest})
