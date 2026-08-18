@@ -371,18 +371,18 @@ def decide_o2(
 
 
 
-def _registered_primary(primary_k: int) -> int:
-    """The primary cell is a registered input, not a free parameter.
+def _require_registered_primary(primary_k: int) -> None:
+    """Refuse a primary cell the grid does not register.
 
-    It defaults to the parent pre-registration's K = 6 and may be named
-    otherwise only by a pre-registration that fixes it before the run, which
-    is what the K = 4 follow-up does (docs/research/
-    2026-08-18-spec-decode-k4-followup.md, section 3). A cell outside the
-    grid has no rounds to read and is refused rather than read as empty.
+    The primary cell defaults to the parent pre-registration's K = 6 and may
+    be named otherwise only by a pre-registration that fixes it before the
+    run, which is what the K = 4 follow-up does (docs/research/
+    2026-08-18-spec-decode-k4-followup.md, section 3). Off the grid there are
+    no rounds to read, and reading one anyway reports a confident verdict on
+    a cell nothing registered.
     """
     if primary_k not in K_GRID:
         raise RunInvalid(f"primary cell K={primary_k} is outside the grid")
-    return primary_k
 
 
 def decide_o3(
@@ -390,9 +390,12 @@ def decide_o3(
     *,
     primary_k: int = PRIMARY_K,
 ) -> dict[str, object]:
-    """Read the registered primary cell's product number and the labelled
-    grid maximum."""
-    primary_k = _registered_primary(primary_k)
+    """Read the registered primary cell against plain decode.
+
+    The labelled grid maximum is reported beside it and is never the
+    quoted number.
+    """
+    _require_registered_primary(primary_k)
     # The PRIMARY cell is computed first and on its own. The exploratory
     # maximum below is labelled "never the quoted number", so it must not be
     # able to take the quoted number down with it: a K cell whose rounds were
@@ -446,7 +449,7 @@ def decide_o4(
     primary_k: int = PRIMARY_K,
 ) -> dict[str, object]:
     """Compare speculative 3-bit arm 1 with speculative stock 4-bit arm 3."""
-    primary_k = _registered_primary(primary_k)
+    _require_registered_primary(primary_k)
     comparison = _comparison(cells.get(primary_k, ()), "O4", 1, 3)
     arm2_tps = statistics.median(
         r.generation_tps[2] for r in comparison.rounds

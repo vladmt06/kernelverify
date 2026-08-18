@@ -292,6 +292,15 @@ def test_main_reaches_the_grid_with_the_machine_stubbed(monkeypatch):
     assert guarded, "main never reached the first per-cell memory guard"
 
 
+def _verdicts(capsys):
+    """Every RESULT record main() printed, decoded once."""
+    return [
+        json.loads(line[len("RESULT: "):])
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("RESULT: ")
+    ]
+
+
 # The K=4 follow-up's one change (docs/research/2026-08-18-spec-decode-k4-followup.md,
 # section 3): the primary cell is a registered input. Dropping the flag, or
 # parsing it and not passing it through to the verdicts, makes this red; so
@@ -299,23 +308,14 @@ def test_main_reaches_the_grid_with_the_machine_stubbed(monkeypatch):
 def test_the_primary_cell_flag_reaches_both_verdicts(monkeypatch, capsys):
     _stub_the_machine(monkeypatch)
     assert h.main(["--primary-k", "4"]) == 0
-    results = [
-        json.loads(line[len("RESULT: "):])
-        for line in capsys.readouterr().out.splitlines()
-        if line.startswith("RESULT: ")
-    ]
     primary = {(r["draft"], r["outcome"]): r["primary_k"]
-               for r in results if r["outcome"] in ("O3", "O4")}
+               for r in _verdicts(capsys) if r["outcome"] in ("O3", "O4")}
     assert primary and set(primary.values()) == {4}, primary
 
 
 def test_the_primary_cell_defaults_to_the_parents_k6(monkeypatch, capsys):
     _stub_the_machine(monkeypatch)
     assert h.main([]) == 0
-    primary = {
-        json.loads(line[len("RESULT: "):])["primary_k"]
-        for line in capsys.readouterr().out.splitlines()
-        if line.startswith("RESULT: ")
-        and json.loads(line[len("RESULT: "):])["outcome"] in ("O3", "O4")
-    }
+    primary = {r["primary_k"] for r in _verdicts(capsys)
+               if r["outcome"] in ("O3", "O4")}
     assert primary == {6}

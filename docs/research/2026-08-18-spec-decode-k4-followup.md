@@ -106,9 +106,9 @@ The divergence report is therefore "none", and it is present because section 4 o
 
 Both land well inside the larger of the two runs' floors, so the two binding runs agree at the parent's own primary cell and nothing casts doubt on the K = 4 reading below.
 
-The agreement is much stronger than the check demanded.
-Every one of the six O2 point estimates reproduced to within 0.10 percentage points: at K = 4, +4.02% against +3.98% on the 0.6B draft and +2.59% against +2.61% on the 1.7B; at K = 6, +12.56% against +12.65% and +9.20% against +9.18%; at K = 8, +10.59% against +10.64% and +7.58% against +7.60%.
-The primary cell's own composed number reproduced to within 0.05 points, +10.22% against +10.17%, with speculation at +5.96% against +5.95% and the kernel term at +4.02% against +3.98%.
+The agreement is much stronger than the check demanded, and what follows describes it rather than testing it: section 6 registered one band, the floor band applied above, and no tighter bound was registered before this run.
+The six O2 point estimates moved by at most 0.09 percentage points between the two runs: at K = 4, +4.02% against +3.98% on the 0.6B draft and +2.59% against +2.61% on the 1.7B; at K = 6, +12.56% against +12.65% and +9.20% against +9.18%; at K = 8, +10.59% against +10.64% and +7.58% against +7.60%.
+The primary cell's own composed number moved 0.05 points, +10.22% against +10.17%, with speculation at +5.96% against +5.95% and the kernel term at +4.02% against +3.98%.
 
 ### The primary cell
 
@@ -124,6 +124,17 @@ The primary cell's own composed number reproduced to within 0.05 points, +10.22%
 | `F_O3'` and `F_O2` | 5.32% |
 | ceiling at this cell | 4.16% |
 | attribution, reported only | `artifact-alone` |
+
+### O2 at the primary cell, reported before any O3' reading
+
+Section 5 requires this cell's O2 verdict here, and requires a non-WIN to be reported as a finding about run-to-run stability before O3' is read at all.
+
+O2 at 0.6B K = 4 on this run's data reads **`not-a-decider`**.
+`D(1, 2)` is +3.98% against a 5.32% floor, and the cell's 4.16% ceiling does not clear that floor either, so `decider` is false and the WIN/LOSS/NULL branch is never reached.
+The parent read the same cell `WIN`, +4.02% against a 0.14% floor with a 4.17% ceiling.
+
+By section 5 this makes GO impossible by construction, and it is a finding about run-to-run stability rather than about the kernel: the point estimate moved 0.05 percentage points between the runs while the floor moved from 0.14% to 5.32%, which is a fact about how this run sampled the cell and not about what the kernel did in it.
+The other five routed O2 cells read `WIN` again on this run.
 
 ### Why the floor is 5.32% and the parent's was 0.14%
 
@@ -177,8 +188,10 @@ On the 1.7B draft the same cell read ratio 1.0603 with attribution `artifact-alo
 
 ### What this run establishes
 
-It establishes that the kernel's O2 wins are reproducible to a degree the parent could not show alone: six of six point estimates within 0.10 percentage points across two independent binding runs, at every routed width and on both drafts.
-It establishes that the composed product at K = 4 with the 0.6B draft is around +10% against plain decode on both runs, and that speculation alone accounts for around +6 of that.
+It establishes that the kernel's O2 point estimates are reproducible to a degree the parent could not show alone: all six moved by at most 0.09 percentage points across two independent binding runs, at every routed width and on both drafts.
+The verdicts did not all travel with them, and that gap is what this document is about: five of the six read `WIN` again, while the primary cell read `not-a-decider` on an estimate that had itself moved only 0.05 points.
+It establishes that on this run the composed product at K = 4 with the 0.6B draft is +10.17% against plain decode, clearing its floor, and that speculation alone accounts for +5.95 of that.
+Section 1 forbids this document from quoting the parent's exploratory K = 4 values as a result, so the claim is about this run's number and the earlier one is not part of it.
 It does not establish that the kernel's contribution at that cell is distinguishable from noise, because on this run it was not.
 
 It leaves one thing that is a defect in this experiment rather than a fact about the kernel: `spread_pct` is `(max - min) / median` over five rounds, which a single cold sample dominates, and the warm-up before the rounds does not reliably prevent one.

@@ -12,7 +12,10 @@
 ## A single cold first round can make a low-ceiling cell unreadable
 
 - What: give the noise floor resistance to one outlier, or make the warm-up reliably prevent one, and re-register any cell whose ceiling is the same order as a cold round before measuring it.
-- Why: `machine_state.spread_pct` is `(max - min) / median` over `ROUNDS = 5`, which a single sample dominates completely. Across the two binding speculative-decode runs of 2026-08-18, a first round more than 1% colder than the rest of its arm-cell appeared in 4 of 50 and 3 of 50 arm-cells, landing on a different cell each time and reaching -5.27% at worst. Wherever it lands, that cell's floor becomes the size of the artefact. It cost the K = 4 follow-up its reading: the composed and kernel point estimates reproduced to within 0.05 points, and the cell still read `not-a-decider` because its 4.16% ceiling could not clear a 5.32% floor built from one sample.
+- Why: `machine_state.spread_pct` is `(max - min) / median` over `ROUNDS = 5`, which a single sample dominates completely.
+  Across the two binding speculative-decode runs of 2026-08-18, a first round more than 1% colder than the rest of its arm-cell appeared in 4 of 50 and 3 of 50 arm-cells, landing on a different cell each time and reaching -5.27% at worst.
+  Wherever it lands, that cell's floor becomes the size of the artefact.
+  It cost the K = 4 follow-up its reading: the composed and kernel point estimates reproduced to within 0.05 points, and the cell still read `not-a-decider` because its 4.16% ceiling could not clear a 5.32% floor built from one sample.
 - Pros: cells whose ceiling is a few percent become readable at all, which is every cell at the small-K end of the speculative grid; and the fix is bounded, since `spread_pct` has one definition and one home.
 - Cons: changing what `spread_pct` means moves `MAX_SPREAD_PCT` and every harness that reads it, including the published A/B, so it is a change to a shared registered quantity and needs its own pre-registration rather than an edit; raising `ROUNDS` instead costs run time linearly and does not by itself make `(max - min)` resistant to anything.
 - Context: `docs/research/2026-08-18-spec-decode-k4-followup.md` sections 7 and 8; `bench/machine_state.py` `spread_pct`; the per-arm rounds at 0.6B K = 4 were 69.71, 73.44, 73.62, 73.56, 73.62.

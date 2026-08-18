@@ -477,9 +477,14 @@ The second is that these two cells are not the same kind of cell: at K = 2 nothi
 K = 4 with the 0.6B draft is therefore the only cell in this grid where speculation pays AND the kernel helps, and the honest way to find out whether that is real is to pre-register it and measure it again, not to read it off this grid.
 To be explicit about what the paragraph above is and is not: it names two exploratory numbers so that a reader can see why the follow-up is worth pre-registering, and section 6 registered nothing about either cell, so neither number is a finding of this run and neither may be quoted as one.
 
-That follow-up was pre-registered and measured the same day; `docs/research/2026-08-18-spec-decode-k4-followup.md` carries it, and it read **NO-GO** at K = 4.
-Not because the effect vanished - its composed number reproduced to within 0.05 percentage points of the exploratory value above, and the kernel term to within 0.04 - but because a single cold first round put that cell's noise floor at 5.32% against a 4.16% ceiling, so the cell could not decide.
-It also re-measured this grid end to end, and every one of the six O2 point estimates here reproduced to within 0.10 percentage points.
-
 The primary cell was fixed at K = 6 before the run because it was the paper's optimum and the spike's width.
 The measurement says that on this stack K = 6 is already past the point where speculation pays, and choosing it in advance is what makes that statement worth anything.
+
+### Added 2026-08-18, after this document's run: where the K = 4 cell went
+
+This subsection was written after the run above and after the follow-up it points to.
+It changes no number, no criterion and no verdict in this document; it exists so a reader of section 10 is not left at a cell whose question was settled elsewhere.
+
+The follow-up was pre-registered and measured the same day, `docs/research/2026-08-18-spec-decode-k4-followup.md` carries it, and it read **NO-GO** at K = 4.
+Not because the effect vanished - its composed number landed 0.05 percentage points from the exploratory value above and its kernel term 0.04 - but because a single cold first round put that cell's noise floor at 5.32% against a 4.16% ceiling, so the cell could not decide.
+That run also re-measured this grid end to end: the six O2 point estimates here moved by at most 0.09 percentage points, and five of the six read WIN again, the exception being the K = 4 cell whose floor is the subject of the paragraph above.
