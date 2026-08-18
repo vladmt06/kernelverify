@@ -9,14 +9,32 @@
 - Context: `tests/conftest.py:13-16` states the one-probe rule; AGENTS.md's marker section names these four as predating it; surfaced by the merge gate's standards axis on 2026-08-17.
 - Depends on / blocked by: nothing; deliberately kept off `lane/test-infra-and-record` because these four modules gate correctly today - an in-process `MetalDevice()` raises rather than aborting - so this is consolidation, not a fix.
 
-## The interception layer refuses the one shape speculative decoding produces
+## Speculation pays only below the width our kernel covers, and K = 4 is the one cell where both hold
 
-- What: `_RoutedLinear._ineligible` in `bench/serve_sub4bit.py` returns `prefill-L{n}` for any 3-D input whose sequence length is not 1, BEFORE it computes M or asks `should_dispatch`. A K=6 speculative-decode verification step is one stream of 7 tokens, shape (1, 7, d_in), so it is refused - while the A/B's B=7 cell, shape (7, 1, d_in), is routed. Both flatten to the same (7, d_in) matmul, and `_fused` flattens with `x.reshape(-1, d_in)` either way, so the kernel does identical work for both and only the gate disagrees. Measured 2026-08-18: (7,1,2560) ROUTED, (1,7,2560) fell back with prefill-L7, (7,2560) ROUTED.
-- Why: the literature review's section 5.5 argues that speculative decoding is the only mechanism found that moves batch-1 without a better kernel, and that its verification step lands in M = 5..9 where this repo's kernel is a measured win - 14.6% at M=6 and 15.6% at M=8 in the 2026-08-17 A/B, with M=7 routed and bracketed by them. That meeting point cannot be tested at all while the gate refuses the shape, and the refusal is one line written for a different purpose.
-- Pros: the check is redundant with `should_dispatch` for the case it was written for - a real prefill chunk is hundreds of tokens, so M is far outside the routed window of 5..9 and would be refused on the merits anyway. Letting `should_dispatch` decide on the flattened M would open the verification shape while refusing everything the blunt check refuses today.
-- Cons: it is not purely redundant. A prefill of exactly 5 to 9 tokens would begin routing where it does not today, so this changes what a measured harness dispatches and needs its own pre-registration and a re-measurement rather than a quiet edit; the pricing evidence behind the routing table was collected with M as a decode batch width, and whether a sequence step of the same M behaves identically at the projection is the empirical question the spike exists to answer, not an assumption it may make.
-- Context: `bench/serve_sub4bit.py:226-227` (the refusal), `:240-247` (`_fused`, which flattens regardless), `docs/research/2026-08-16-faster-honest-decode-kernels-literature.md` section 5.5 (the meeting-point argument and arXiv 2607.17283's 1.61x at K=6), the 2026-08-17 A/B grid in `docs/research/2026-08-15-sub4bit-serve-findings.md` section 9.
-- Depends on / blocked by: nothing to investigate, but any change here re-opens a harness whose grid was re-measured on 2026-08-17, so it wants its own pre-registration first.
+- What: pre-register and measure a `(0.6B draft, K = 4)` cell against plain stock decode, with its own primary cell fixed in advance, rather than reading it off the 2026-08-18 grid.
+- Why: that run's O3 is a NO-GO at its registered primary cell K = 6 (-6.11% and -31.90%), and its exploratory grid shows the composed number positive at K = 2 (+21.95%) and K = 4 (+10.22%) with the 0.6B draft. The two are not the same kind of cell: M = 3 is outside the routed window so the whole of the K = 2 gain is speculation with zero kernel contribution, while at K = 4 the kernel contributed +4.02 of the +10.22 points. K = 4 is therefore the only cell in that grid where speculation pays AND the kernel helps, and it is exactly the cell selection bias would invent if it did not exist.
+- Pros: it is the one place the product claim could still live on this stack, and the harness, the rules module and the whole pre-registration already exist, so the marginal cost is a doc and a 3-minute run.
+- Cons: reading a cell chosen after seeing the grid is the mistake section 10 of the e2e doc exists to prevent, so this needs its own written primary cell BEFORE any measurement and must not cite the 2026-08-18 numbers as its result; a K = 4 grid also samples the routed window at one width only, so it says less about the kernel than the K grid did.
+- Context: `docs/research/2026-08-18-spec-decode-e2e.md` sections 9 and 10; `bench/serve_spec_decode.py`; the exploratory field on every O3 RESULT line.
+- Depends on / blocked by: nothing.
+
+## Speculative decode is measured only under greedy sampling
+
+- What: extend the e2e pre-registration to non-greedy sampling, with its own identity rule.
+- Why: the 2026-08-18 run fixed `temp = 0.0` for every arm so that token sequences are comparable and `kernel-diverged` means something; a real user is often not greedy, and mlx_lm's speculative acceptance test changes shape once sampling is stochastic.
+- Pros: the claim would cover the way the model is usually run rather than one corner of it.
+- Cons: it is a different experiment, not a parameter sweep - the acceptance rule changes, and the two-way token identity that keeps the current run honest cannot be reused as written, so it needs a fresh pre-registration.
+- Context: `docs/research/2026-08-18-spec-decode-e2e.md` sections 3, 4 and 7.
+- Depends on / blocked by: nothing.
+
+## Speculative decode is measured on one prompt of 64 tokens
+
+- What: repeat the e2e grid over a second prompt family and a longer generation than 128 tokens.
+- Why: acceptance rate is a property of the prompt as much as of the draft model, and every number in the 2026-08-18 run rests on one 64-token prompt from one fixed seed; section 7 of that document says so explicitly and claims nothing beyond it.
+- Pros: says whether the acceptance rates, and therefore the whole O1 and O3 picture, are a property of this stack or of this prompt.
+- Cons: multiplies the grid's runtime by the number of prompts, and a prompt family chosen after seeing the first result is its own selection problem, so the family wants registering in advance.
+- Context: `docs/research/2026-08-18-spec-decode-e2e.md` section 3 (`PROMPT_T = 64`, `GEN_TOKENS = 128`) and section 7.
+- Depends on / blocked by: nothing.
 
 ## An fp16 cell at a batch the eligibility table never ruled on reads as in-contract
 
