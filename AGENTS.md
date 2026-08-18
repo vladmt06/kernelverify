@@ -84,6 +84,12 @@ Vlad's global instructions still apply; this file adds the project's layout, how
   It installs its OWN interception rather than serve_sub4bit's, because a spike must not be able to move a published number by editing the harness that produced it.
   There is no kernel-level question in it and the module says so: `_fused` flattens with `x.reshape(-1, d_in)`, so the sequence and batch spellings are the same kernel call on the same rows.
   Answered GO on 2026-08-18 at 16.44% faster (a throughput ratio, not a cost reduction; the cost falls 14.12%) against a 0.327% noise floor.
+  Re-run under the shared patch the same day and reproduced at 16.385% against a 0.256% floor, which is section 7 of that document.
+- `bench/serve_spec_decode.py` - the end-to-end speculative-decode grid, pre-registered in `docs/research/2026-08-18-spec-decode-e2e.md`.
+  Five arms over two draft models and `K_GRID = (2, 4, 6, 8, 10)`, driving `mlx_lm`'s own `stream_generate` rather than any draft/verify loop of ours, with exact per-site dispatch counts, two-way token identity, and a per-cell probe that measures the target's verification cost under a forced `mx.eval` because MLX is lazy and a timer around the call would otherwise measure graph construction.
+  Every decision rule it reads lives in `bench/spec_decode_rules.py`, which imports only the standard library so the arithmetic is testable where `mlx.nn` would abort the interpreter; no verdict string and no comparison against a noise floor appears in the harness itself.
+  Run on 2026-08-18 through the detached runner, 14 minutes: routing the verification wins at every routed width (six of six decider cells), and the composed product at the pre-registered primary cell K = 6 is SLOWER than plain stock decode on both drafts, -6.11% and -31.90%.
+  The grid's positive cells at K = 2 and K = 4 are labelled exploratory and selection-biased in that document and are not a product claim; quoting them as one is the specific mistake section 10 exists to prevent.
 - `bench/price_qmv_boundary.py` - the routing-boundary pricing probe (verify-then-time, interleaved arms, refusal-gated), with its pre-registered rule in the module docstring: what makes a cell WIN, and the only way a routed window may widen.
   ADR 0015 is the reading of its 2026-08-15 run.
 - `bench/calibrate_k.py` - measures what the admissible-implementation contract demands of K, and how many ensemble members it takes to represent that contract.
@@ -132,7 +138,12 @@ cd /Users/vlad/kernelverify
 .venv/bin/python -u bench/derive_prerepair_device_records.py # ~7 min, needs the Metal GPU; rewrites ADR 0016's detection-price "before" records
 .venv/bin/python bench/emit_pack_certificates.py      # needs the Metal GPU; rewrites bench/.certificates/ and its MANIFEST.md
 .venv/bin/python -u bench/serve_sub4bit.py --ab       # needs the Metal GPU and both pinned artifacts; fills sections 9-10 of the sub4bit findings doc
+bench/start_binding_run.sh bench/serve_spec_decode.py # ~14 min detached; needs the Metal GPU and ALL FOUR pinned models; fills sections 9-10 of the spec-decode e2e doc
 ```
+
+- `serve_spec_decode.py` is the one harness that needs four pinned models rather than two: the 3-bit and 4-bit targets plus `qwen3-0.6b-4bit-g64` and `qwen3-1.7b-4bit-g64` as drafts.
+  `bench/.models/` is gitignored whole, so those pins live only in the local `PINNED-HASHES.txt` and enter the record through `provenance()`, which prints all four models' hashes first in every run log.
+  Both drafts must share the target's tokenizer for speculative decoding to be meaningful at all, and `tests/test_serve_sub4bit.py::test_every_pinned_draft_shares_the_targets_vocabulary` is what says so; it skips rather than fails where the models are absent.
 
 - `derive_repaired_member_column.py` is derived, not measured: it re-reads the committed ADR 0013 records with the repaired `factored-groups` column recomputed, and every ADR 0016 number comes from its output.
   Budget it at 30 GB, not less: the steady state is a flat ~16 GB, but the lm_head blocks transient by ~2.5 GB run to run, and observed peaks across three runs were 24.26, 23.66 and 26.02 GB.
@@ -208,6 +219,10 @@ bench/start_binding_run.sh     # arms a launchd job, then quit Terminal
   Long runs go detached so no interactive session competes with them (ADR 0010), and since I2 landed that path takes any harness: `bench/start_binding_run.sh <harness> [-- args]` arms a per-harness launchd job and `bench/detached_run.py --harness <path> --protocol exit-code` runs it, writing `bench/.baselines/detached_status-<stem>.json`.
   `measure_baselines.py` remains the default when no harness is named, and its row-appending protocol is still the default protocol.
   The 2026-08-17 A/B was run this way end to end, including the two attempts the runner correctly refused.
+- Serving dispatch decides on the FLATTENED row count at every input rank, and `should_dispatch` is the only judge of M (ADR 0018).
+  `_fused` reshapes to `(M, d_in)` before it dispatches, so a `(1, 7, d_in)` sequence step and a `(7, 1, d_in)` batch step are one kernel call on the same rows and one M = 7 certificate covers both; the old `prefill-L{n}` refusal was a spelling assumption, not a kernel property, and no reason starts with `prefill-` any more.
+  A prefill of exactly 5 to 9 tokens now routes as a consequence, and everything outside the window still declines as `m-{M}-outside-dispatch-{d_out}x{d_in}`.
+  Note the seam this is counted at: `mlx_lm` verifies with `model(y[None], cache=cache)` on rank-2 TOKEN IDS, so the width of an observed pass is `prod(shape)` and not `prod(shape[:-1])`, which is the activation rule and returns 1 for every real pass.
 - Never cite the corpus's `benchmark_verdict` fields as evidence; they are hardcoded "pass" and were never computed.
 - Any 100% claim must be backed by exact miss counts, not by a rounded table cell.
 - Grow the fault catalogue faster than the policy adapts; the numbers stay honest only while the population outpaces the tuning.
