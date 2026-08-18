@@ -186,6 +186,31 @@ A positive result beyond the floor supports the registered capability wording: "
 An inside-floor result is `inconclusive`, a negative result beyond the floor is `negative`, and a positive result is `artifact-alone` when `base_pct > F_O4` or `joint` otherwise.
 Arm 3 takes no part in token-identity checks because it is a different model.
 
+**Amendment, 2026-08-18, before any measurement exists: O4's identity exclusion.**
+Sections 5 and 6 as first written specified which rounds O1, O2 and O3 exclude and said nothing about O4, so the harness had to choose and the choice was not registered.
+Ruled by Vlad before the run: O4 excludes `kernel-diverged` rounds, the same rule O3 uses.
+
+The reasoning, and the counter-argument it had to beat.
+O4 claims a user runs the 3-bit model with our kernel and gets the speed of stock 4-bit.
+A `kernel-diverged` round is one where our kernel's rounding flipped a near-tie and the model emitted a different token, so what was timed in that round is not the output the claim is about, and a speed number taken from it is precise about the wrong thing.
+Against that: the divergence is a mismatch between arms 1 and 2, while O4 compares arms 1 and 3, and arm 3 is a different model whose tokens differ regardless, so token identity is arguably not O4's axis at all.
+The first argument wins because the claim is about our kernel rather than about the pair.
+
+What this is expected to cost, stated more carefully than it first was.
+An earlier draft of this amendment said the cost is zero because greedy speculative decoding is lossless by construction, and that reason does not support the claim.
+Read at `mlx_lm/generate.py:620-634`, the acceptance rule compares each drafted token with the TARGET's own token and, on the first mismatch, emits the target's token instead: `if tn != dtn: break`, then `yield tokens[n]`.
+So the algorithm is lossless with respect to the target's decisions, and every emitted token is one the target chose.
+That says nothing about `kernel-diverged`, which is arm 1 against arm 2: both run the same lossless algorithm, and what differs is only which kernel computed the target's logits.
+
+The honest expectation is therefore "rare", not "zero".
+Our kernel is certified equal to stock within the contract tolerance, which is not bit-equality, and an `argmax` over near-tied logits can flip on a difference far smaller than that tolerance.
+The bit-identity test added at the 2026-08-18 merge gate pins the two rank SPELLINGS of our own kernel against each other, not our kernel against MLX's.
+
+If the count is not zero, that is a finding about numerical equivalence at these widths, which is a larger result than anything O4 reports, and the exclusion rule is the least interesting consequence of it.
+The same reasoning applies to `mlx-m-dependent`, which can fire for MLX's own stack whenever its M = 1 and M = K + 1 paths round a near-tie differently.
+
+Registered now rather than after the numbers arrive, because a rule chosen once the deltas are visible cannot be shown not to have been chosen to fit them.
+
 No outcome uses a round excluded by its identity rule.
 The two drafts retain separate O1, O2, O3, and O4 results.
 There is no maximum across drafts because that would introduce the same selection bias one level above the K grid.
