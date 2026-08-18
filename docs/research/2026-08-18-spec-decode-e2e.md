@@ -97,6 +97,14 @@ The bias this leaves is stated rather than hidden.
 The probe measures the target's forward in isolation, while in the timed rounds that forward can in principle overlap other work, so the per-pass cost is an upper bound and `verify_share` and `ceiling_pct` are therefore upper bounds too.
 The direction matters: an overstated ceiling can call a cell a decider when its true expected gain sits below the floor, which weakens the safeguard rather than manufacturing a win, since the ceiling enters no verdict's numerator or denominator and only decides whether a cell is read at all.
 
+Measured rather than read, 2026-08-18, on the pinned 3-bit target with the 0.6B draft at K = 6 and 12 generated tokens, through a wiring probe that took no lock and made no claim.
+The target and every draft are the same class, `mlx_lm.models.qwen3.Model`, which is why the counter must be class-level and must filter on `self is target`.
+The target was called seven times at shapes `(1, 63)`, `(1, 7)` five times, and `(1, 6)`, every one of them rank 2, so the prefill is the single width-63 call this amendment predicts and the verification passes are width K + 1.
+The response object had no `generation_time` attribute, and `generation_tokens / generation_tps` gave 0.3029 s against a 0.7440 s wall clock that also carried prefill and the first token, which is the gap the derivation exists to exclude.
+
+The last pass was width 6, not width 7, and 6 is INSIDE the routed window.
+That is the section's "the last pass can be shorter" case occurring on the first probe, and it lands somewhere that routes rather than somewhere that does not, so counting by observed shape is load-bearing here and not a precaution: a count that assumed every pass was K + 1 wide would have been wrong by one whole pass of routed sites in this very run.
+
 ### Token identity
 
 Every arm's complete token sequence is recorded for every round.
