@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -241,8 +242,9 @@ def _response(token: int):
     )
 
 
-# Omitting the per-cell guard or changing stream_generate's speculative keywords makes this red.
-def test_main_reaches_the_grid_with_the_machine_stubbed(monkeypatch):
+def _stub_the_machine(monkeypatch):
+    """Everything below the harness boundary, faked, so main() walks its
+    wiring end to end on a machine that does nothing."""
     _pins_ok(monkeypatch, h)
     _lock_granted(monkeypatch, h)
     monkeypatch.setattr(h, "require_idle", lambda label: {"idle": True})
@@ -280,6 +282,40 @@ def test_main_reaches_the_grid_with_the_machine_stubbed(monkeypatch):
             yield _response(token)
 
     monkeypatch.setattr(h, "stream_generate", stream_generate)
+    return guarded
 
+
+# Omitting the per-cell guard or changing stream_generate's speculative keywords makes this red.
+def test_main_reaches_the_grid_with_the_machine_stubbed(monkeypatch):
+    guarded = _stub_the_machine(monkeypatch)
     assert h.main([]) == 0
     assert guarded, "main never reached the first per-cell memory guard"
+
+
+# The K=4 follow-up's one change (docs/research/2026-08-18-spec-decode-k4-followup.md,
+# section 3): the primary cell is a registered input. Dropping the flag, or
+# parsing it and not passing it through to the verdicts, makes this red; so
+# does letting the default drift off the parent's K=6.
+def test_the_primary_cell_flag_reaches_both_verdicts(monkeypatch, capsys):
+    _stub_the_machine(monkeypatch)
+    assert h.main(["--primary-k", "4"]) == 0
+    results = [
+        json.loads(line[len("RESULT: "):])
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("RESULT: ")
+    ]
+    primary = {(r["draft"], r["outcome"]): r["primary_k"]
+               for r in results if r["outcome"] in ("O3", "O4")}
+    assert primary and set(primary.values()) == {4}, primary
+
+
+def test_the_primary_cell_defaults_to_the_parents_k6(monkeypatch, capsys):
+    _stub_the_machine(monkeypatch)
+    assert h.main([]) == 0
+    primary = {
+        json.loads(line[len("RESULT: "):])["primary_k"]
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("RESULT: ")
+        and json.loads(line[len("RESULT: "):])["outcome"] in ("O3", "O4")
+    }
+    assert primary == {6}

@@ -371,15 +371,33 @@ def decide_o2(
 
 
 
+def _registered_primary(primary_k: int) -> int:
+    """The primary cell is a registered input, not a free parameter.
+
+    It defaults to the parent pre-registration's K = 6 and may be named
+    otherwise only by a pre-registration that fixes it before the run, which
+    is what the K = 4 follow-up does (docs/research/
+    2026-08-18-spec-decode-k4-followup.md, section 3). A cell outside the
+    grid has no rounds to read and is refused rather than read as empty.
+    """
+    if primary_k not in K_GRID:
+        raise RunInvalid(f"primary cell K={primary_k} is outside the grid")
+    return primary_k
+
+
 def decide_o3(
     cells: Mapping[int, Sequence[RoundSample]],
+    *,
+    primary_k: int = PRIMARY_K,
 ) -> dict[str, object]:
-    """Read the fixed K=6 product number and the labelled grid maximum."""
+    """Read the registered primary cell's product number and the labelled
+    grid maximum."""
+    primary_k = _registered_primary(primary_k)
     # The PRIMARY cell is computed first and on its own. The exploratory
     # maximum below is labelled "never the quoted number", so it must not be
     # able to take the quoted number down with it: a K cell whose rounds were
     # all excluded by the identity rule is skipped there rather than raising.
-    primary = _comparison(cells.get(PRIMARY_K, ()), "O3", 1, 0)
+    primary = _comparison(cells.get(primary_k, ()), "O3", 1, 0)
     comparisons = {}
     for k in K_GRID:
         try:
@@ -402,7 +420,7 @@ def decide_o3(
         if k in comparisons and comparisons[k].delta_pct == exploratory_delta
     )
     return {
-        "primary_k": PRIMARY_K,
+        "primary_k": primary_k,
         "arm1_tps": primary.numerator_tps,
         "arm2_tps": arm2_tps,
         "arm0_tps": primary.denominator_tps,
@@ -424,15 +442,18 @@ def decide_o3(
 
 def decide_o4(
     cells: Mapping[int, Sequence[RoundSample]],
+    *,
+    primary_k: int = PRIMARY_K,
 ) -> dict[str, object]:
     """Compare speculative 3-bit arm 1 with speculative stock 4-bit arm 3."""
-    comparison = _comparison(cells.get(PRIMARY_K, ()), "O4", 1, 3)
+    primary_k = _registered_primary(primary_k)
+    comparison = _comparison(cells.get(primary_k, ()), "O4", 1, 3)
     arm2_tps = statistics.median(
         r.generation_tps[2] for r in comparison.rounds
     )
     base_pct = delta_pct(arm2_tps, comparison.denominator_tps)
     return {
-        "primary_k": PRIMARY_K,
+        "primary_k": primary_k,
         "arm1_tps": comparison.numerator_tps,
         "arm2_tps": arm2_tps,
         "arm3_tps": comparison.denominator_tps,
