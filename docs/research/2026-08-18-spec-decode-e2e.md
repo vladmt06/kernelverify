@@ -113,6 +113,16 @@ Token identity was checked across all four comparable arms in the same probe and
 None of that is a result and none of it is binding, because the machine was not idle and nothing was timed.
 It says only that the run can produce a reading rather than a refusal, which is what an hour of GPU time is worth checking for in advance.
 
+A full non-binding dry run of the finished harness was then taken on 2026-08-18, outside the detached runner and therefore quotable for nothing, purely to establish that the grid completes.
+It completed all ten cells at exit 0 with no stop, no invalid cell and a clean closing idle sample, every `finish_reason` came back `length` so no arm was cut short by an end-of-sequence token, and not one identity label fired across fifty arm-cells, so neither our kernel nor MLX's own M-dependence flipped a token anywhere.
+Its K = 10 cell on the 1.7B draft read `NULL-uncontrolled` with 1260 routed calls, which is 252 sites across five rounds of one short in-window pass, and is the case the amendment above was written for.
+
+One prediction is recorded here before the binding run rather than after it.
+That dry run's per-arm spreads had a median of 1.16% and a worst case of 9.52%, against the binding A/B's recorded noise floors of 0.05% to 0.10%.
+The ceilings this experiment computes are roughly `verify_share` times 15 to 16 percent, so floors of that size would put several cells below their ceiling and make them read `not-a-decider`.
+The expectation is that the detached run's floors come out far lower, because the dry run shared the machine with an interactive session while the binding run holds the machine alone, and because the A/B reached 0.05% on the same hardware through the same detached path.
+If the floors do NOT fall, `not-a-decider` is the pre-registered honest answer for those cells and is recorded as such; it is not a licence to widen a threshold after seeing the numbers.
+
 ### Amendment, 2026-08-18: which calls are verification passes, and when a null cell stops being one
 
 Two more gaps, one raised by the dispatched writer refusing a third time and one found here by measuring the null cells rather than reasoning about them.
