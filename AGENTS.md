@@ -92,6 +92,11 @@ Vlad's global instructions still apply; this file adds the project's layout, how
   The grid's positive cells at K = 2 and K = 4 are labelled exploratory and selection-biased in that document and are not a product claim; quoting them as one is the specific mistake section 10 exists to prevent.
   The K = 4 cell was then pre-registered on its own and re-measured with `--primary-k 4` (`docs/research/2026-08-18-spec-decode-k4-followup.md`): NO-GO, and worth reading for why - the composed and kernel point estimates reproduced to within 0.05 percentage points while a single cold first round put that cell's floor above its ceiling.
   The flag exists for that pre-registration and defaults to the parent's K = 6; reading any other cell as primary needs its own registered document first.
+- `bench/serve_batch_decode.py` - the batched-serving grid, pre-registered in `docs/research/2026-08-18-batch-decode-e2e.md`.
+  It drives mlx-lm's OWN `BatchGenerator`, the engine `mlx_lm.server` runs, rather than a decode loop written here, so what it times is a path a user has.
+  Four arms at `B_GRID = [1, 4, 5, 6, 7, 8, 9, 11, 12, 16]`; the in-window cells 5 to 9 are the whole routed zone and all five must pass for GO.
+  It configures the engine with `prefill_batch_size = 16` so every decode call has full width B; under the server default of 8 a burst above 8 streams decodes its first steps at width 8, which is inside the routed window, and that is registered as out of scope.
+  A decode pass is a rank-2 call of width B and the one prefill is width `B * (PROMPT_T - 1)`; the engine samples one step ahead, so the decode-call count is observed and never asserted to equal `GEN_TOKENS`.
 - `bench/price_qmv_boundary.py` - the routing-boundary pricing probe (verify-then-time, interleaved arms, refusal-gated), with its pre-registered rule in the module docstring: what makes a cell WIN, and the only way a routed window may widen.
   ADR 0015 is the reading of its 2026-08-15 run.
 - `bench/calibrate_k.py` - measures what the admissible-implementation contract demands of K, and how many ensemble members it takes to represent that contract.
@@ -107,7 +112,7 @@ Vlad's global instructions still apply; this file adds the project's layout, how
 - `bench/measure_baselines.py` - the one command that measures the machine's baselines across both stacks and appends them to `bench/.baselines/<date>.jsonl`.
   It alternates the arms within each workload cell (one sampling group per cell, schema v3), refuses to call a number binding on a busy or unplugged machine, and refuses sub-millisecond samples as absolute claims.
 - `bench/machine_state.py` - the idle gate, the timing floor, and the one machine-wide measurement lock (`MeasurementLock`, an `fcntl.flock` on a fixed path), with the reason each exists.
-  Six harnesses take it today: `calibrate_quant_serving.py`, `price_qmv_boundary.py`, `derive_repaired_member_column.py`, `derive_prerepair_device_records.py`, `spike_spec_verify.py` and `serve_spec_decode.py`.
+  Seven harnesses take it today: `calibrate_quant_serving.py`, `price_qmv_boundary.py`, `derive_repaired_member_column.py`, `derive_prerepair_device_records.py`, `spike_spec_verify.py`, `serve_spec_decode.py` and `serve_batch_decode.py`.
   `serve_sub4bit.py`, `calibrate_quant_device.py`, `measure_baselines.py`, `spike_mlx_e2e.py` and `emit_pack_certificates.py` do NOT, which is the gap tasks I1 and I2 of the 2026-08-16 plan close; until they land, running two of those together is on the operator.
 - `bench/interleave.py` - the shared interleaved-timing engine every GPU A/B in bench/ runs on: dispatch-size calibration to `MIN_SAMPLE_MS`, the timed dispatch itself, the shared per-round sampler `interleaved_samples` with its guard seam, the canary spread limit a pack gate withholds a certificate above, and the arms-agree smoke check.
   One copy of the discipline, so a timing rule amended in one gate cannot silently stay old in another.
@@ -141,6 +146,7 @@ cd /Users/vlad/kernelverify
 .venv/bin/python bench/emit_pack_certificates.py      # needs the Metal GPU; rewrites bench/.certificates/ and its MANIFEST.md
 .venv/bin/python -u bench/serve_sub4bit.py --ab       # needs the Metal GPU and both pinned artifacts; fills sections 9-10 of the sub4bit findings doc
 bench/start_binding_run.sh bench/serve_spec_decode.py # ~14 min detached; needs the Metal GPU and ALL FOUR pinned models; fills sections 9-10 of the spec-decode e2e doc
+bench/start_binding_run.sh bench/serve_batch_decode.py # ~25 min detached; needs the Metal GPU and BOTH pinned 4B models; fills sections 9-10 of the batch-decode e2e doc
 ```
 
 - `serve_spec_decode.py` is the one harness that needs four pinned models rather than two: the 3-bit and 4-bit targets plus `qwen3-0.6b-4bit-g64` and `qwen3-1.7b-4bit-g64` as drafts.
