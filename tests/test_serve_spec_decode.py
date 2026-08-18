@@ -1,4 +1,4 @@
-"""Host-side contracts for the forthcoming speculative-decode harness."""
+"""Host-side contracts for the speculative-decode harness."""
 
 from __future__ import annotations
 
@@ -26,15 +26,16 @@ if METAL_DEVICE is None:
 nn = pytest.importorskip("mlx.nn")
 
 # These tests were written before the harness, which is the order this repo
-# wants, so the module has to survive its absence. A bare import raises
-# ModuleNotFoundError during COLLECTION, which pytest reports as an error
-# rather than a failure and which aborts the whole session - so this one
-# missing file would take every other test file down with it, exactly the
-# failure mode `tests/test_serve_sub4bit.py` documents for the mlx.nn import.
+# wants. The guard stays now that the harness exists, for the reason it was
+# written: a bare import of a missing module raises during COLLECTION, which
+# pytest reports as an error rather than a failure and which aborts the whole
+# session, so a deleted or renamed harness would take every other test file
+# down with it - the failure mode `tests/test_serve_sub4bit.py` documents for
+# the mlx.nn import. A skip here is loud in the summary; an abort is not.
 h = pytest.importorskip(
     "serve_spec_decode",
-    reason="bench/serve_spec_decode.py is not written yet; these are its "
-           "pre-registered host-side contracts",
+    reason="bench/serve_spec_decode.py is missing; these are its host-side "
+           "contracts and cannot run without it",
 )
 
 

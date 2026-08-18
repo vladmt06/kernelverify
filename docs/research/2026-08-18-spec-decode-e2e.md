@@ -365,6 +365,8 @@ This section is present and says "none" because section 4 requires it to be pres
 
 ### Acceptance and the verification share
 
+Every figure in this table is arm 2's, the stock 3-bit speculative arm, because the share and the ceiling are defined on that arm by section 5; the other speculative arms' `accepted_per_pass` and `verify_passes` are in their rows in the run log and are not summarised here.
+
 | draft | K | accepted per pass | verification passes | verify share | ceiling |
 |---|---|---|---|---|---|
 | 0.6B | 2 | 2.21 | 58 | 0.8437 | 0% |
@@ -473,6 +475,7 @@ Two facts about them are worth carrying into the next pre-registration rather th
 The first is that the composed number is positive at both, +21.95% and +10.22% for the 0.6B draft against plain decode.
 The second is that these two cells are not the same kind of cell: at K = 2 nothing routes, so the whole of +21.95% is speculation and the kernel contributes nothing, while at K = 4 the kernel contributes +4.02 points of the +10.22%.
 K = 4 with the 0.6B draft is therefore the only cell in this grid where speculation pays AND the kernel helps, and the honest way to find out whether that is real is to pre-register it and measure it again, not to read it off this grid.
+To be explicit about what the paragraph above is and is not: it names two exploratory numbers so that a reader can see why the follow-up is worth pre-registering, and section 6 registered nothing about either cell, so neither number is a finding of this run and neither may be quoted as one.
 
 The primary cell was fixed at K = 6 before the run because it was the paper's optimum and the spike's width.
 The measurement says that on this stack K = 6 is already past the point where speculation pays, and choosing it in advance is what makes that statement worth anything.

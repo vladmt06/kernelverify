@@ -65,6 +65,7 @@ from spec_decode_rules import (  # noqa: E402
     eligible_rounds,
     expected_routed_calls,
     identity_labels,
+    verification_passes,
     verify_share,
 )
 
@@ -85,10 +86,6 @@ ARM_ORDER = (1, 2, 3, 4, 0)
 class _CallCounter:
     shapes: list[tuple[int, ...]] = field(default_factory=list)
     seconds: list[float] = field(default_factory=list)
-
-    @property
-    def time_total(self) -> float:
-        return sum(self.seconds)
 
 
 @contextmanager
@@ -126,34 +123,14 @@ def _single_prompt(prompts):
     return prompts
 
 
-def _verification_shapes(shapes, k: int, cell: str):
-    shaped_widths = []
-    for shape in shapes:
-        if len(shape) != 2:
-            raise RunInvalid(
-                f"{cell}: observed target shape {tuple(shape)} is rank "
-                f"{len(shape)}, not rank-2 token identifiers"
-            )
-        shaped_widths.append((shape, math.prod(shape)))
-
-    prefills = [width for _, width in shaped_widths if width > k + 1]
-    if len(prefills) > 1 or any(width != PROMPT_T - 1 for width in prefills):
-        raise RunInvalid(
-            f"{cell}: expected at most one prefill call of width "
-            f"{PROMPT_T - 1}, observed wider widths {prefills}"
-        )
-    return [shape for shape, width in shaped_widths if width <= k + 1]
+def _sites_routing_at(width: int, site_cells) -> int:
+    """How many wrapped sites the routing table routes at one width."""
+    return sum(1 for site_cell in site_cells if should_dispatch(width, *site_cell))
 
 
 def _routed_sites_at(shapes, site_cells):
     widths = {math.prod(shape) for shape in shapes}
-    return {
-        width: sum(
-            1 for site_cell in site_cells
-            if should_dispatch(width, *site_cell)
-        )
-        for width in widths
-    }
+    return {width: _sites_routing_at(width, site_cells) for width in widths}
 
 
 def _generate(target, tokenizer, prompt, *, draft_model, k, sync, cell):
@@ -238,9 +215,16 @@ def _run_arm(
         if patch is not None:
             patch.uninstall()
 
-    verification_shapes = _verification_shapes(
-        run["target_call_shapes"], k, cell
-    )
+    # The classifier is the rules module's, so the rule lives in one place;
+    # the cell's K applies to arm 0 as well, whose width-1 decode steps all
+    # sit under K+1 and whose one prefill is the same width-63 call.
+    try:
+        verification_shapes = verification_passes(
+            run["target_call_shapes"], k=k, prompt_t=PROMPT_T
+        )
+    except RunInvalid as error:
+        raise RunInvalid(f"{cell}: {error}") from error
+    run["verification_shapes"] = verification_shapes
     run["verify_passes"] = len(verification_shapes)
     if arm != 0:
         run["accepted_per_pass"] = accepted_per_pass(
@@ -251,10 +235,13 @@ def _run_arm(
     run["hard_fallbacks"] = hard_fallbacks
     run["site_cells"] = site_cells
     if arm == 1:
-        routed_sites = _routed_sites_at(run["target_call_shapes"], site_cells)
+        # Section 4: the sum runs over the observed VERIFICATION passes. It
+        # would agree numerically over every call today only because the
+        # table declines the prefill width, and that is not the rule.
+        routed_sites = _routed_sites_at(verification_shapes, site_cells)
         run["routed_sites_at"] = routed_sites
         run["expected_routed_calls"] = expected_routed_calls(
-            run["target_call_shapes"], routed_sites
+            verification_shapes, routed_sites
         )
     elif arm == 4:
         run["expected_routed_calls"] = 0
@@ -473,10 +460,7 @@ def main(argv=None) -> int:
                 )
                 ceiling = ceiling_for(k, share)
                 site_cells = runs_by_arm[1][0]["site_cells"]
-                routed_sites_at_width = sum(
-                    1 for site_cell in site_cells
-                    if should_dispatch(k + 1, *site_cell)
-                )
+                routed_sites_at_width = _sites_routing_at(k + 1, site_cells)
 
                 for arm in ARM_ORDER:
                     row = {

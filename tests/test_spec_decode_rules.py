@@ -29,6 +29,7 @@ from spec_decode_rules import (
     is_decider,
     noise_floor,
     spread_pct,
+    verification_passes,
     verify_share,
 )
 
@@ -94,6 +95,30 @@ def test_expected_routed_calls_flattens_every_dimension_of_the_token_array():
 def test_expected_routed_calls_refuses_a_shape_that_is_not_the_registered_seam():
     with pytest.raises(RunInvalid, match="rank"):
         expected_routed_calls([(1, 7, 2560)], {7: 252})
+
+
+# The section-4 amendment: a verification pass is a target call of width at
+# most K+1, one wider call is allowed and must be the width-63 prefill, and a
+# short final pass STAYS a pass. Treating the width-2 tail as prefill, or
+# letting a second wide call through, makes one of these red.
+def test_verification_passes_keep_the_short_tail_and_drop_the_one_prefill():
+    shapes = [(1, 63), (1, 7), (1, 7), (1, 2)]
+    assert verification_passes(shapes, k=6, prompt_t=64) == [
+        (1, 7), (1, 7), (1, 2)
+    ]
+
+
+@pytest.mark.parametrize(
+    "shapes,why",
+    [
+        ([(1, 63), (1, 63), (1, 7)], "two"),        # a second prefill
+        ([(1, 40), (1, 7)], "40"),                  # wrong prefill width
+        ([(1, 7, 2560)], "rank"),                   # not the token-id seam
+    ],
+)
+def test_verification_passes_refuse_a_seam_that_moved(shapes, why):
+    with pytest.raises(RunInvalid, match=why):
+        verification_passes(shapes, k=6, prompt_t=64)
 
 
 # Replacing true division with floor division makes the 3.2 result red.
@@ -585,6 +610,17 @@ def test_public_eligibility_refuses_when_nothing_survives():
         eligible_rounds([_round(valid=False)], "O2")
 
 
+# Indexing K_GRID rather than the surviving comparisons makes this a KeyError,
+# which main() does not catch, so the exploratory report would take the run down
+# with a traceback at the verdict stage after every GPU minute was spent - and
+# only in a case the primary cell is deliberately insulated from.
+def test_o3_survives_a_cell_whose_rounds_were_all_excluded():
+    cells = _grid(**{"4": [_round(identity={"kernel-diverged": 3})]})
+    result = decide_o3(cells)
+    assert result["primary_k"] == 6
+    assert 4 not in result["exploratory"]["ks"]
+
+
 # Passing empty paired sets to statistics.median instead of RunInvalid makes these red.
 @pytest.mark.parametrize(
     "call",
@@ -648,7 +684,7 @@ def _import_roots(module_name: str) -> set[str]:
 # raising, so an offending import one level down would take the whole collection
 # with it and this test would never get to fail.
 def test_the_rules_module_cannot_reach_outside_the_standard_library():
-    allowed_siblings = {"attribution"}
+    allowed_siblings = {"attribution", "machine_state"}
     roots = _import_roots("spec_decode_rules")
     assert roots <= sys.stdlib_module_names | allowed_siblings
     for sibling in roots & allowed_siblings:

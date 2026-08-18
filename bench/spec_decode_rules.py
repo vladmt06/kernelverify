@@ -1,7 +1,13 @@
 """Pure decision arithmetic for the speculative-decode end-to-end run.
 
-This module deliberately imports only the standard library so the registered
-outcomes remain testable on machines where importing ``mlx.nn`` aborts.
+It imports the standard library and two stdlib-only siblings, ``attribution``
+and ``machine_state``, and nothing else, so the registered outcomes stay
+testable on machines where importing ``mlx.nn`` aborts the interpreter. The
+siblings are there so a rule this module needs is not spelled a second time
+here: `composed_attribution` is the A/B's own attribution vocabulary and
+`spread_pct` is the quantity `MAX_SPREAD_PCT` bounds. A test walks the import
+graph transitively and fails if either sibling ever reaches outside the
+standard library.
 """
 
 from __future__ import annotations
@@ -12,6 +18,7 @@ import statistics
 from attribution import composed_attribution
 from dataclasses import dataclass, field
 from itertools import zip_longest
+from machine_state import spread_pct as machine_spread_pct
 from typing import Mapping, Sequence
 
 
@@ -76,6 +83,43 @@ def in_window(k: int) -> bool:
     return 5 <= k + 1 <= 9
 
 
+def _token_width(shape: Sequence[int]) -> int:
+    """The width of one observed target call at the token-identifier seam."""
+    if len(shape) != 2:
+        raise RunInvalid(
+            f"observed pass shape {tuple(shape)} is rank {len(shape)}; the "
+            "counted seam takes rank-2 token identifiers"
+        )
+    return math.prod(shape)
+
+
+def verification_passes(
+    shapes: Sequence[Sequence[int]], *, k: int, prompt_t: int
+) -> list[tuple[int, ...]]:
+    """The target calls that are verification passes, in order.
+
+    A pass is a call whose width is at most K + 1; a wider call is prefill
+    (doc, section 4 amendment of 2026-08-18). The separation is asserted
+    rather than trusted: at most one call may be wider than K + 1 and it must
+    be the single width-(PROMPT_T - 1) call `_prefill` makes, or the seam has
+    moved and the cell is invalid. A final pass shorter than K + 1 is still a
+    pass, which is the case the exact count has to survive.
+    """
+    widths = [(tuple(shape), _token_width(shape)) for shape in shapes]
+    prefill = [width for _, width in widths if width > k + 1]
+    if len(prefill) > 1:
+        raise RunInvalid(
+            f"observed {len(prefill)} calls wider than K+1={k + 1}, expected "
+            f"at most one prefill; widths {prefill} (two or more)"
+        )
+    if prefill and prefill[0] != prompt_t - 1:
+        raise RunInvalid(
+            f"the one call wider than K+1={k + 1} has width {prefill[0]}, "
+            f"expected the prefill width {prompt_t - 1}"
+        )
+    return [shape for shape, width in widths if width <= k + 1]
+
+
 def expected_routed_calls(
     shapes: Sequence[Sequence[int]], routed_sites_at: Mapping[int, int]
 ) -> int:
@@ -90,15 +134,7 @@ def expected_routed_calls(
     means the seam moved and the old ``prod(shape[:-1])`` reading of it would
     report width 1 for every pass instead of failing.
     """
-    widths = []
-    for shape in shapes:
-        if len(shape) != 2:
-            raise RunInvalid(
-                f"observed pass shape {tuple(shape)} is rank {len(shape)}; the "
-                "counted seam takes rank-2 token identifiers"
-            )
-        widths.append(math.prod(shape))
-    return sum(routed_sites_at[width] for width in widths)
+    return sum(routed_sites_at[_token_width(shape)] for shape in shapes)
 
 
 def accepted_per_pass(generation_tokens: int, verify_passes: int) -> float:
@@ -133,9 +169,17 @@ def is_decider(ceiling: float, floor: float) -> bool:
 
 
 def spread_pct(samples: Sequence[float]) -> float:
+    """Round-to-round disagreement, delegated so there is one formula.
+
+    `machine_state.spread_pct` is the quantity `MAX_SPREAD_PCT` bounds and every
+    other harness reads; re-deriving it here would be the same rule spelled
+    twice with nothing binding the spellings, which is the defect
+    `bench/attribution.py` exists to record. That module is stdlib-only, so
+    importing it costs this module nothing it was protecting.
+    """
     if not samples:
         raise RunInvalid("no eligible paired round")
-    return 100 * (max(samples) - min(samples)) / statistics.median(samples)
+    return machine_spread_pct(samples)
 
 
 def delta_pct(t_a: float, t_b: float) -> float:
@@ -348,8 +392,14 @@ def decide_o3(
     speculation_pct = delta_pct(arm2_tps, primary.denominator_tps)
     kernel_pct = delta_pct(primary.numerator_tps, arm2_tps)
     exploratory_delta = max(c.delta_pct for c in comparisons.values())
+    # Over the cells that HAVE a comparison, not over K_GRID: the loop above
+    # skips a cell whose rounds were all excluded, so indexing K_GRID here
+    # raised KeyError rather than RunInvalid, and main() catches only the
+    # latter - the exploratory report would have taken the run down with a
+    # traceback at the verdict stage, after every GPU minute was spent.
     exploratory_ks = tuple(
-        k for k in K_GRID if comparisons[k].delta_pct == exploratory_delta
+        k for k in K_GRID
+        if k in comparisons and comparisons[k].delta_pct == exploratory_delta
     )
     return {
         "primary_k": PRIMARY_K,

@@ -75,7 +75,7 @@ import mlx.nn as nn  # noqa: E402
 
 # One copy of the timing discipline, imported rather than restated: a rule
 # amended in interleave.py must not silently stay old here (AGENTS.md).
-from attribution import composed_attribution  # noqa: F401
+from attribution import composed_attribution  # noqa: E402
 from machine_state import MeasurementLock, spread_pct  # noqa: E402
 
 # The refusal vocabulary, single-sourced: this harness numbers nothing itself,

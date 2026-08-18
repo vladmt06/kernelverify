@@ -1342,14 +1342,7 @@ def _cell_loop_order(source: str, func_name: str) -> tuple[int, int]:
     [
         (BENCH_DIR / "serve_sub4bit.py", "mde"),
         (BENCH_DIR / "serve_sub4bit.py", "ab"),
-        pytest.param(
-            BENCH_DIR / "serve_spec_decode.py",
-            "main",
-            marks=pytest.mark.skipif(
-                not (BENCH_DIR / "serve_spec_decode.py").is_file(),
-                reason="serve_spec_decode.py is not implemented yet",
-            ),
-        ),
+        (BENCH_DIR / "serve_spec_decode.py", "main"),
     ],
 )
 def test_the_timed_modes_clear_the_buffer_cache_before_the_budget_reads(
