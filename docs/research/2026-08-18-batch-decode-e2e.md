@@ -156,3 +156,18 @@ At B up to 8 this configuration matches what `mlx_lm.benchmark -b B` drives, so 
 Printed first in every run log, as `provenance()` does: the sha256 pins of both models, the MLX and mlx-lm versions, the machine fingerprint, the routed-window pins, and one sha256 digest of the B prompt token lists per cell.
 
 The engine's decode call line and its construction-time first step are pinned by tests against the installed mlx-lm source, so an upgrade that moves the seam turns the suite red rather than silently changing what the counter counts.
+
+### Amendment, 2026-08-18: where the prompt digests are printed, and what they are a digest of
+
+Written before the harness exists and before any measurement, because the section above asked for something the registered ordering forbids.
+
+Section 8 put the per-cell prompt digests on the `provenance()` line.
+The ordering this harness inherits prints that line before any model is loaded, and a prompt digest needs the target's tokenizer, so the two cannot both hold.
+Raising a refusal here rather than reordering silently is the point of writing the ordering down.
+
+From this amendment the digests are printed on their own line, `PROMPTS: {json}`, immediately after the two models load and before the first cell's guard.
+The pins, versions, machine fingerprint and routed-window pins stay first and stay unchanged, so what "printed first" protected is untouched: nothing that identifies the artifacts or the machine moves.
+
+The digest is defined exactly, because a digest whose serialisation is unwritten cannot be compared across runs.
+For each cell it is `sha256(json.dumps(token_lists, separators=(",", ":")).encode("utf-8")).hexdigest()`, where `token_lists` is the list of B prompts in insertion order, each an ordinary list of integer token ids.
+The line carries one such digest per B in the grid, keyed by B.
