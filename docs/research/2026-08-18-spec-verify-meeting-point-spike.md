@@ -50,4 +50,44 @@ Those need a draft model and a draft/verify loop, neither of which exists here, 
 
 ## 6. Result
 
-Filled after the run.
+Measured by `bench/spike_spec_verify.py`, detached runner, 2026-08-18 00:21 UTC, exit 0, AC power, display asleep, five consecutive clean idle samples before the start.
+Same pinned 3-bit artifact and machine fingerprint as the 2026-08-17 A/B.
+
+**Verdict: GO.**
+
+| quantity | value |
+|---|---|
+| arm S, spec-routed, median | 33.711 ms |
+| arm T, stock, median | 39.252 ms |
+| ratio stock/spec | 1.1644 |
+| gain | 16.44% |
+| arm S spread | 0.327% |
+| arm T spread | 0.280% |
+| noise floor | 0.327% |
+
+The gain is 50 times the noise floor, so the pre-registered INCONCLUSIVE branch does not apply and the NO-GO branch is refuted.
+
+The premise held too, and it was checked before the timing rather than assumed.
+One verification pass routed 504 calls across 252 wrapped sites, and every fallback in that pass was the 64-token prompt prefill, refused by name as `m-64-outside-dispatch-<shape>`.
+That is the relaxed rule behaving as TODOS argued it would: the verification shape opens, and real prefill is still refused - not by a blunt sequence check, but by `should_dispatch` on the merits, because a 64-token prefill is far outside the routed window of 5..9.
+
+The number also agrees with evidence collected independently and earlier.
+The 2026-08-17 A/B measured 14.61% at M = 6 and 15.64% at M = 8 in the BATCH spelling; this run measures 16.44% at M = 7 in the SEQUENCE spelling.
+Three points, two harnesses, one monotone trend, and M = 7 lands exactly where its neighbours bracket it.
+That is what the meeting-point argument predicted, and it is now measured rather than argued.
+
+### What this does NOT establish
+
+It does not say speculative decoding is faster end to end.
+Drafting costs time and acceptance is fractional; arXiv 2607.17283's own measurement is that three of five configurations DECELERATE, and nothing here contradicts that.
+This measures one half of the ledger - the verification step, 16.44% cheaper when routed - and the other half needs a draft model and an acceptance rate.
+
+The timed block is also a fixed 7-token pattern replayed against a growing cache, where a real decoder verifies different drafted tokens each round.
+The projections see the same shapes either way, which is what the routing decision turns on, but a full loop is what would settle the end-to-end question.
+
+### What it licenses next, per section 4
+
+The eligibility rule is worth changing under its own pre-registration: `_RoutedLinear._ineligible` should compute the flattened M and let `should_dispatch` decide, rather than refusing every sequence step before it asks.
+That change re-opens a harness whose grid was re-measured on 2026-08-17, so it needs its own pre-registration and a re-run of the A/B to show the published grid is unmoved - the same discipline the `mx.clear_cache()` fix went through, and for the same reason.
+
+A draft/verify loop is now worth building, which it was not before this run.
