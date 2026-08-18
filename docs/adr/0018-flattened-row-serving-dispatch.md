@@ -30,5 +30,13 @@ Every M outside the routed window still falls back with `m-{M}-outside-dispatch-
 
 The two M = 7 rank spellings are checked for bit-identical routed output, so one M = 7 kernel certificate covers both presentations of the same rows.
 This ADR does not reinterpret or update the published A/B grid in Sections 9 and 10 of the findings document.
-That grid is re-measured under its own pre-registration before this lane merges; that pre-registration is not written yet, so this ADR asserts the plan for it rather than the existence of it.
-The spike's 16.44% is the only measurement behind this decision, and the code that produced it is deleted by the same change, so its reproduction under the shared patch is a separate check and this ADR is provisional until that check and the A/B re-run land.
+
+Both checks this ADR was provisional on have since landed, so it is no longer provisional.
+The spike's 16.44% was produced by code this change deletes, and its reproduction under the shared patch was pre-registered and taken on 2026-08-18 at 02:52 UTC: 16.385% against a 0.256% noise floor, verdict GO, a move of 0.055 percentage points which is inside both runs' spreads.
+The published grid was re-measured under its own pre-registration, written and committed before the run, and all three in-zone ratios landed inside the registered plus or minus 0.0014 band at 1.0569 against 1.0570, 1.1464 against 1.1469, and 1.1573 against 1.1565.
+Section 10's verdicts therefore stand as written and this change moved no published number.
+
+What is still outstanding is the end-to-end reading, not the decision.
+The claim this ADR makes is about which calls the dispatcher may route, and the two runs above are what support it.
+Whether routing a speculative decoder's verification pass makes generation faster for a user is a different question, pre-registered in `docs/research/2026-08-18-spec-decode-e2e.md`, and its O2 result per K per draft is evidence about that question rather than about this one.
+A NO-GO there would not reopen this decision: the flattened-width rule would still be the correct reading of a kernel that reshapes before it dispatches, and the routed window would still be the one the certificates cover.
