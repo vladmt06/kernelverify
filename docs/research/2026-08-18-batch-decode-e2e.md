@@ -171,3 +171,19 @@ The pins, versions, machine fingerprint and routed-window pins stay first and st
 The digest is defined exactly, because a digest whose serialisation is unwritten cannot be compared across runs.
 For each cell it is `sha256(json.dumps(token_lists, separators=(",", ":")).encode("utf-8")).hexdigest()`, where `token_lists` is the list of B prompts in insertion order, each an ordinary list of integer token ids.
 The line carries one such digest per B in the grid, keyed by B.
+
+### Amendment, 2026-08-18 (second): what an unread cell prints, and which rounds the exact-count check reads
+
+Written before the run and before the code that implements it, after a fresh-eyes review of the harness found two places where the sections above could be satisfied literally and still print a number nobody should read.
+
+An `identity-unstable` cell prints no outcome line at all.
+Section 4 says such a cell "is not read for OB1 or OB2" and leaves OB3 unmentioned, yet OB3's engine ratio is the same arm 1 against arm 2 median that OB1 reads, over the same surviving rounds, so a cell whose token identity is in doubt would print a clean-looking `AT-OR-BELOW-LOOP` or `ENGINE-ABOVE-LOOP` finding beside its own instability.
+From this amendment an unstable cell is unread for OB1, OB2 and OB3 alike.
+It prints one line, `RESULT: {"outcome": "CELL", "b": B, "verdict": "identity-unstable"}`, keeps every raw per-round row it produced, and counts against GO exactly as section 6 already says.
+Section 5's per-arm median and `spread_pct` are the statistics of a reading, so an unread cell prints neither.
+
+The arm 1 exact-count check reads the valid rounds only.
+Section 4 says a hard fallback invalidates its round, and says separately that arm 1 must match its expected routed sum exactly.
+A hard fallback at a routed site drops the observed count below the expected one, so reading an invalid round in that check would turn a registered per-round exclusion into a run-wide stop, which is the opposite of what invalidating one round means.
+From this amendment the arm 1 check reads the rounds section 4 leaves valid, which is what the apparatus this run inherits already does.
+Arm 4's expected zero is unchanged and is read in every round, because no fallback can push a count above zero.
