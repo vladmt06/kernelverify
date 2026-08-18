@@ -226,6 +226,25 @@ Verification of K drafted tokens is a batch-(K+1) matvec, which is the tile-widt
 So the kernel this repo already has, which ADR 0015 and the plan both record as useless at batch 1, is a kernel for the exact operation that a speculative decoder does once per accepted run.
 That is not a claim that it works; it is a claim that the two measurements meet, and that the meeting point is testable with things this repo already owns.
 
+#### Amendment, 2026-08-18: the meeting point is real on the pack side and blocked on ours
+
+Two things were checked before any spike was written, and together they change what the spike is.
+
+The kernel's routed window covers the verification width.
+`should_dispatch` routes M = 5..9 at all five intercepted projection shapes, so K = 6 verification at M = 7 sits inside it, and the 2026-08-17 A/B measured the neighbours it is bracketed by: 14.61% at M = 6 and 15.64% at M = 8, both wins well clear of noise floors of 0.12% and 0.07%.
+M = 7 has never been measured, because the A/B grid samples the window at 5, 6 and 8 only.
+
+The interception layer refuses the shape anyway, and the refusal is ours rather than MLX's.
+`_RoutedLinear._ineligible` returns `prefill-L{n}` for any 3-D input whose sequence length is not 1, before it computes M or consults `should_dispatch`.
+Verification is one stream of K+1 tokens, shape (1, 7, d_in); the A/B's B = 7 cell is seven streams of one token, shape (7, 1, d_in).
+Both flatten to the same (7, d_in) matmul and `_fused` flattens with `x.reshape(-1, d_in)` either way, so the kernel does identical work for both.
+Measured on 2026-08-18: (7, 1, 2560) routes, (1, 7, 2560) falls back with `prefill-L7`, and (7, 2560) routes.
+
+This does not confirm the paper's reading that "the quantized Metal backend executes 'parallel' verification serially", and it is not evidence against it either.
+It says something narrower and more useful: on this repo's own path, a speculative decoder would get zero routing today for a reason that has nothing to do with MLX and nothing to do with the kernel.
+The first spike is therefore not a draft/verify loop. It is a pre-registered change to the eligibility rule - let `should_dispatch` decide on the flattened M instead of refusing every sequence step - and a measurement of whether M = 7 as a sequence behaves as M = 7 as a batch.
+A null there kills the branch for a concrete reason; a win makes the draft/verify loop worth building.
+
 **Quantization paying for itself at decode has been measured once, on Apple silicon, and the mechanism was dispatch.**
 arXiv 2605.05699 reports an int4 KV cache running FASTER than fp16 across 256 to 4096-token prefixes on Apple M1 (37.0 against 39.4 ms/token on SmolLM2-360M, 211.9 against 246.8 on a 1.7B), with the whole transform in fp32 and quality preserved.
 Its own explanation is ours: "the cost is dispatch, not compute", and the fused single-dispatch kernel is what closed a 12-17% eager-mode penalty.
