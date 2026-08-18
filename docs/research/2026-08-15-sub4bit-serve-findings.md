@@ -369,6 +369,32 @@ The registered outcome:
 - A ratio outside the band is a FINDING, not a tuning knob. It re-derives section 10 from the new grid, and no amendment may explain it away by pointing at the eligibility change being "obviously" inert on batch shapes.
 - A ratio crossing 1.0 or its cell's noise floor reopens the verdict on `wide_qmv` staying in the pack. Nothing short of that does.
 
+### Result of the 2026-08-18 re-run, against the outcome pre-registered above
+
+Measured by `bench/serve_sub4bit.py --ab`, detached runner, 2026-08-18 03:53 to 04:26 UTC, 33 minutes, exit 0, AC power, display asleep, five consecutive clean idle samples before the start and a clean closing sample after it.
+No `--budget-gb` flag: the registered 24.0 GB default, which one clause of the outcome above turns on.
+The runner refused eleven consecutive idle samples before this attempt, three of them because macOS ran XProtect remediators at 92 to 98% CPU, and `attempts_consumed` stayed 0 through all of them; this is attempt 1 of 3.
+
+Every clause of the pre-registered outcome held.
+
+| B | binding run (published) | this re-run | delta | inside the +/- 0.0014 band |
+|---|---|---|---|---|
+| 5 | 1.0570 | 1.0569 | -0.0001 | yes |
+| 6 | 1.1469 | 1.1464 | -0.0005 | yes |
+| 8 | 1.1565 | 1.1573 | +0.0008 | yes |
+
+The budget held: all eight cells completed at the registered 24.0 GB default and the run exited 0.
+`require_pinned_zone` passed at the WIDENED registration of {5, 6, 7, 8, 9}, which is the first run to exercise it; the old {5, 6, 8} registration would have passed too, and that is the point of having re-measured rather than reasoned.
+Dispatch counts were exact at all three in-zone cells, 160020 fused calls against 160020 expected, and hard fallbacks were empty in every cell.
+`primary_verdict` is "win" at B = 5, 6 and 8 and "null" everywhere else, unchanged.
+
+So the flattened-width rule is inert on this grid, as section 4's amendment argued it would be, and the argument is now unnecessary because the measurement exists.
+The largest movement is 0.0008 at B = 8, against that cell's own noise floor of 0.02%, and the three deltas do not share a sign.
+Section 10's verdicts stand as written and are not re-derived.
+
+One number moved outside the in-zone cells and is recorded rather than passed over: B = 1's `ratio_ours_stock3` reads 1.0016 here against 1.0014 in the confirmation re-run, both inside their own noise floors and both "null".
+Nothing routes at B = 1, so neither figure is a claim about the kernel.
+
 ## 10. Verdicts
 
 PRIMARY CLAIM, the pack's contribution, arm 1 against arm 2, judged against each cell's own noise floor per section 6:
