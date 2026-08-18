@@ -105,6 +105,29 @@ The response object had no `generation_time` attribute, and `generation_tokens /
 The last pass was width 6, not width 7, and 6 is INSIDE the routed window.
 That is the section's "the last pass can be shorter" case occurring on the first probe, and it lands somewhere that routes rather than somewhere that does not, so counting by observed shape is load-bearing here and not a precaution: a count that assumed every pass was K + 1 wide would have been wrong by one whole pass of routed sites in this very run.
 
+### Amendment, 2026-08-18: which calls are verification passes, and when a null cell stops being one
+
+Two more gaps, one raised by the dispatched writer refusing a third time and one found here by measuring the null cells rather than reasoning about them.
+
+**Which target calls count as verification passes.**
+Nothing above said how the prefill is separated from the passes, and every quantity that divides by `verify_passes` depends on the answer.
+From this amendment a verification pass is a target call whose width is at most K + 1, and any wider call is prefill.
+With the registered `PROMPT_T = 64` the prefill is a single call of width 63, and K + 1 never exceeds 11, so the two classes cannot overlap.
+The harness asserts that separation rather than trusting it: exactly one call per generation may be wider than K + 1, and its width must be `PROMPT_T - 1`, or the cell is invalid and the run stops.
+A shorter-than-K+1 final pass stays a verification pass, which is the case section 4 already required the count to survive.
+
+**A null cell whose short final pass lands in the routed window.**
+O2 registered K = 2 and K = 10 as null controls that "must have zero routed calls", and any other reading invalidated the run.
+Measured 2026-08-18 on the pinned 3-bit target at `GEN_TOKENS = 128` with the registered prompt: the 0.6B draft gives K = 2 widths `{3: 57, 2: 1}` and K = 10 widths `{11: 33, 2: 1}`, both entirely outside the window, but the 1.7B draft gives K = 10 widths `{11: 31, 6: 1, 2: 1}`.
+That width-6 pass is inside the routed window 5..9, so arm 1 routes there, the observed count is not zero, and the rule as written would have declared the whole run invalid over a property of where `max_tokens` happens to fall rather than anything the interception did.
+
+From this amendment the null control is stated as the claim it was always making.
+`routed_sites_at(K + 1)` must be zero at K = 2 and K = 10, because that is the registered fact about the routing table, and a non-zero value means the table moved and the run IS invalid.
+The observed routed-call count is a separate quantity, already bound exactly by section 4's per-cell assertion, and it may legitimately be non-zero when a short final pass lands in the window.
+When it is zero the cell reads `NULL` and arm 1 must equal arm 2 within `F_O2`, exactly as registered.
+When it is not zero the cell is not a null control for that run: it reads `NULL-uncontrolled`, it is not a decider, and its routed-pass count is reported in the row.
+The equality is not enforced there, because a routed pass is a real difference and forcing equality across one would be asserting in advance that the kernel does nothing.
+
 ### Token identity
 
 Every arm's complete token sequence is recorded for every round.
