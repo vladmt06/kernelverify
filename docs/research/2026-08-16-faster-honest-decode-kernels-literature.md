@@ -231,7 +231,7 @@ That is not a claim that it works; it is a claim that the two measurements meet,
 Two things were checked before any spike was written, and together they change what the spike is.
 
 The kernel's routed window covers the verification width.
-`should_dispatch` routes M = 5..9 at all five intercepted projection shapes, so K = 6 verification at M = 7 sits inside it, and the 2026-08-17 A/B measured the neighbours it is bracketed by: 14.61% at M = 6 and 15.64% at M = 8, both wins well clear of noise floors of 0.12% and 0.07%.
+`should_dispatch` routes M = 5..9 at all five intercepted projection shapes, so K = 6 verification at M = 7 sits inside it, and the binding A/B of 2026-08-17 measured the two widths on either side of it: 14.69% at M = 6 and 15.65% at M = 8, both wins well clear of noise floors of 0.10% and 0.07%.
 M = 7 has never been measured, because the A/B grid samples the window at 5, 6 and 8 only.
 
 The interception layer refuses the shape anyway, and the refusal is ours rather than MLX's.
