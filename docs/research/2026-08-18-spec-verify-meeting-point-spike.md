@@ -124,3 +124,26 @@ The eligibility rule is worth changing under its own pre-registration: `_RoutedL
 That change re-opens a harness whose grid was re-measured on 2026-08-17, so it needs its own pre-registration and a re-run of the A/B to show the published grid is unmoved - the same discipline the `mx.clear_cache()` fix went through, and for the same reason.
 
 A draft/verify loop is now worth building, which it was not before this run.
+
+## 7. Reproduction under the shared patch, 2026-08-18
+
+Section 6's 16.44% was produced by this file's own private interception, which the flattened-width change of 2026-08-18 deleted.
+That made the number unreproducible by re-running this file, so the pre-registration for that change carried its own check: re-run the folded spike under `serve_sub4bit`'s shared patch, and the verdict must be GO with a gain inside 16.44% plus or minus the two runs' spread.
+A moved number would have been a finding about the shared patch rather than about the kernel, and it would have stopped the end-to-end work until understood.
+
+Measured by `bench/spike_spec_verify.py` through the detached runner on 2026-08-18 at 02:52 UTC, first attempt, harness exit 0, after five consecutive clean idle samples.
+
+| quantity | original spike | re-run on the shared patch |
+|---|---|---|
+| ours, median | - | 33.7485 ms |
+| stock, median | - | 39.2782 ms |
+| ratio, stock over ours | 1.1644 | 1.1639 |
+| gain, throughput | 16.44% | 16.385% |
+| noise floor | 0.327% | 0.256% |
+| verdict | GO | GO |
+
+The gain moved by 0.055 percentage points, which is inside both runs' spreads, so the pre-registered criterion is met and the shared patch reproduces what the private one measured.
+The routed-call accounting reproduced exactly as well: 252 wrapped sites, 504 routed calls over two probe passes, and the only fallbacks were the 64-token prefill declining at all five intercepted shapes, which is the routing table refusing a width outside its window rather than anything failing.
+
+This is a reproduction, not a second independent measurement: it is the same harness, the same prompt and the same machine, and it says the interception was swapped without moving the number.
+It does not widen what section 6 licenses, and the 16.44% recorded there remains the figure cited elsewhere, because that is the one section 6 was pre-registered against.
