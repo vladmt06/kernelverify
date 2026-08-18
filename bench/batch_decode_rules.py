@@ -14,8 +14,10 @@ from decode_rules import (
     clears,
     comparison,
     delta_pct,
+    eligible_rounds,
     first_mismatch,
     is_decider,
+    spread_pct,
 )
 from typing import Mapping, Sequence
 
@@ -133,6 +135,21 @@ def excluded_round_cap(rounds: Sequence[RoundSample]) -> str | None:
     return "identity-unstable" if excluded > 1 else None
 
 
+def arm_summary(
+    b: int, rounds: Sequence[RoundSample], arm: int
+) -> dict[str, object]:
+    """One arm's median and spread over this cell's eligible rounds."""
+    eligible = eligible_rounds(
+        rounds, _KERNEL_EXCLUSIONS, what=f"arm {arm} B={b}"
+    )
+    samples = [sample.generation_tps[arm] for sample in eligible]
+    return {
+        "median_tps": statistics.median(samples),
+        "spread_pct": spread_pct(samples),
+        "eligible_rounds": len(eligible),
+    }
+
+
 def _compare(
     b: int,
     rounds: Sequence[RoundSample],
@@ -158,6 +175,7 @@ def decide_ob1(
 ) -> dict[str, object]:
     kernel = _compare(b, rounds, 1, 2, "OB1")
     control = _compare(b, rounds, 1, 4, "OB1 control")
+    host_cost = _compare(b, rounds, 4, 2, "OB1 host cost")
     result = {
         "b": b,
         "arm1_tps": kernel.numerator_tps,
@@ -168,6 +186,8 @@ def decide_ob1(
         "noise_floor_pct": kernel.noise_floor_pct,
         "control_delta_pct": control.delta_pct,
         "control_floor_pct": control.noise_floor_pct,
+        "host_cost_delta_pct": host_cost.delta_pct,
+        "host_cost_floor_pct": host_cost.noise_floor_pct,
         "ceiling_pct": ceiling_for(b),
         "eligible_rounds": len(kernel.rounds),
         "routed_calls": routed_calls,

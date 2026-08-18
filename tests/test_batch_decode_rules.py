@@ -14,6 +14,7 @@ from batch_decode_rules import (
     IN_ZONE,
     LOOP_KERNEL_RATIO,
     PERPLEXITY_PAIR,
+    arm_summary,
     ceiling_for,
     decide_ob1,
     decide_ob2,
@@ -589,3 +590,55 @@ def test_a_ceiling_at_or_below_the_floor_is_not_a_decider():
     assert result["noise_floor_pct"] > result["ceiling_pct"]
     assert result["decider"] is False
     assert result["verdict"] == "not-a-decider"
+
+
+# Dropping the host-cost pair leaves section 5's "arm 4 against arm 2,
+# reported" to be divided by hand, with no floor to read it against.
+def test_ob1_reports_the_interception_host_cost_against_stock():
+    result = decide_ob1(
+        6,
+        [_round(a1=110.0, a2=100.0, a4=98.0)],
+        routed_calls=1,
+        routed_sites_at_width=1,
+    )
+    assert result["host_cost_delta_pct"] == pytest.approx((98 / 100 - 1) * 100)
+    assert result["host_cost_floor_pct"] == 0.0
+
+
+# A host cost read from an excluded round would carry the divergence it exists
+# to detect.
+def test_the_host_cost_reads_the_eligible_rounds_only():
+    rounds = [
+        _round(a1=110.0, a2=100.0, a4=98.0),
+        _round(a1=110.0, a2=100.0, a4=50.0, identity={"kernel-diverged": {0: 1}}),
+    ]
+    result = decide_ob1(6, rounds, routed_calls=1, routed_sites_at_width=1)
+    assert result["host_cost_delta_pct"] == pytest.approx((98 / 100 - 1) * 100)
+
+
+# Section 5 asks for a median and a spread per arm per cell; without them a
+# reader cannot see which arm was noisy, only the larger of the two floors.
+def test_arm_summary_gives_the_median_and_spread_over_eligible_rounds():
+    rounds = [
+        _round(a1=100.0),
+        _round(a1=110.0),
+        _round(a1=120.0),
+    ]
+    summary = arm_summary(6, rounds, 1)
+    assert summary["median_tps"] == pytest.approx(110.0)
+    assert summary["spread_pct"] == pytest.approx(100 * (120 - 100) / 110)
+    assert summary["eligible_rounds"] == 3
+
+
+# Summarising an excluded round would describe an arm by tokens the identity
+# check already rejected.
+def test_arm_summary_leaves_out_an_excluded_round():
+    rounds = [
+        _round(a1=100.0),
+        _round(a1=110.0),
+        _round(a1=900.0, identity={"kernel-diverged": {0: 2}}),
+        _round(a1=100.0, valid=False),
+    ]
+    summary = arm_summary(6, rounds, 1)
+    assert summary["median_tps"] == pytest.approx(105.0)
+    assert summary["eligible_rounds"] == 2

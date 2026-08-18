@@ -116,16 +116,23 @@ class _Model:
 
 
 class _Patch:
+    instances = []
+    fallback_at = frozenset()
+
     def __init__(self):
         self.mode = "fused"
         self.calls = 0
         self.site_cells = []
+        self.instance = len(type(self).instances)
+        type(self).instances.append(self)
 
     def reset(self):
-        self.calls = 0
+        # A hard fallback at a routed site leaves the observed count adrift
+        # from the expected one, which is why its round is invalid.
+        self.calls = 7 if self.instance in type(self).fallback_at else 0
 
     def hard_fallbacks(self):
-        return {}
+        return {"m5": 1} if self.instance in type(self).fallback_at else {}
 
     def uninstall(self):
         return None
@@ -207,6 +214,8 @@ class _FakeBatchGenerator:
 
 def _stub_the_machine(monkeypatch):
     _FakeBatchGenerator.reset()
+    _Patch.instances = []
+    _Patch.fallback_at = frozenset()
     _pins_ok(monkeypatch, h)
     _lock_granted(monkeypatch, h)
     monkeypatch.setattr(h, "require_idle", lambda label: {"idle": True})
@@ -382,13 +391,19 @@ def test_each_round_rotates_its_start_and_runs_every_arm_once(monkeypatch):
         return original(arm, *args, **kwargs)
 
     monkeypatch.setattr(h, "_run_arm", recorded)
+    monkeypatch.setattr(h, "ROUNDS", 5)
     assert h.main([]) == 0
+    want_by_round = {
+        1: [1, 2, 3, 4],
+        2: [2, 3, 4, 1],
+        3: [3, 4, 1, 2],
+        4: [4, 1, 2, 3],
+        5: [1, 2, 3, 4],
+    }
     for b in h.B_GRID:
-        for round_number in range(1, h.ROUNDS + 1):
+        for round_number, want in want_by_round.items():
             prefix = f"B={b} round {round_number}"
             got = [arm for arm, cell in calls if cell.startswith(prefix)]
-            offset = (round_number - 1) % len(h.ARMS)
-            want = list(h.ARMS[offset:] + h.ARMS[:offset])
             assert got == want
 
 
@@ -471,7 +486,7 @@ def test_stream_zero_matches_the_existing_prompt_builder():
 
 
 def test_stream_prompts_refuse_a_short_seed_with_all_numbers_named():
-    with pytest.raises(RuntimeError) as raised:
+    with pytest.raises(h.PreconditionFailed) as raised:
         h._stream_prompts(_Tokenizer(length=12), 8, 4, stride=3)
     message = str(raised.value)
     assert all(str(number) in message for number in (12, 17, 8, 4, 3))
@@ -516,3 +531,159 @@ def test_generation_batch_construction_still_takes_its_first_step():
 
     source = inspect.getsource(GenerationBatch.__init__)
     assert "self._step()" in source
+
+
+def _printed(capsys):
+    lines = capsys.readouterr().out.splitlines()
+    rows = [
+        record
+        for record in (json.loads(line) for line in lines if line.startswith("{"))
+        if "arm" in record
+    ]
+    records = [
+        json.loads(line[len("RESULT: "):])
+        for line in lines
+        if line.startswith("RESULT: ")
+    ]
+    return rows, records
+
+
+def _diverge(monkeypatch, rounds_per_cell):
+    seen = []
+
+    def labels(*, a1, a2, a4):
+        position = len(seen) % h.ROUNDS
+        seen.append(position)
+        return (
+            {"kernel-diverged": {0: 3}} if position < rounds_per_cell else {}
+        )
+
+    monkeypatch.setattr(h, "stream_identity_labels", labels)
+
+
+# Reading OB1, OB2 or OB3 on a cell whose identity is the thing in doubt would
+# print a clean verdict beside its own instability.
+def test_an_unstable_cell_prints_no_verdict_and_no_statistics(
+    monkeypatch, capsys
+):
+    _stub_the_machine(monkeypatch)
+    _diverge(monkeypatch, 2)
+    assert h.main([]) == 0
+    rows, records = _printed(capsys)
+    assert {record["outcome"] for record in records} == {"CELL", "ZONE"}
+    unread = [record for record in records if record["outcome"] == "CELL"]
+    assert [record["b"] for record in unread] == list(h.B_GRID)
+    assert {record["verdict"] for record in unread} == {"identity-unstable"}
+    assert all("median_tps" not in row for row in rows)
+    zone = next(record for record in records if record["outcome"] == "ZONE")
+    assert zone["verdict"] == "NO-GO"
+    assert set(zone["cells"].values()) == {"identity-unstable"}
+
+
+# Every round diverging must still record the cell rather than stop the run.
+def test_a_wholly_diverged_cell_is_recorded_rather_than_fatal(
+    monkeypatch, capsys
+):
+    _stub_the_machine(monkeypatch)
+    _diverge(monkeypatch, h.ROUNDS)
+    assert h.main([]) == 0
+    _, records = _printed(capsys)
+    assert {record["outcome"] for record in records} == {"CELL", "ZONE"}
+
+
+# One excluded round is inside the registered cap, so the cell is still read.
+def test_one_diverged_round_leaves_the_cell_readable(monkeypatch, capsys):
+    _stub_the_machine(monkeypatch)
+    _diverge(monkeypatch, 1)
+    assert h.main([]) == 0
+    rows, records = _printed(capsys)
+    outcomes = {record["outcome"] for record in records}
+    assert "CELL" not in outcomes
+    assert {record["b"] for record in records if record["outcome"] == "OB1"} == set(
+        h.B_GRID
+    )
+    assert all(row["eligible_rounds"] == h.ROUNDS - 1 for row in rows)
+
+
+# Without a per-arm median and spread, a reader sees only the larger of two
+# floors and cannot tell which arm was noisy.
+def test_rows_carry_the_registered_per_arm_median_and_spread(
+    monkeypatch, capsys
+):
+    _stub_the_machine(monkeypatch)
+    monkeypatch.setattr(h, "ROUNDS", 3)
+    assert h.main([]) == 0
+    rows, _ = _printed(capsys)
+    assert rows
+    for row in rows:
+        assert row["median_tps"] == pytest.approx(100.0)
+        assert row["spread_pct"] == 0.0
+        assert row["eligible_rounds"] == 3
+
+
+# An unpatched arm has no counter, so a zero on its row would read as a
+# measurement of something nobody measured.
+def test_only_the_patched_arms_report_a_routed_count(monkeypatch, capsys):
+    _stub_the_machine(monkeypatch)
+    monkeypatch.setattr(h, "ROUNDS", 1)
+    assert h.main([]) == 0
+    rows, _ = _printed(capsys)
+    counted = {"routed_calls", "site_cells", "hard_fallbacks"}
+    for row in rows:
+        for sample in row["samples"]:
+            if row["arm"] in (1, 4):
+                assert counted <= set(sample)
+            else:
+                assert counted.isdisjoint(set(sample))
+
+
+# A hard fallback invalidates its own round; counting it would turn that
+# registered exclusion into a run-wide stop.
+def test_a_hard_fallback_round_is_left_out_of_the_exact_count(
+    monkeypatch, capsys
+):
+    _stub_the_machine(monkeypatch)
+    # Patch 0 and 1 are the first cell's warm-up arms 1 and 4; patch 2 is its
+    # first round's arm 1.
+    _Patch.fallback_at = frozenset({2})
+    assert h.main([]) == 0
+    rows, _ = _printed(capsys)
+    first_cell = next(
+        row for row in rows if row["b"] == h.B_GRID[0] and row["arm"] == 1
+    )
+    assert first_cell["samples"][0]["hard_fallbacks"] == {"m5": 1}
+    assert first_cell["samples"][0]["valid"] is False
+    assert first_cell["samples"][0]["routed_calls"] == 7
+
+
+class _InsertRefused(RuntimeError):
+    """The engine refused an insertion, which is not a registered refusal."""
+
+
+# A generator that is never closed holds the wired limit it raised.
+def test_the_generator_is_closed_when_insertion_fails(monkeypatch):
+    _stub_the_machine(monkeypatch)
+
+    def failing_insert(self, prompts, max_tokens):
+        type(self).events.append(("insert", self.instance))
+        raise _InsertRefused("no room for the batch")
+
+    monkeypatch.setattr(_FakeBatchGenerator, "insert", failing_insert)
+    with pytest.raises(_InsertRefused):
+        h.main([])
+    assert ("close", 0) in _FakeBatchGenerator.events
+
+
+# A stream too short for the grid is a precondition, and main only knows how
+# to refuse in the shared vocabulary.
+def test_a_short_prompt_stream_refuses_with_the_precondition_code(
+    monkeypatch, capsys
+):
+    real_stream_prompts = h._stream_prompts
+    _stub_the_machine(monkeypatch)
+    monkeypatch.setattr(h, "_stream_prompts", real_stream_prompts)
+    monkeypatch.setattr(
+        h, "load_model", lambda name: (_Model(), _Tokenizer(length=12))
+    )
+    assert h.main([]) == h.EXIT_PRECONDITION
+    assert "REFUSAL" in capsys.readouterr().out

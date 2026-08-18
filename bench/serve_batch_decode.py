@@ -17,11 +17,13 @@ from mlx_lm.generate import BatchGenerator  # noqa: E402
 from batch_decode_rules import (  # noqa: E402
     B_GRID,
     IN_ZONE,
+    arm_summary,
     decide_ob1,
     decide_ob2,
     decide_ob3,
     decide_zone,
     decode_passes,
+    excluded_round_cap,
     expected_routed_calls,
     stream_identity_labels,
     validate_arm_record,
@@ -89,7 +91,7 @@ def _stream_prompts(tokenizer, t: int, b: int, *, stride: int):
     ids = tokenizer.encode(PROMPT_SEED * 40)
     required = (b - 1) * stride + t
     if len(ids) < required:
-        raise RuntimeError(
+        raise PreconditionFailed(
             f"prompt stream has {len(ids)} tokens, but B={b}, T={t}, and "
             f"stride={stride} require {required}"
         )
@@ -105,9 +107,7 @@ def _run_arm(arm, model3, model4, tokenizer, prompts, *, cell):
     prompt_lists = prompts.tolist()
     b = len(prompt_lists)
     patch = None
-    routed_calls = 0
-    site_cells = ()
-    hard_fallbacks = {}
+    patch_record = {}
     try:
         if arm in (1, 4):
             patch = install_patch(target)
@@ -120,10 +120,10 @@ def _run_arm(arm, model3, model4, tokenizer, prompts, *, cell):
             stop_tokens=None,
             **ENGINE,
         )
-        uids = gen.insert(prompt_lists, [GEN_TOKENS] * len(prompt_lists))
-        tokens = {uid: [] for uid in uids}
-        finish = {}
         try:
+            uids = gen.insert(prompt_lists, [GEN_TOKENS] * len(prompt_lists))
+            tokens = {uid: [] for uid in uids}
+            finish = {}
             with counting_calls(target) as counter, gen.stats() as stats:
                 while responses := gen.next_generated():
                     for response in responses:
@@ -141,9 +141,11 @@ def _run_arm(arm, model3, model4, tokenizer, prompts, *, cell):
             "target_call_shapes": list(counter.shapes),
         }
         if patch is not None:
-            routed_calls = patch.calls
-            site_cells = tuple(patch.site_cells)
-            hard_fallbacks = dict(patch.hard_fallbacks())
+            patch_record = {
+                "routed_calls": patch.calls,
+                "site_cells": tuple(patch.site_cells),
+                "hard_fallbacks": dict(patch.hard_fallbacks()),
+            }
     finally:
         if patch is not None:
             patch.uninstall()
@@ -160,11 +162,9 @@ def _run_arm(arm, model3, model4, tokenizer, prompts, *, cell):
 
     run["decode_shapes"] = decode_shapes
     run["decode_passes"] = len(decode_shapes)
-    run["routed_calls"] = routed_calls
-    run["site_cells"] = site_cells
-    run["hard_fallbacks"] = hard_fallbacks
+    run.update(patch_record)
     if arm == 1:
-        routed_sites = routed_sites_for(decode_shapes, site_cells)
+        routed_sites = routed_sites_for(decode_shapes, run["site_cells"])
         run["routed_sites_at"] = routed_sites
         run["expected_routed_calls"] = expected_routed_calls(
             decode_shapes,
@@ -304,7 +304,12 @@ def main(argv=None) -> int:
                 )
 
             current_cell = cell
-            for index, run in enumerate(runs_by_arm[1]):
+            valid_indices = [
+                index for index, round_sample in enumerate(rounds)
+                if round_sample.valid
+            ]
+            for index in valid_indices:
+                run = runs_by_arm[1][index]
                 assert_exact_count(
                     run["routed_calls"],
                     run["expected_routed_calls"],
@@ -327,6 +332,7 @@ def main(argv=None) -> int:
             site_cells = runs_by_arm[1][0]["site_cells"]
             routed_sites_at_width = routed_sites_at(b, site_cells)
 
+            instability = excluded_round_cap(rounds)
             for arm in ARMS:
                 row = {
                     "b": b,
@@ -338,6 +344,8 @@ def main(argv=None) -> int:
                         for index, run in enumerate(runs_by_arm[arm])
                     ],
                 }
+                if instability is None:
+                    row.update(arm_summary(b, rounds, arm))
                 if arm == 1:
                     row.update(
                         {
@@ -358,6 +366,9 @@ def main(argv=None) -> int:
             cells[b] = rounds
             routed_calls_by_b[b] = routed_calls
             routed_sites_by_b[b] = routed_sites_at_width
+            if instability is not None:
+                print(result_line({}, "CELL", {"b": b, "verdict": instability}))
+                continue
             print(
                 result_line(
                     {},
