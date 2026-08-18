@@ -105,6 +105,14 @@ The response object had no `generation_time` attribute, and `generation_tokens /
 The last pass was width 6, not width 7, and 6 is INSIDE the routed window.
 That is the section's "the last pass can be shorter" case occurring on the first probe, and it lands somewhere that routes rather than somewhere that does not, so counting by observed shape is load-bearing here and not a precaution: a count that assumed every pass was K + 1 wide would have been wrong by one whole pass of routed sites in this very run.
 
+The rest of the accounting was verified the same way, on the pinned 3-bit target with the 0.6B draft at K = 6 and 48 generated tokens, before the harness existed.
+The patch wraps 252 sites and the routing table routes all 252 at width 7; the observed widths were one pass of 63, seventeen of 7, and one of 2; `expected_routed_calls` therefore derived 4284, and the interception's own counter had recorded exactly 4284, with no hard fallbacks.
+This is the first time the flattened-width rule of 2026-08-18 has been exercised through `mlx_lm`'s own speculative path rather than through a shape test.
+
+Token identity was checked across all four comparable arms in the same probe and every one of them matched to the token: arm 4 equals arm 2, so the control that invalidates the run does not fire; arm 1 equals arm 2, so `kernel-diverged` does not fire and O2 and O3 will have eligible rounds; and arm 2 equals arm 0, so `mlx-m-dependent` does not fire either.
+None of that is a result and none of it is binding, because the machine was not idle and nothing was timed.
+It says only that the run can produce a reading rather than a refusal, which is what an hour of GPU time is worth checking for in advance.
+
 ### Amendment, 2026-08-18: which calls are verification passes, and when a null cell stops being one
 
 Two more gaps, one raised by the dispatched writer refusing a third time and one found here by measuring the null cells rather than reasoning about them.
