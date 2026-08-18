@@ -79,11 +79,26 @@ def in_window(k: int) -> bool:
 def expected_routed_calls(
     shapes: Sequence[Sequence[int]], routed_sites_at: Mapping[int, int]
 ) -> int:
-    """Sum routed sites at every observed flattened activation width."""
-    return sum(
-        routed_sites_at[math.prod(shape[:-1])]
-        for shape in shapes
-    )
+    """Sum routed sites over every observed pass, by that pass's width.
+
+    The shapes are TOKEN-IDENTIFIER shapes, not activation shapes: mlx_lm
+    verifies with ``model(y[None], cache=cache)`` where ``y`` holds the K + 1
+    candidate tokens, so the counted seam receives ``(1, K + 1)`` and the
+    embedding happens below it. The width a routed projection then sees is
+    every dimension of that array multiplied out (doc, section 4 amendment of
+    2026-08-18). A rank-3 shape is refused rather than measured, because it
+    means the seam moved and the old ``prod(shape[:-1])`` reading of it would
+    report width 1 for every pass instead of failing.
+    """
+    widths = []
+    for shape in shapes:
+        if len(shape) != 2:
+            raise RunInvalid(
+                f"observed pass shape {tuple(shape)} is rank {len(shape)}; the "
+                "counted seam takes rank-2 token identifiers"
+            )
+        widths.append(math.prod(shape))
+    return sum(routed_sites_at[width] for width in widths)
 
 
 def accepted_per_pass(generation_tokens: int, verify_passes: int) -> float:

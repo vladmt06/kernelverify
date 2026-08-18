@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -109,9 +110,36 @@ class _Input:
         self.shape = shape
 
 
+@contextmanager
+def _patched_eval(record: list):
+    """Record every mx.eval the counter makes, without evaluating anything."""
+    original = h.mx.eval
+    h.mx.eval = lambda *args: record.append(args)
+    try:
+        yield
+    finally:
+        h.mx.eval = original
+
+
 class _Model(nn.Module):
     def __call__(self, inputs, cache=None):
         return inputs
+
+
+# These shapes are mlx_lm's, not ours: it verifies with model(y[None], cache=cache)
+# on the K+1 candidate TOKEN IDS, so the counted seam sees rank 2 and the
+# embedding happens below it (doc, section 4 amendment of 2026-08-18). The first
+# version of this file wrote (1, 7, 2560) here, which no test could have caught
+# because every other test used the same fiction.
+def test_the_counted_seam_is_still_rank_two_token_ids():
+    import inspect
+
+    generate = pytest.importorskip("mlx_lm.generate")
+    source = inspect.getsource(generate.speculative_generate_step)
+    assert "logits = model(y[None], cache=cache)" in source, (
+        "mlx_lm no longer verifies through the seam this harness counts; the "
+        "width rule in spec_decode_rules.expected_routed_calls reads it"
+    )
 
 
 # Assigning __call__ on the target instance or counting every instance makes this red.
@@ -120,10 +148,36 @@ def test_counter_counts_only_the_target_and_restores_the_class():
     other = _Model()
     original = type(target).__call__
     with h.counting_calls(target) as counter:
-        target(_Input((1, 7, 2560)))
-        other(_Input((1, 7, 2560)))
-    assert counter.shapes == [(1, 7, 2560)]
+        target(_Input((1, 7)))
+        other(_Input((1, 7)))
+    assert counter.shapes == [(1, 7)]
     assert type(target).__call__ is original
+
+
+# MLX is lazy, so a timer around the seam would measure graph construction.
+# Forcing evaluation to get a real time perturbs generation_tps, so it is
+# confined to the probe: making the timed path sync makes this red.
+def test_the_timed_path_never_forces_evaluation():
+    evaluated = []
+    target = _Model()
+    with _patched_eval(evaluated):
+        with h.counting_calls(target) as counter:
+            target(_Input((1, 7)))
+    assert evaluated == []
+    assert counter.seconds == []
+
+
+# Making the probe lazy too makes this red, and the probe would then time nothing.
+def test_the_probe_forces_evaluation_and_times_each_pass():
+    evaluated = []
+    target = _Model()
+    with _patched_eval(evaluated):
+        with h.counting_calls(target, sync=True) as counter:
+            target(_Input((1, 7)))
+            target(_Input((1, 7)))
+    assert len(evaluated) == 2
+    assert len(counter.seconds) == 2
+    assert all(s >= 0.0 for s in counter.seconds)
 
 
 # Omitting the counting context manager's finally restoration makes this red.
@@ -190,7 +244,7 @@ def test_main_reaches_the_grid_with_the_machine_stubbed(monkeypatch):
         sampler,
     ):
         width = 1 if draft_model is None else num_draft_tokens + 1
-        model(_Input((1, width, 2560)))
+        model(_Input((1, width)))
         for token in range(max_tokens):
             yield _response(token)
 

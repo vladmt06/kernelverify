@@ -65,25 +65,35 @@ def test_null_cells_are_the_out_of_window_ks():
     assert [k for k in K_GRID if not in_window(k)] == [2, 10]
 
 
+# The shapes here are the ones the counter really sees: mlx_lm verifies with
+# model(y[None], cache=cache) on TOKEN IDS, so a pass is (1, K+1) with no
+# feature dimension, and _prefill presents the 64-token prompt as (1, 63).
 # Replacing the per-width lookup with one fixed wrapped-site count makes this red.
 def test_expected_routed_calls_sums_per_site_and_only_routed_passes():
     shapes = [
-        (1, 64, 2560),
-        (1, 7, 2560),
-        (1, 7, 2560),
-        (1, 3, 2560),
+        (1, 63),
+        (1, 7),
+        (1, 7),
+        (1, 3),
     ]
     assert expected_routed_calls(
-        shapes, {64: 0, 7: 252, 3: 0}
+        shapes, {63: 0, 7: 252, 3: 0}
     ) == 504
     assert expected_routed_calls(
-        shapes, {64: 0, 7: 216, 3: 0}
+        shapes, {63: 0, 7: 216, 3: 0}
     ) == 432
 
 
-# Replacing prod(shape[:-1]) with shape[-2] makes this red for M=6.
-def test_expected_routed_calls_flattens_every_leading_dimension():
-    assert expected_routed_calls([(2, 3, 2560)], {6: 17}) == 17
+# Reading shape[-1] alone instead of the whole token array makes this red at M=6.
+def test_expected_routed_calls_flattens_every_dimension_of_the_token_array():
+    assert expected_routed_calls([(2, 3)], {6: 17}) == 17
+
+
+# Restoring the old prod(shape[:-1]) activation rule makes this red: that rule
+# accepts a rank-3 shape and silently reports width 1 for every real pass.
+def test_expected_routed_calls_refuses_a_shape_that_is_not_the_registered_seam():
+    with pytest.raises(RunInvalid, match="rank"):
+        expected_routed_calls([(1, 7, 2560)], {7: 252})
 
 
 # Replacing true division with floor division makes the 3.2 result red.
