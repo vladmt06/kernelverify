@@ -240,10 +240,24 @@ def test_site_cell_reads_d_out_and_d_in_in_should_dispatch_order():
 # ---------------------------------------------------------------------------
 # the registered zone: a claim about the pack, checked against the pack
 # ---------------------------------------------------------------------------
-def test_registered_zone_is_what_the_recording_routes_on_the_grid():
+def test_registered_zone_is_the_whole_window_the_recording_routes():
+    """The registration is the pack's full routed window, not its overlap
+    with the timing grid.
+
+    It used to be `window & B_GRID`, which was blind at M = 7 and M = 9
+    because B_GRID holds neither. That was harmless while the sequence check
+    made those widths unreachable and stopped being harmless on 2026-08-18,
+    when a verification step became exactly an M = 7 call. Registered and
+    reasoned in the findings doc, section 4 amendment.
+    """
+    scan = frozenset(serve_sub4bit.ZONE_SCAN)
     for (d_out, d_in), pinned in serve_sub4bit.PINNED_ZONE.items():
         window = routed_windows.window_for(BITS, d_out, d_in)
-        assert pinned == window & frozenset(B_GRID), f"{d_out}x{d_in}"
+        assert pinned == window, f"{d_out}x{d_in}"
+        assert window <= scan, (
+            f"{d_out}x{d_in}: the recording routes {sorted(window - scan)} "
+            "outside ZONE_SCAN, so the guard would miss part of the window "
+            "without ever saying so")
     serve_sub4bit.require_pinned_zone()          # must not raise today
 
 
@@ -273,6 +287,35 @@ def test_registered_zone_refuses_a_boundary_that_moved_at_one_shape(
 
 
 @pytest.mark.gpu
+def test_sequence_and_batch_spellings_are_bit_identical_when_routed():
+    """One M = 7 certificate covers both rank spellings of the same rows.
+
+    The routed-vs-routed comparison alone would be near vacuous: `_fused`
+    flattens with `x.reshape(-1, d_in)`, so both spellings become the same
+    kernel call on the same rows and comparing them tests determinism rather
+    than routing. The load-bearing assertions are that BOTH spellings routed,
+    and that each matches the STOCK output the unpatched module produces.
+    """
+    a = make_holder()
+    rows = x_rows(7)
+    sequence = rows.reshape(1, 7, D_IN)
+    batch = rows.reshape(7, 1, D_IN)
+    stock = a(sequence)                  # unpatched: the reference
+    mx.eval(stock)
+    with patched(a) as patch:
+        sequence_out = a(sequence)
+        batch_out = a(batch)
+        mx.eval(sequence_out, batch_out)
+        assert patch.calls == 2, patch.fallbacks
+        assert mx.array_equal(
+            sequence_out.reshape(7, D_OUT),
+            batch_out.reshape(7, D_OUT),
+        ).item()
+    assert mx.allclose(sequence_out.reshape(7, D_OUT),
+                       stock.reshape(7, D_OUT), atol=2e-2, rtol=2e-2).item()
+
+
+@pytest.mark.gpu
 def test_prefill_shaped_input_falls_back_and_matches_stock():
     a = make_holder()
     x3 = mx.array(np.random.default_rng(5)
@@ -283,8 +326,31 @@ def test_prefill_shaped_input_falls_back_and_matches_stock():
         out = a(x3)
         mx.eval(out)
         assert patch.calls == 0
-        assert any(k.startswith("prefill-") for k in patch.fallbacks)
+        assert patch.fallbacks == {
+            f"m-{2 * 7}-outside-dispatch-{D_OUT}x{D_IN}": 1,
+        }
         assert mx.array_equal(out, stock).item()
+
+
+@pytest.mark.gpu
+def test_real_prefill_is_refused_by_flattened_width():
+    a = make_holder()
+    prefill = x_rows(64).reshape(1, 64, D_IN)
+    with patched(a) as patch:
+        mx.eval(a(prefill))
+        assert patch.calls == 0
+        assert patch.fallbacks == {
+            f"m-64-outside-dispatch-{D_OUT}x{D_IN}": 1,
+        }
+
+
+@pytest.mark.gpu
+def test_no_prefill_fallback_reason_remains():
+    import inspect
+
+    source = inspect.getsource(serve_sub4bit._RoutedLinear._ineligible)
+    assert "prefill-" not in source
+    assert serve_sub4bit._WHITELIST_PREFIXES == ("m-", "forced-stock")
 
 
 @pytest.mark.gpu

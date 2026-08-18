@@ -37,6 +37,16 @@ The spike installs its OWN interception, not `serve_sub4bit`'s.
 
 Fixed before running: 5 rounds, the same round count the A/B registers; median over rounds; per-arm spread reported and a cell withheld if either arm's spread exceeds the win it claims.
 
+**Amendment, 2026-08-18, after the result: the separation registered above is deliberately given up.**
+Section 2 registered that this spike installs its own interception and leaves `bench/serve_sub4bit.py` untouched, so it could not move a published number by editing the harness that produced it.
+That property held for the run recorded in section 6 and does not hold afterwards.
+The GO licensed changing the eligibility rule in `serve_sub4bit` itself, which is what section 4 of the findings doc now registers, and once that rule is shared there is no second interception left for this spike to own: keeping one would mean two copies of a rule that must not diverge, which is a worse failure than the one the separation guarded against.
+The spike therefore now installs `serve_sub4bit.install_patch`.
+
+Two consequences, stated rather than buried.
+The 16.44% in section 6 was produced by code that no longer exists, so re-running this file does not re-run what measured it; the number stands as recorded and its reproduction under the shared patch is a separate, pre-registered check.
+And the protection section 2 bought is gone, so the thing that now keeps this spike from moving a published number is the A/B re-run under its own pre-registration, not the spike's isolation.
+
 ## 4. Pre-registered outcomes
 
 - **GO**: arm S beats arm T by more than both arms' spread. The eligibility rule is worth changing under its own pre-registration, and a draft/verify loop becomes worth building.

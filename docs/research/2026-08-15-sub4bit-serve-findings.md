@@ -107,7 +107,7 @@ It would matter for a model whose projections carry biases, and the protection t
 
 **The whitelisted fallback reasons.**
 This section originally said the only whitelisted reasons are `prefill-*` and `m-*-outside-dispatch`, and the code whitelists a wider set.
-The registration is now the code's tuple, spelled once, here, and `tests/test_serve_sub4bit.py` reads this line: WHITELIST_PREFIXES = ("prefill-", "m-", "forced-stock").
+The registration is now the code's tuple, spelled once, here, and `tests/test_serve_sub4bit.py` reads this line: WHITELIST_PREFIXES = ("m-", "forced-stock").
 `forced-stock` has to be whitelisted or arm 4 - the control arm section 2 requires - would invalidate every round it ever ran; that is a necessity of the four-arm design this section simply failed to carry over.
 The `m-` prefix is wider than `m-*-outside-dispatch`, and the reason the older spelling stopped matching is the per-shape routing amendment above: the reason string became `m-{M}-outside-dispatch-{d_out}x{d_in}`, which no longer ends where the old pattern expected.
 What the widening could bias: a future eligibility reason beginning with `m-` would be whitelisted without anyone deciding it should be, and arm 1 could then be part-stock inside a published round.

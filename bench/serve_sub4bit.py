@@ -148,11 +148,11 @@ PINNED_BITS = 3
 # embeddings, so it is never intercepted; a zone entry for a shape this
 # harness cannot route would register a claim nothing here enforces.
 PINNED_ZONE = {
-    (4096, 2560): frozenset({5, 6, 8}),    # q_proj
-    (1024, 2560): frozenset({5, 6, 8}),    # k_proj, v_proj
-    (2560, 4096): frozenset({5, 6, 8}),    # o_proj
-    (9728, 2560): frozenset({5, 6, 8}),    # gate_proj, up_proj
-    (2560, 9728): frozenset({5, 6, 8}),    # down_proj
+    (4096, 2560): frozenset({5, 6, 7, 8, 9}),    # q_proj
+    (1024, 2560): frozenset({5, 6, 7, 8, 9}),    # k_proj, v_proj
+    (2560, 4096): frozenset({5, 6, 7, 8, 9}),    # o_proj
+    (9728, 2560): frozenset({5, 6, 7, 8, 9}),    # gate_proj, up_proj
+    (2560, 9728): frozenset({5, 6, 7, 8, 9}),    # down_proj
 }
 ROUNDS = 5
 PPL_WINDOW = 1024
@@ -211,8 +211,8 @@ class _RoutedLinear:
 
     def _ineligible(self, x) -> str | None:
         """None when the kernel takes this call; otherwise the reason.
-        The prefill check precedes the M check so a prefill chunk is
-        labeled prefill regardless of how the boundary is set."""
+        M is the flattened row count for every input rank, as registered by
+        the section 4 amendment of 2026-08-18."""
         inner = self.inner
         mode = str(getattr(inner, "mode", "affine"))
         if not mode.endswith("affine"):
@@ -223,8 +223,6 @@ class _RoutedLinear:
             return "bias-term"
         if x.dtype != mx.float16 or inner.scales.dtype != mx.float16:
             return f"dtype-{x.dtype}-{inner.scales.dtype}"
-        if x.ndim >= 3 and x.shape[-2] != 1:
-            return f"prefill-L{x.shape[-2]}"
         d_in = x.shape[-1]
         if d_in % 64:
             return f"din-{d_in}"
@@ -264,8 +262,9 @@ class _RoutedLinear:
         return self.inner(x)
 
 
-# Reasons that do not mean the arm stopped being the arm (doc, section 4).
-_WHITELIST_PREFIXES = ("prefill-", "m-", "forced-stock")
+# Routing-table declines and arm 4's control do not mean the arm stopped
+# being the arm (doc, section 4).
+_WHITELIST_PREFIXES = ("m-", "forced-stock")
 
 
 class Patch:
@@ -500,9 +499,17 @@ def require_idle(label: str) -> dict:
     return state
 
 
+# Scanned rather than taken from B_GRID: B_GRID is the A/B's TIMING grid and
+# holds no 7 and no 9, so a zone check filtered through it was structurally
+# blind to the two widths the 2026-08-18 flattened-width rule newly makes
+# reachable. The guard exists to notice a moved routing boundary, and a
+# boundary that moved at M = 7 would have passed it silently.
+ZONE_SCAN = range(1, 17)
+
+
 def pack_zone(d_out: int, d_in: int) -> frozenset[int]:
-    """The grid cells the pack routes at one intercepted shape."""
-    return frozenset(b for b in B_GRID
+    """The widths the pack routes at one intercepted shape."""
+    return frozenset(b for b in ZONE_SCAN
                      if should_dispatch(b, PINNED_BITS, d_out, d_in))
 
 
