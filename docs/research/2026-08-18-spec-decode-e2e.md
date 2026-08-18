@@ -86,7 +86,10 @@ Left as registered it would have understated `verify_share` by roughly an order 
 
 From this amendment the timed rounds record passes and shapes only, and the counter takes no time in them.
 Each `(draft, K)` cell instead runs ONE probe generation outside the timed rounds, in which the counter forces `mx.eval` on the target's output and records the elapsed per pass.
-The cell's share is `verify_share = median_probe_pass_seconds * verify_passes / generation_time`, where the per-pass cost comes from the probe and `verify_passes` and `generation_time` come from that cell's O2-eligible timed rounds.
+The probe runs ARM 2's configuration, which is the stock 3-bit target with the cell's draft and K and no patch installed, because the share this section defines is arm 2's and the ceiling asks how much of the UNROUTED baseline's time routing could reach.
+Probing arm 1 instead would measure the already-routed pass, understate the baseline share by about the gain being tested, and make the ceiling depend on the result it is supposed to bound.
+The cell's share is `verify_share = median_probe_pass_seconds * verify_passes / generation_time`, where the per-pass cost is the median over the probe's calls whose recorded width is exactly K + 1, and `verify_passes` and `generation_time` come from that cell's O2-eligible timed arm 2 rounds.
+The width filter is K + 1 rather than "in the routed window": K = 2 and K = 10 have no in-window pass at all, and a share that could not be computed there would stop the grid at its first cell over a quantity those cells do not use, since their registered gain is already zero.
 The probe's own `generation_tps` is discarded and enters no outcome, because forcing a synchronisation inside the generation loop changes the thing being timed.
 Forcing evaluation is confined to the probe for exactly that reason: a synchronisation applied to every arm would perturb `generation_tps` in all five, and O3 quotes an absolute throughput a user would see rather than a ratio, so a uniform perturbation would not cancel there.
 
