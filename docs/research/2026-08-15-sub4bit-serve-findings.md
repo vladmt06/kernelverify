@@ -107,7 +107,7 @@ It would matter for a model whose projections carry biases, and the protection t
 
 **The whitelisted fallback reasons.**
 This section originally said the only whitelisted reasons are `prefill-*` and `m-*-outside-dispatch`, and the code whitelists a wider set.
-The registration is now the code's tuple, spelled once, here, and `tests/test_serve_sub4bit.py` reads this line: WHITELIST_PREFIXES = ("prefill-", "m-", "forced-stock").
+The registration is now the code's tuple, spelled once, here, and `tests/test_serve_sub4bit.py` reads this line: WHITELIST_PREFIXES = ("m-", "forced-stock").
 `forced-stock` has to be whitelisted or arm 4 - the control arm section 2 requires - would invalidate every round it ever ran; that is a necessity of the four-arm design this section simply failed to carry over.
 The `m-` prefix is wider than `m-*-outside-dispatch`, and the reason the older spelling stopped matching is the per-shape routing amendment above: the reason string became `m-{M}-outside-dispatch-{d_out}x{d_in}`, which no longer ends where the old pattern expected.
 What the widening could bias: a future eligibility reason beginning with `m-` would be whitelisted without anyone deciding it should be, and arm 1 could then be part-stock inside a published round.
@@ -117,6 +117,31 @@ The check that keeps it honest is a test asserting that the wrapper emits no `m-
 `load_model` calls `model.set_dtype(mx.float16)` on both pinned artifacts.
 It is there because the artifacts are bf16-headed while the kernel, the eligibility check (`x.dtype != mx.float16`) and the frozen contract are all fp16: without the cast arm 1 would route nothing and the arms would not share a lane width.
 What it could bias: not the comparison, since the same cast is applied to all four arms and both artifacts, but it does mean every number this harness reports - timings and the section 7 perplexity pair alike - describes an fp16 cast of the pinned checkpoints rather than the checkpoints as stored.
+
+### Amendment, 2026-08-18: sequence steps route on their flattened width
+
+Section 4 originally registered the wrapper as decode-scoped: every 3-D input with L > 1 fell back with `prefill-L{L}`, because the kernel and its certificates are decode-shaped.
+That reason does not survive reading the dispatch path: `_fused` applies `x.reshape(-1, d_in)` before launch, so the input rank and the placement of the seven rows do not change the kernel call.
+
+Measured on 2026-08-18, `(7, 1, 2560)` routed, `(1, 7, 2560)` fell back with `prefill-L7`, and `(7, 2560)` routed.
+The first two spellings flatten to the same seven rows, so the old gate made shape syntax decide whether identical projection work could use the routed kernel.
+
+The rule now computes M as the flattened row count for every input rank and leaves `should_dispatch` as the only judge of M.
+Every M outside the routed window still falls back, including real prefill chunks of tens to hundreds of tokens, and the reason is `m-{M}-outside-dispatch-{d_out}x{d_in}` like every other declined cell.
+What newly routes is a sequence step whose flattened M is 5 through 9, exactly a speculative decoder's K = 4 through 8 verification pass, plus a prefill of exactly 5 through 9 tokens.
+The pricing evidence says the kernel wins for those flattened projection calls.
+
+The obsolete prefill reason leaves the fallback whitelist.
+The machine-read whitelist registration changes in the same commit as the code because `tests/test_serve_sub4bit.py` compares them and a documentation-only commit would be red.
+
+**The pinned zone is widened in the same commit, and it is a registered quantity, so the reason is here.**
+`require_pinned_zone` refuses a run whose pack routes a different set of widths than this document registers, and it computed that set by filtering `B_GRID`.
+`B_GRID` is the A/B's TIMING grid, `[1, 4, 5, 6, 8, 11, 12, 16]`, which holds no 7 and no 9, while the routed window is 5 through 9.
+Before this amendment that gap could not be reached: the sequence check refused every shape that would have presented M = 7, so the guard was blind only to widths nothing could produce.
+After it, M = 7 is exactly what a verification step presents, and a routing boundary that moved at 7 or 9 would have passed the guard in silence.
+The zone is therefore scanned over widths 1 through 16 rather than filtered through the timing grid, and the registration becomes {5, 6, 7, 8, 9} at all five intercepted shapes, which is what the pack already routes.
+This widening makes the guard STRICTER and cannot make a previously refusing run pass.
+It does not touch `B_GRID`, so no timed cell moves and the published grid is untouched by it.
 
 ## 5. The minimum detectable effect, derived before the A/B
 
@@ -323,6 +348,52 @@ The batch-1 baseline is unchanged at 64.49 tokens per second per stream for arm 
 Reproducibility, stated at the grade the evidence actually carries: run 3 is the binding run and the only one, and run 2 is a NON-BINDING run whose in-zone ratios agree with it to 1.0566 vs 1.0570, 1.1455 vs 1.1469 and 1.1558 vs 1.1565.
 An earlier draft of this paragraph called the two "independent quiet windows", which contradicted this section's own run table three paragraphs above: the harness marked run 2 non-binding because its closing idle sample caught WindowServer at 15% CPU, and section 3 registers that a timing mode's window must be clean before AND after.
 The agreement is therefore corroboration that the harness reproduces itself, not a second measurement, and every verdict below rests on run 3 alone.
+
+### Pre-registered outcome for the 2026-08-18 re-run, after the flattened-width rule
+
+Written before that run is armed, for the same reason the last one was: a grid whose numbers are already published can be rationalised in either direction once they arrive.
+
+What changed since the binding run, and why inertness is the expectation rather than the hope.
+`_ineligible` no longer refuses a 3-D input on its sequence length, so it computes M at every input rank.
+Every timed step in this A/B is (B, 1, d_in), which that rule does not touch, and the only 3-D input the harness presents is the 64-token prompt prefill outside the timed window, refused before the change as `prefill-L64` and after it as `m-64-outside-dispatch-{d_out}x{d_in}` - a different string for the same fallback.
+`PINNED_ZONE` also widened from {5, 6, 8} to {5, 6, 7, 8, 9} and `pack_zone` now scans widths 1 through 16 rather than filtering `B_GRID`.
+That is a refusal gate, not a timed path, and it got stricter rather than looser, so it can only refuse a run the old one would have passed, never move a number.
+
+"Unmoved by construction" is exactly the reasoning this record has learned not to trust, which is why the run happens anyway.
+
+The registered outcome:
+
+- The budget must hold. Eight cells complete at the registered 24.0 GB default with no `--budget-gb` flag, and the run exits 0.
+- The three in-zone ratios must land inside +/- 0.0014 of the BINDING run's 1.0570 at B = 5, 1.1469 at B = 6 and 1.1565 at B = 8. That band is the one the 2026-08-17 re-run was read against and it is not widened here.
+- `require_pinned_zone` must pass at the widened registration, and the per-cell dispatch counts must stay exact.
+- A ratio outside the band is a FINDING, not a tuning knob. It re-derives section 10 from the new grid, and no amendment may explain it away by pointing at the eligibility change being "obviously" inert on batch shapes.
+- A ratio crossing 1.0 or its cell's noise floor reopens the verdict on `wide_qmv` staying in the pack. Nothing short of that does.
+
+### Result of the 2026-08-18 re-run, against the outcome pre-registered above
+
+Measured by `bench/serve_sub4bit.py --ab`, detached runner, 2026-08-18 03:53 to 04:26 UTC, 33 minutes, exit 0, AC power, display asleep, five consecutive clean idle samples before the start and a clean closing sample after it.
+No `--budget-gb` flag: the registered 24.0 GB default, which one clause of the outcome above turns on.
+The runner refused eleven consecutive idle samples before this attempt, three of them because macOS ran XProtect remediators at 92 to 98% CPU, and `attempts_consumed` stayed 0 through all of them; this is attempt 1 of 3.
+
+Every clause of the pre-registered outcome held.
+
+| B | binding run (published) | this re-run | delta | inside the +/- 0.0014 band |
+|---|---|---|---|---|
+| 5 | 1.0570 | 1.0569 | -0.0001 | yes |
+| 6 | 1.1469 | 1.1464 | -0.0005 | yes |
+| 8 | 1.1565 | 1.1573 | +0.0008 | yes |
+
+The budget held: all eight cells completed at the registered 24.0 GB default and the run exited 0.
+`require_pinned_zone` passed at the WIDENED registration of {5, 6, 7, 8, 9}, which is the first run to exercise it; the old {5, 6, 8} registration would have passed too, and that is the point of having re-measured rather than reasoned.
+Dispatch counts were exact at all three in-zone cells, 160020 fused calls against 160020 expected, and hard fallbacks were empty in every cell.
+`primary_verdict` is "win" at B = 5, 6 and 8 and "null" everywhere else, unchanged.
+
+So the flattened-width rule is inert on this grid, as section 4's amendment argued it would be, and the argument is now unnecessary because the measurement exists.
+The largest movement is 0.0008 at B = 8, against that cell's own noise floor of 0.02%, and the three deltas do not share a sign.
+Section 10's verdicts stand as written and are not re-derived.
+
+One number moved outside the in-zone cells and is recorded rather than passed over: B = 1's `ratio_ours_stock3` reads 1.0016 here against 1.0014 in the confirmation re-run, both inside their own noise floors and both "null".
+Nothing routes at B = 1, so neither figure is a claim about the kernel.
 
 ## 10. Verdicts
 

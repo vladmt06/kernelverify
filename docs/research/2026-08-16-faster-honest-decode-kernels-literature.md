@@ -245,6 +245,21 @@ It says something narrower and more useful: on this repo's own path, a speculati
 The first spike is therefore not a draft/verify loop. It is a pre-registered change to the eligibility rule - let `should_dispatch` decide on the flattened M instead of refusing every sequence step - and a measurement of whether M = 7 as a sequence behaves as M = 7 as a batch.
 A null there kills the branch for a concrete reason; a win makes the draft/verify loop worth building.
 
+#### Amendment, 2026-08-18: the meeting point was measured end to end, and it is a NO-GO
+
+The eligibility rule was changed under its own pre-registration and the end-to-end measurement this section argued for was taken the same day; `docs/research/2026-08-18-spec-decode-e2e.md` sections 9 and 10 carry it.
+
+The half of the argument this section owned is confirmed.
+Routing the verification pass helps at every width the window covers: six of six decider cells are wins, +4.02%, +12.56% and +10.59% with a 0.6B draft at K = 4, 6 and 8, and +2.59%, +9.20% and +7.58% with a 1.7B draft, each clear of its noise floor and each close to a ceiling registered before the run.
+So "the verification pass is a batch-(K+1) matvec and that is the width regime where `wide_qmv` wins" is not an argument any more, it is a measurement.
+
+The other half fails, and the composed claim fails with it.
+At the pre-registered primary cell K = 6, `mlx_lm`'s speculative path with our kernel is SLOWER than its plain path with stock kernels: -6.11% with the 0.6B draft and -31.90% with the 1.7B, both attributed `negative`, because speculation alone costs -16.58% and -37.64% there while the kernel gives back only +12.56% and +9.20%.
+This section's reasoning was that speculative decoding is the one mechanism that moves batch-1 without a better kernel, and on this stack at this cell it moves it the wrong way.
+
+That is the paper's own finding rather than a contradiction of it: arXiv 2607.17283 reports three of five draft/target configurations DECELERATING on a consumer Apple-silicon laptop, and two of our two decelerate at K = 6.
+What this section may now say is narrower than what it said: the meeting point exists and the kernel reaches it, and reaching it is not sufficient, because the drafting cost at the widths the kernel covers exceeds what the kernel returns.
+
 **Quantization paying for itself at decode has been measured once, on Apple silicon, and the mechanism was dispatch.**
 arXiv 2605.05699 reports an int4 KV cache running FASTER than fp16 across 256 to 4096-token prefixes on Apple M1 (37.0 against 39.4 ms/token on SmolLM2-360M, 211.9 against 246.8 on a 1.7B), with the whole transform in fp32 and quality preserved.
 Its own explanation is ours: "the cost is dispatch, not compute", and the fused single-dispatch kernel is what closed a 12-17% eager-mode penalty.

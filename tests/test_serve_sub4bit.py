@@ -41,7 +41,14 @@ mx = pytest.importorskip("mlx.core")
 # it returns True inside a sandbox that then aborts on first use. METAL_DEVICE
 # asks the only question that matters by trying it in a worker process, where
 # an abort costs that process instead of this one.
-from conftest import METAL_DEVICE, requires_metal  # noqa: E402
+from conftest import (  # noqa: E402
+    METAL_DEVICE,
+    _lock_granted,
+    _never_load,
+    _pins_ok,
+    _raise,
+    requires_metal,
+)
 
 if METAL_DEVICE is None:
     pytest.skip("the interception tests build a real quantized model on Metal",
@@ -240,10 +247,24 @@ def test_site_cell_reads_d_out_and_d_in_in_should_dispatch_order():
 # ---------------------------------------------------------------------------
 # the registered zone: a claim about the pack, checked against the pack
 # ---------------------------------------------------------------------------
-def test_registered_zone_is_what_the_recording_routes_on_the_grid():
+def test_registered_zone_is_the_whole_window_the_recording_routes():
+    """The registration is the pack's full routed window, not its overlap
+    with the timing grid.
+
+    It used to be `window & B_GRID`, which was blind at M = 7 and M = 9
+    because B_GRID holds neither. That was harmless while the sequence check
+    made those widths unreachable and stopped being harmless on 2026-08-18,
+    when a verification step became exactly an M = 7 call. Registered and
+    reasoned in the findings doc, section 4 amendment.
+    """
+    scan = frozenset(serve_sub4bit.ZONE_SCAN)
     for (d_out, d_in), pinned in serve_sub4bit.PINNED_ZONE.items():
         window = routed_windows.window_for(BITS, d_out, d_in)
-        assert pinned == window & frozenset(B_GRID), f"{d_out}x{d_in}"
+        assert pinned == window, f"{d_out}x{d_in}"
+        assert window <= scan, (
+            f"{d_out}x{d_in}: the recording routes {sorted(window - scan)} "
+            "outside ZONE_SCAN, so the guard would miss part of the window "
+            "without ever saying so")
     serve_sub4bit.require_pinned_zone()          # must not raise today
 
 
@@ -273,6 +294,35 @@ def test_registered_zone_refuses_a_boundary_that_moved_at_one_shape(
 
 
 @pytest.mark.gpu
+def test_sequence_and_batch_spellings_are_bit_identical_when_routed():
+    """One M = 7 certificate covers both rank spellings of the same rows.
+
+    The routed-vs-routed comparison alone would be near vacuous: `_fused`
+    flattens with `x.reshape(-1, d_in)`, so both spellings become the same
+    kernel call on the same rows and comparing them tests determinism rather
+    than routing. The load-bearing assertions are that BOTH spellings routed,
+    and that each matches the STOCK output the unpatched module produces.
+    """
+    a = make_holder()
+    rows = x_rows(7)
+    sequence = rows.reshape(1, 7, D_IN)
+    batch = rows.reshape(7, 1, D_IN)
+    stock = a(sequence)                  # unpatched: the reference
+    mx.eval(stock)
+    with patched(a) as patch:
+        sequence_out = a(sequence)
+        batch_out = a(batch)
+        mx.eval(sequence_out, batch_out)
+        assert patch.calls == 2, patch.fallbacks
+        assert mx.array_equal(
+            sequence_out.reshape(7, D_OUT),
+            batch_out.reshape(7, D_OUT),
+        ).item()
+    assert mx.allclose(sequence_out.reshape(7, D_OUT),
+                       stock.reshape(7, D_OUT), atol=2e-2, rtol=2e-2).item()
+
+
+@pytest.mark.gpu
 def test_prefill_shaped_input_falls_back_and_matches_stock():
     a = make_holder()
     x3 = mx.array(np.random.default_rng(5)
@@ -283,8 +333,31 @@ def test_prefill_shaped_input_falls_back_and_matches_stock():
         out = a(x3)
         mx.eval(out)
         assert patch.calls == 0
-        assert any(k.startswith("prefill-") for k in patch.fallbacks)
+        assert patch.fallbacks == {
+            f"m-{2 * 7}-outside-dispatch-{D_OUT}x{D_IN}": 1,
+        }
         assert mx.array_equal(out, stock).item()
+
+
+@pytest.mark.gpu
+def test_real_prefill_is_refused_by_flattened_width():
+    a = make_holder()
+    prefill = x_rows(64).reshape(1, 64, D_IN)
+    with patched(a) as patch:
+        mx.eval(a(prefill))
+        assert patch.calls == 0
+        assert patch.fallbacks == {
+            f"m-64-outside-dispatch-{D_OUT}x{D_IN}": 1,
+        }
+
+
+@pytest.mark.gpu
+def test_no_prefill_fallback_reason_remains():
+    import inspect
+
+    source = inspect.getsource(serve_sub4bit._RoutedLinear._ineligible)
+    assert "prefill-" not in source
+    assert serve_sub4bit._WHITELIST_PREFIXES == ("m-", "forced-stock")
 
 
 @pytest.mark.gpu
@@ -503,31 +576,9 @@ def test_perplexity_refuses_a_short_stream():
 TIMED = pytest.mark.parametrize("mode", ["--ab", "--mde"])
 
 
-def _never_load(*a, **k):
-    raise AssertionError("a model was loaded before the gate refused")
-
-
-def _raise(exc):
-    def _f(*a, **k):
-        raise exc
-    return _f
-
-
-def _pins_ok(monkeypatch):
-    monkeypatch.setattr(serve_sub4bit, "verify_pins",
-                        lambda *a, **k: {"pins": "ok"})
-
-
-def _lock_granted(monkeypatch):
-    monkeypatch.setattr(serve_sub4bit.MeasurementLock, "acquire",
-                        lambda self: (True, "acquired"))
-    monkeypatch.setattr(serve_sub4bit.MeasurementLock, "release",
-                        lambda self: None)
-
-
 @TIMED
 def test_timed_modes_refuse_when_the_machine_lock_is_held(monkeypatch, mode):
-    _pins_ok(monkeypatch)
+    _pins_ok(monkeypatch, serve_sub4bit)
     monkeypatch.setattr(serve_sub4bit.MeasurementLock, "acquire",
                         lambda self: (False, "held by pid 1 (test)"))
     monkeypatch.setattr(serve_sub4bit, "load_model", _never_load)
@@ -548,7 +599,7 @@ def test_smoke_never_takes_the_lock(monkeypatch):
     which walks the call graph because a lock inside a helper is exactly what
     this test cannot see.
     """
-    _pins_ok(monkeypatch)
+    _pins_ok(monkeypatch, serve_sub4bit)
 
     def _boom(self):
         raise AssertionError("smoke must not take the machine lock")
@@ -563,8 +614,8 @@ def test_permanent_preconditions_exit_with_their_own_code(monkeypatch, mode):
     monkeypatch.setattr(serve_sub4bit, "verify_pins",
                         _raise(RuntimeError("hash mismatch")))
     assert serve_sub4bit.main([mode]) == serve_sub4bit.EXIT_PRECONDITION
-    _pins_ok(monkeypatch)
-    _lock_granted(monkeypatch)
+    _pins_ok(monkeypatch, serve_sub4bit)
+    _lock_granted(monkeypatch, serve_sub4bit)
     monkeypatch.setattr(serve_sub4bit, "require_idle",
                         lambda label: {"idle": True})
     monkeypatch.setattr(serve_sub4bit, "require_pinned_zone",
@@ -576,8 +627,8 @@ def test_permanent_preconditions_exit_with_their_own_code(monkeypatch, mode):
 
 @TIMED
 def test_a_busy_machine_is_transient(monkeypatch, mode):
-    _pins_ok(monkeypatch)
-    _lock_granted(monkeypatch)
+    _pins_ok(monkeypatch, serve_sub4bit)
+    _lock_granted(monkeypatch, serve_sub4bit)
     monkeypatch.setattr(serve_sub4bit, "require_idle",
                         _raise(serve_sub4bit.NotIdle("WindowServer at 30%")))
     monkeypatch.setattr(serve_sub4bit, "load_model", _never_load)
@@ -586,8 +637,8 @@ def test_a_busy_machine_is_transient(monkeypatch, mode):
 
 @TIMED
 def test_timed_modes_refuse_when_the_budget_is_crossed(monkeypatch, mode):
-    _pins_ok(monkeypatch)
-    _lock_granted(monkeypatch)
+    _pins_ok(monkeypatch, serve_sub4bit)
+    _lock_granted(monkeypatch, serve_sub4bit)
     monkeypatch.setattr(serve_sub4bit, "require_idle",
                         lambda label: {"idle": True})
     monkeypatch.setattr(serve_sub4bit, "require_pinned_zone", lambda: None)
@@ -603,8 +654,8 @@ def test_timed_modes_refuse_when_the_budget_is_crossed(monkeypatch, mode):
 def test_timed_modes_refuse_a_machine_with_no_room(monkeypatch, mode):
     """The budget bounds THIS process; the memory gate bounds the machine.
     Both must refuse before a model lands, and with different codes."""
-    _pins_ok(monkeypatch)
-    _lock_granted(monkeypatch)
+    _pins_ok(monkeypatch, serve_sub4bit)
+    _lock_granted(monkeypatch, serve_sub4bit)
     monkeypatch.setattr(serve_sub4bit, "require_idle",
                         lambda label: {"idle": True})
     monkeypatch.setattr(serve_sub4bit, "require_pinned_zone", lambda: None)
@@ -807,8 +858,8 @@ def test_the_ppl_mode_refuses_a_corpus_that_is_not_the_registered_one(
     """Section 7 registers the corpus by sha256. ppl() computed the digest,
     printed it and never compared it, so any text at that path would have
     been scored and recorded under the registered hash's authority."""
-    _pins_ok(monkeypatch)
-    _lock_granted(monkeypatch)
+    _pins_ok(monkeypatch, serve_sub4bit)
+    _lock_granted(monkeypatch, serve_sub4bit)
     monkeypatch.setattr(serve_sub4bit, "load_model", _never_load)
     wrong = tmp_path / "ppl.txt"
     wrong.write_text("not the wikitext-2 test split")
@@ -951,3 +1002,48 @@ def test_the_expected_gain_is_labelled_as_the_cross_pass_composition():
                                 t_step_ms=10.0, noise_floor_pct=2.0)
     assert row["composition"] == "cross-pass"
     assert "cross-pass" in _findings_doc()
+
+
+# ---------------------------------------------------------------------------
+# the draft models: speculative decoding needs one vocabulary, not one file
+# ---------------------------------------------------------------------------
+DRAFT_MODELS = ("qwen3-0.6b-4bit-g64", "qwen3-1.7b-4bit-g64")
+
+
+def _tokenizer_identity(name: str) -> tuple:
+    """What a draft must share with its target for speculation to be sound.
+
+    The VOCABULARY, the merges and the added tokens, because those are what
+    make a token id mean the same thing to both models. Deliberately NOT the
+    file's hash: mlx_lm encodes the prompt and decodes the output with the
+    TARGET's tokenizer and hands the draft raw ids, so the draft's own
+    decoder and pre_tokenizer settings never run, and comparing whole files
+    would fail on differences that cannot affect a single id.
+    """
+    import json
+    d = json.loads((serve_sub4bit.MODELS_ROOT / name / "tokenizer.json").read_text())
+    return (
+        tuple(sorted(d["model"]["vocab"].items())),
+        tuple(tuple(m) if isinstance(m, list) else m
+              for m in d["model"].get("merges", [])),
+        tuple(sorted((t["id"], t["content"]) for t in d.get("added_tokens", []))),
+    )
+
+
+def test_every_pinned_draft_shares_the_targets_vocabulary():
+    """Speculative decoding is only lossless while a drafted id means the
+    same token to the target. Nothing else in this repo checks that, and a
+    mismatch would show up as silently wrong text rather than as an error.
+    """
+    present = [n for n in (serve_sub4bit.MODEL_3BIT, *DRAFT_MODELS)
+               if (serve_sub4bit.MODELS_ROOT / n / "tokenizer.json").exists()]
+    if len(present) < 1 + len(DRAFT_MODELS):
+        pytest.skip("the draft artifacts are local-only; bench/.models is gitignored")
+
+    target = _tokenizer_identity(serve_sub4bit.MODEL_3BIT)
+    for draft in DRAFT_MODELS:
+        got = _tokenizer_identity(draft)
+        for part, label in zip(range(3), ("vocab", "merges", "added_tokens")):
+            assert got[part] == target[part], (
+                f"{draft}'s {label} differs from {serve_sub4bit.MODEL_3BIT}'s; "
+                "a drafted id would not mean the same token to both models")

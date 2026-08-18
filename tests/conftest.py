@@ -60,6 +60,33 @@ def requires_metal(obj):
     """
     return pytest.mark.gpu(_no_metal(obj))
 
+
+def _never_load(*args, **kwargs):
+    raise AssertionError("a model was loaded before the gate refused")
+
+
+def _raise(exc):
+    def _f(*args, **kwargs):
+        raise exc
+
+    return _f
+
+
+def _pins_ok(monkeypatch, module):
+    monkeypatch.setattr(
+        module, "verify_pins", lambda *args, **kwargs: {"pins": "ok"}
+    )
+
+
+def _lock_granted(monkeypatch, module):
+    monkeypatch.setattr(
+        module.MeasurementLock,
+        "acquire",
+        lambda self: (True, "acquired"),
+    )
+    monkeypatch.setattr(module.MeasurementLock, "release", lambda self: None)
+
+
 # Well-conditioned shapes: every dimension modest, no degenerate reduction, so
 # any correct implementation should agree with the fp64 reference to near
 # working precision and a disagreement means a broken member.

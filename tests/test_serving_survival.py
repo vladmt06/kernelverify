@@ -1303,7 +1303,7 @@ def test_real_child_grid_iteration_round_trips_bit_exactly(child_dir):
 SERVE_SRC = (BENCH_DIR / "serve_sub4bit.py").read_text()
 
 
-def _cell_loop_order(func_name: str) -> tuple[int, int]:
+def _cell_loop_order(source: str, func_name: str) -> tuple[int, int]:
     """(index of mx.clear_cache(), index of guard(...)) in the cell loop.
 
     The cell loop is the `for` whose body calls guard() with an f-string - the
@@ -1311,7 +1311,7 @@ def _cell_loop_order(func_name: str) -> tuple[int, int]:
     the ORDER, which is the whole property: clearing after the guard reads the
     footprint would leave the guard measuring the previous cell's dead buffers.
     """
-    tree = ast.parse(SERVE_SRC)
+    tree = ast.parse(source)
     func = next(n for n in ast.walk(tree)
                 if isinstance(n, ast.FunctionDef) and n.name == func_name)
     for loop in (n for n in ast.walk(func) if isinstance(n, ast.For)):
@@ -1337,8 +1337,17 @@ def _cell_loop_order(func_name: str) -> tuple[int, int]:
     raise AssertionError(f"no cell loop found in {func_name}()")
 
 
-@pytest.mark.parametrize("func_name", ["mde", "ab"])
-def test_the_timed_modes_clear_the_buffer_cache_before_the_budget_reads(func_name):
+@pytest.mark.parametrize(
+    "source_path,func_name",
+    [
+        (BENCH_DIR / "serve_sub4bit.py", "mde"),
+        (BENCH_DIR / "serve_sub4bit.py", "ab"),
+        (BENCH_DIR / "serve_spec_decode.py", "main"),
+    ],
+)
+def test_the_timed_modes_clear_the_buffer_cache_before_the_budget_reads(
+    source_path, func_name
+):
     """MLX keeps freed buffers rather than returning them, and phys_footprint
     counts them, so a budget that reads before clearing measures memory nothing
     is using. On 2026-08-17 that refused a run at B=12 (25.72 GB against the
@@ -1346,7 +1355,9 @@ def test_the_timed_modes_clear_the_buffer_cache_before_the_budget_reads(func_nam
     run had to be taken at --budget-gb 30 - a registered parameter deviated
     from by a defect rather than by the measurement.
     """
-    clear_at, guard_at = _cell_loop_order(func_name)
+    # Moving mx.clear_cache() after guard(), or changing its receiver, makes
+    # the corresponding harness parameter red.
+    clear_at, guard_at = _cell_loop_order(source_path.read_text(), func_name)
     assert clear_at is not None, (
         f"{func_name}() never clears the buffer cache at its cell boundary")
     assert clear_at < guard_at, (
