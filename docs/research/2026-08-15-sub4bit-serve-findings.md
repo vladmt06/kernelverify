@@ -118,6 +118,31 @@ The check that keeps it honest is a test asserting that the wrapper emits no `m-
 It is there because the artifacts are bf16-headed while the kernel, the eligibility check (`x.dtype != mx.float16`) and the frozen contract are all fp16: without the cast arm 1 would route nothing and the arms would not share a lane width.
 What it could bias: not the comparison, since the same cast is applied to all four arms and both artifacts, but it does mean every number this harness reports - timings and the section 7 perplexity pair alike - describes an fp16 cast of the pinned checkpoints rather than the checkpoints as stored.
 
+### Amendment, 2026-08-18: sequence steps route on their flattened width
+
+Section 4 originally registered the wrapper as decode-scoped: every 3-D input with L > 1 fell back with `prefill-L{L}`, because the kernel and its certificates are decode-shaped.
+That reason does not survive reading the dispatch path: `_fused` applies `x.reshape(-1, d_in)` before launch, so the input rank and the placement of the seven rows do not change the kernel call.
+
+Measured on 2026-08-18, `(7, 1, 2560)` routed, `(1, 7, 2560)` fell back with `prefill-L7`, and `(7, 2560)` routed.
+The first two spellings flatten to the same seven rows, so the old gate made shape syntax decide whether identical projection work could use the routed kernel.
+
+The rule now computes M as the flattened row count for every input rank and leaves `should_dispatch` as the only judge of M.
+Every M outside the routed window still falls back, including real prefill chunks of tens to hundreds of tokens, and the reason is `m-{M}-outside-dispatch-{d_out}x{d_in}` like every other declined cell.
+What newly routes is a sequence step whose flattened M is 5 through 9, exactly a speculative decoder's K = 4 through 8 verification pass, plus a prefill of exactly 5 through 9 tokens.
+The pricing evidence says the kernel wins for those flattened projection calls.
+
+The obsolete prefill reason leaves the fallback whitelist.
+The machine-read whitelist registration changes in the same commit as the code because `tests/test_serve_sub4bit.py` compares them and a documentation-only commit would be red.
+
+**The pinned zone is widened in the same commit, and it is a registered quantity, so the reason is here.**
+`require_pinned_zone` refuses a run whose pack routes a different set of widths than this document registers, and it computed that set by filtering `B_GRID`.
+`B_GRID` is the A/B's TIMING grid, `[1, 4, 5, 6, 8, 11, 12, 16]`, which holds no 7 and no 9, while the routed window is 5 through 9.
+Before this amendment that gap could not be reached: the sequence check refused every shape that would have presented M = 7, so the guard was blind only to widths nothing could produce.
+After it, M = 7 is exactly what a verification step presents, and a routing boundary that moved at 7 or 9 would have passed the guard in silence.
+The zone is therefore scanned over widths 1 through 16 rather than filtered through the timing grid, and the registration becomes {5, 6, 7, 8, 9} at all five intercepted shapes, which is what the pack already routes.
+This widening makes the guard STRICTER and cannot make a previously refusing run pass.
+It does not touch `B_GRID`, so no timed cell moves and the published grid is untouched by it.
+
 ## 5. The minimum detectable effect, derived before the A/B
 
 Symbols: L = 36 layers; the seven per-layer projection shapes are q 2560x4096, k 2560x1024, v 2560x1024, o 4096x2560, gate 2560x9728, up 2560x9728, down 9728x2560 (d_in x d_out).
