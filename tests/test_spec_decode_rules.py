@@ -712,18 +712,17 @@ def _import_roots(module_name: str) -> set[str]:
     return roots
 
 
-# Adding `import numpy` or `import serve_sub4bit` to either module makes this red,
-# and so does adding a non-stdlib import to the shared sibling, which is the point:
-# the guarantee is that importing this module cannot reach mlx.nn, and it has to
-# hold through what it imports rather than only at its own top line. A machine
-# with no Metal device ABORTS the interpreter on `import mlx.nn` rather than
-# raising, so an offending import one level down would take the whole collection
-# with it and this test would never get to fail.
+# Adding `import numpy` or `import serve_sub4bit` to this import graph makes
+# this red, including through decode_rules and its machine_state dependency.
+# The guarantee has to hold transitively because a machine with no Metal
+# device aborts the interpreter on `import mlx.nn` rather than raising.
 def test_the_rules_module_cannot_reach_outside_the_standard_library():
-    allowed_siblings = {"attribution", "machine_state"}
+    allowed_siblings = {"attribution", "decode_rules", "machine_state"}
     roots = _import_roots("spec_decode_rules")
     assert roots <= sys.stdlib_module_names | allowed_siblings
     for sibling in roots & allowed_siblings:
-        assert _import_roots(sibling) <= sys.stdlib_module_names, (
+        assert _import_roots(sibling) <= sys.stdlib_module_names | {
+            "machine_state"
+        }, (
             f"bench/{sibling}.py is imported by the rules module, so its own "
-            "imports have to be standard library too")
+            "imports have to be standard library plus machine_state")
