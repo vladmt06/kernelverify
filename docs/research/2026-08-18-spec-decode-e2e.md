@@ -1,8 +1,8 @@
 # End-to-end speculative decode: pre-registration
 
-Status: pre-registered 2026-08-18.
+Status: pre-registered 2026-08-18; measured and read 2026-08-18.
 Sections 1 through 8 fix the method and the outcomes before the harness is written and before any measurement exists.
-Sections 9 and 10 remain placeholders until the binding run has completed.
+Sections 9 and 10 carry the binding run of 2026-08-18 and the verdicts read off it, against the outcomes fixed above and not against any restatement of them.
 
 ## 1. The question
 
@@ -330,8 +330,149 @@ Every result in sections 9 and 10 binds to that four-model manifest, toolchain r
 
 ## 9. Measurements
 
-This section is filled after the registered run.
+Measured by `bench/serve_spec_decode.py` through the detached runner on 2026-08-18, 15:53:41 to 16:08:07 UTC, 14 minutes, first attempt of three, harness exit 0.
+Five consecutive clean idle samples were held before the start and the closing sample was clean, so the run passed `check_idle_after` and is binding.
+MLX 0.32.0, mlx-lm 0.31.3, Apple M3 Pro, Mac15,7, Darwin 26.5.2 build 25F84, four pinned models, budget 24.0 GB with no flag.
+
+### Interception accounting
+
+Every cell's arm 1 routed exactly what the observed shapes predicted, and arm 4 routed nothing anywhere.
+No round in the run recorded a hard fallback.
+
+| draft | K | routed sites at width K+1 | arm 1 routed calls | expected | arm 4 |
+|---|---|---|---|---|---|
+| 0.6B | 2 | 0 | 0 | 0 | 0 |
+| 0.6B | 4 | 252 | 54180 | 54180 | 0 |
+| 0.6B | 6 | 252 | 46620 | 46620 | 0 |
+| 0.6B | 8 | 252 | 44100 | 44100 | 0 |
+| 0.6B | 10 | 0 | 0 | 0 | 0 |
+| 1.7B | 2 | 0 | 0 | 0 | 0 |
+| 1.7B | 4 | 252 | 51660 | 51660 | 0 |
+| 1.7B | 6 | 252 | 42840 | 42840 | 0 |
+| 1.7B | 8 | 252 | 40320 | 40320 | 0 |
+| 1.7B | 10 | 0 | 1260 | 1260 | 0 |
+
+The last row is the case the section 4 amendment of 2026-08-18 was written for, occurring exactly as predicted.
+The routing table routes nothing at width 11, so the cell is a registered null control, and yet arm 1 routed 1260 calls: one short final pass of width 6 per round, inside the routed window, across five rounds at 252 sites.
+Under the control as originally registered that count would have raised `RunInvalid` and voided all fourteen minutes.
+
+### Divergence report
+
+None.
+No `kernel-diverged` label and no `mlx-m-dependent` label fired in any round of any cell, and arm 4 matched arm 2 to the token everywhere.
+All five rounds were eligible for every outcome in all ten cells.
+This section is present and says "none" because section 4 requires it to be present even when it is.
+
+### Acceptance and the verification share
+
+| draft | K | accepted per pass | verification passes | verify share | ceiling |
+|---|---|---|---|---|---|
+| 0.6B | 2 | 2.21 | 58 | 0.8437 | 0% |
+| 0.6B | 4 | 2.91 | 44 | 0.7324 | 4.17% |
+| 0.6B | 6 | 3.37 | 38 | 0.7004 | 11.51% |
+| 0.6B | 8 | 3.46 | 37 | 0.6717 | 10.51% |
+| 0.6B | 10 | 3.76 | 34 | 0.6471 | 0% |
+| 1.7B | 2 | 2.42 | 53 | 0.7109 | 0% |
+| 1.7B | 4 | 3.05 | 42 | 0.5623 | 3.21% |
+| 1.7B | 6 | 3.56 | 36 | 0.5417 | 8.91% |
+| 1.7B | 8 | 3.88 | 33 | 0.4869 | 7.62% |
+| 1.7B | 10 | 3.88 | 33 | 0.4685 | 0% |
+
+Acceptance rises with K and saturates below 4 tokens per pass, and the target's share of generation time falls as K rises because more of the time goes to drafting.
+
+### Throughput, tokens per second, medians over the eligible rounds
+
+| draft | K | arm 0 plain | arm 1 ours | arm 2 stock 3-bit | arm 3 stock 4-bit |
+|---|---|---|---|---|---|
+| 0.6B | 2 | 66.69 | 81.33 | 81.18 | - |
+| 0.6B | 4 | 66.78 | 73.60 | 70.76 | - |
+| 0.6B | 6 | 66.78 | 62.70 | 55.71 | 62.96 |
+| 0.6B | 8 | 66.83 | 52.63 | 47.59 | - |
+| 0.6B | 10 | 66.76 | 42.60 | 42.58 | - |
+| 1.7B | 2 | 66.53 | 65.97 | 65.95 | - |
+| 1.7B | 4 | 66.73 | 53.05 | 51.71 | - |
+| 1.7B | 6 | 66.73 | 45.44 | 41.61 | 39.09 |
+| 1.7B | 8 | 66.77 | 38.59 | 35.87 | - |
+| 1.7B | 10 | 66.71 | 29.86 | 29.79 | - |
+
+Arm 3 is quoted only at the primary cell K = 6, which is the only cell O4 reads.
+
+### The pre-run prediction, falsified in its consequence
+
+Section 4's amendment predicted that the dry run's per-arm spreads, a median of 1.16% and a worst case of 9.52%, would carry into the binding run and push several cells under their ceiling to read `not-a-decider`.
+The floors did fall in some cells and did not in others: 0.14% and 0.16% at K = 4, 0.47% and 1.15% at the O1 cells, against 2.96% at 0.6B K = 6, 2.75% at 0.6B K = 8 and 5.84% at 1.7B K = 10.
+No cell read `not-a-decider`.
+Every non-null cell's ceiling cleared its floor, in the worst case 11.51% against 2.96%, so the prediction's premise was half right and its consequence was wrong, and it is recorded that way rather than quietly dropped.
 
 ## 10. Verdicts
 
-This section is filled after the registered run.
+### O1, does speculation pay at all on this stack
+
+| draft | best K | arm 2 | arm 0 | delta | floor | verdict |
+|---|---|---|---|---|---|---|
+| 0.6B | 2 | 81.18 | 66.69 | +21.72% | 0.47% | WIN |
+| 1.7B | 2 | 65.95 | 66.53 | -0.87% | 1.15% | INCONCLUSIVE |
+
+Speculation pays with the smaller draft and does not with the larger one.
+Both drafts select K = 2 as their best cell, so on this stack the useful amount of speculation is the smallest amount the grid offers.
+
+### O2, does routing the verification help
+
+| draft | K | arm 1 | arm 2 | delta | floor | ceiling | decider | verdict |
+|---|---|---|---|---|---|---|---|---|
+| 0.6B | 2 | 81.33 | 81.18 | +0.19% | 4.34% | 0% | no | NULL |
+| 0.6B | 4 | 73.60 | 70.76 | +4.02% | 0.14% | 4.17% | yes | WIN |
+| 0.6B | 6 | 62.70 | 55.71 | +12.56% | 2.96% | 11.51% | yes | WIN |
+| 0.6B | 8 | 52.63 | 47.59 | +10.59% | 2.75% | 10.51% | yes | WIN |
+| 0.6B | 10 | 42.60 | 42.58 | +0.05% | 0.60% | 0% | no | NULL |
+| 1.7B | 2 | 65.97 | 65.95 | +0.03% | 1.15% | 0% | no | NULL |
+| 1.7B | 4 | 53.05 | 51.71 | +2.59% | 0.16% | 3.21% | yes | WIN |
+| 1.7B | 6 | 45.44 | 41.61 | +9.20% | 1.33% | 8.91% | yes | WIN |
+| 1.7B | 8 | 38.59 | 35.87 | +7.58% | 2.61% | 7.62% | yes | WIN |
+| 1.7B | 10 | 29.86 | 29.79 | +0.23% | 5.84% | 0% | no | NULL-uncontrolled |
+
+Every decider cell is a WIN, six of six, and each observed delta sits close to the ceiling registered before the run.
+Two deltas exceed their ceiling, 12.56% against 11.51% and 10.59% against 10.51%, and neither excess is meaningful: both are smaller than the cell's own noise floor, 2.96% and 2.75%.
+The ceiling was built from the probe's isolated per-pass cost, which the amendment recorded as an upper bound, so an excess larger than the floor would have been a finding and these are not.
+
+This is the outcome that answers the kernel question, and it answers it yes at every width the routed window covers.
+
+### O3, the product number against plain stock decode
+
+| draft | primary K | arm 1 | arm 0 | composed | speculation alone | kernel on top | floor | attribution |
+|---|---|---|---|---|---|---|---|---|
+| 0.6B | 6 | 62.70 | 66.78 | -6.11% | -16.58% | +12.56% | 2.96% | negative |
+| 1.7B | 6 | 45.44 | 66.73 | -31.90% | -37.64% | +9.20% | 1.43% | negative |
+
+**NO-GO.**
+At the pre-registered primary cell, `mlx_lm`'s speculative path with our kernel routed at verification is slower than `mlx_lm`'s plain path with stock kernels, for both drafts.
+The attribution says why without ambiguity: speculation at K = 6 costs more than the kernel gives back, on both drafts, and the kernel's contribution is positive in both cases.
+
+This is the first end-to-end batch-1 claim this repository could have made, and the honest form of it is negative.
+It is a claim about `mlx_lm` 0.31.3's speculative decoding on this machine with these two drafts at K = 6, and it is not a claim that speculative decoding cannot work here.
+
+The full-grid maximum is reported beside it as section 6 requires, labelled exploratory and selection-biased, and it is never the quoted number: +21.95% at K = 2 for the 0.6B draft, -0.84% at K = 2 for the 1.7B.
+
+### O4, does the 3-bit path match speculative stock 4-bit
+
+| draft | primary K | arm 1 | arm 3 | ratio | composed | base | floor | attribution |
+|---|---|---|---|---|---|---|---|---|
+| 0.6B | 6 | 62.70 | 62.96 | 0.9960 | -0.40% | -11.51% | 2.96% | inconclusive |
+| 1.7B | 6 | 45.44 | 39.09 | 1.1626 | +16.26% | +6.46% | 0.51% | artifact-alone |
+
+With the 1.7B draft the 3-bit model with our kernel runs 16.26% faster than stock 4-bit at the same K, of which the 3-bit artifact alone accounts for 6.46%, so the label is `artifact-alone` by the registered thresholds even though the kernel carries most of the gap.
+With the 0.6B draft the two are indistinguishable inside the cell's floor.
+Neither reading changes O3: both arms of this comparison are slower than plain decode, so it compares two options a user on this machine should not choose over the third.
+
+### What this run establishes, and what it does not
+
+It establishes that the flattened-width rule works through `mlx_lm`'s own speculative path, that the kernel wins its own question at every routed width by an amount close to the one predicted from the A/B and the spike, and that on this stack the composed product at K = 6 is slower than plain decode.
+
+It does not establish anything about K = 2 or K = 4, which the grid reports and section 6 forbids quoting.
+Two facts about them are worth carrying into the next pre-registration rather than into a claim.
+The first is that the composed number is positive at both, +21.95% and +10.22% for the 0.6B draft against plain decode.
+The second is that these two cells are not the same kind of cell: at K = 2 nothing routes, so the whole of +21.95% is speculation and the kernel contributes nothing, while at K = 4 the kernel contributes +4.02 points of the +10.22%.
+K = 4 with the 0.6B draft is therefore the only cell in this grid where speculation pays AND the kernel helps, and the honest way to find out whether that is real is to pre-register it and measure it again, not to read it off this grid.
+
+The primary cell was fixed at K = 6 before the run because it was the paper's optimum and the spike's width.
+The measurement says that on this stack K = 6 is already past the point where speculation pays, and choosing it in advance is what makes that statement worth anything.
