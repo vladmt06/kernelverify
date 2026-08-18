@@ -137,6 +137,22 @@ K = 2 and K = 10 have ceiling zero by construction and are validated separately 
 The memory guard runs before every cell and after every arm.
 The final return passes through `check_idle_after`, so a dirty closing idle sample makes the run non-binding instead of allowing exit 0 under contention.
 
+### Amendment, 2026-08-18: where `generation_time` comes from, and who selects the eligible rounds
+
+Both corrections were found by the dispatched writer refusing to write the harness against a section that could not be implemented, and both were reproduced here before being admitted.
+Neither changes an arm, an outcome, a threshold, or a number.
+
+First, this section said `verify_share = verify_time / generation_time` without naming a source for `generation_time`, and `mlx_lm` 0.31.3 does not have one to name.
+Its `GenerationResponse` carries `text`, `token`, `logprobs`, `from_draft`, `prompt_tokens`, `prompt_tps`, `generation_tokens`, `generation_tps`, `peak_memory` and `finish_reason`, and no elapsed-time field at all.
+From this amendment the harness derives it as `generation_time = generation_tokens / generation_tps` from the same final response the other metrics come from.
+That is not an estimate of a different quantity.
+`stream_generate` resets its clock immediately after the first generated token and then emits `generation_tokens = n + 1` beside `generation_tps = (n + 1) / (perf_counter() - tic)`, so dividing the first by the second returns the very elapsed window `mlx_lm` measured, to float precision.
+Any wall clock the harness started itself would instead include prefill and the first token, which this section already excludes on purpose, so the derived value is the more faithful of the two and not merely the available one.
+
+Second, this section requires `verify_time` and `generation_time` to be summed over the O2-eligible arm 2 rounds, and the rules module kept its eligibility filter private.
+A harness that reproduced the filter would hold a second copy of the exclusion rule, which is the duplication this experiment already removed once from the attribution rule.
+From this amendment `spec_decode_rules` exposes that selection publicly as `eligible_rounds(rounds, outcome)`, the harness calls it for the share, and the verdict functions keep calling the same code for their medians, so the two can never disagree.
+
 ## 6. Pre-registered outcomes
 
 The four outcomes are read in order and are reported separately for each draft.
