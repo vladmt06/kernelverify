@@ -1017,3 +1017,48 @@ def test_the_expected_gain_is_labelled_as_the_cross_pass_composition():
                                 t_step_ms=10.0, noise_floor_pct=2.0)
     assert row["composition"] == "cross-pass"
     assert "cross-pass" in _findings_doc()
+
+
+# ---------------------------------------------------------------------------
+# the draft models: speculative decoding needs one vocabulary, not one file
+# ---------------------------------------------------------------------------
+DRAFT_MODELS = ("qwen3-0.6b-4bit-g64", "qwen3-1.7b-4bit-g64")
+
+
+def _tokenizer_identity(name: str) -> tuple:
+    """What a draft must share with its target for speculation to be sound.
+
+    The VOCABULARY, the merges and the added tokens, because those are what
+    make a token id mean the same thing to both models. Deliberately NOT the
+    file's hash: mlx_lm encodes the prompt and decodes the output with the
+    TARGET's tokenizer and hands the draft raw ids, so the draft's own
+    decoder and pre_tokenizer settings never run, and comparing whole files
+    would fail on differences that cannot affect a single id.
+    """
+    import json
+    d = json.loads((serve_sub4bit.MODELS_ROOT / name / "tokenizer.json").read_text())
+    return (
+        tuple(sorted(d["model"]["vocab"].items())),
+        tuple(tuple(m) if isinstance(m, list) else m
+              for m in d["model"].get("merges", [])),
+        tuple(sorted((t["id"], t["content"]) for t in d.get("added_tokens", []))),
+    )
+
+
+def test_every_pinned_draft_shares_the_targets_vocabulary():
+    """Speculative decoding is only lossless while a drafted id means the
+    same token to the target. Nothing else in this repo checks that, and a
+    mismatch would show up as silently wrong text rather than as an error.
+    """
+    present = [n for n in (serve_sub4bit.MODEL_3BIT, *DRAFT_MODELS)
+               if (serve_sub4bit.MODELS_ROOT / n / "tokenizer.json").exists()]
+    if len(present) < 1 + len(DRAFT_MODELS):
+        pytest.skip("the draft artifacts are local-only; bench/.models is gitignored")
+
+    target = _tokenizer_identity(serve_sub4bit.MODEL_3BIT)
+    for draft in DRAFT_MODELS:
+        got = _tokenizer_identity(draft)
+        for part, label in zip(range(3), ("vocab", "merges", "added_tokens")):
+            assert got[part] == target[part], (
+                f"{draft}'s {label} differs from {serve_sub4bit.MODEL_3BIT}'s; "
+                "a drafted id would not mean the same token to both models")
