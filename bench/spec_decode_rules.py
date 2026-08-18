@@ -174,9 +174,17 @@ def identity_labels(
     return labels
 
 
-def _eligible_rounds(
+def eligible_rounds(
     rounds: Sequence[RoundSample], outcome: str
 ) -> tuple[RoundSample, ...]:
+    """The rounds one outcome may read, after its own exclusions.
+
+    Public because the harness needs the same set the verdicts read: section 5
+    sums arm 2's verify and generation times over the O2-eligible rounds, and a
+    harness that re-derived "valid, and not carrying this outcome's identity
+    label" would be a second copy of the exclusion rule with nothing binding it
+    to this one (doc, section 5 amendment of 2026-08-18).
+    """
     excluded = _IDENTITY_EXCLUSIONS[outcome]
     eligible = tuple(
         round_sample
@@ -192,7 +200,7 @@ def _eligible_rounds(
 def _comparison(
     rounds: Sequence[RoundSample], outcome: str, numerator: int, denominator: int
 ) -> _Comparison:
-    eligible = _eligible_rounds(rounds, outcome)
+    eligible = eligible_rounds(rounds, outcome)
     samples_a = [r.generation_tps[numerator] for r in eligible]
     samples_b = [r.generation_tps[denominator] for r in eligible]
     t_a = statistics.median(samples_a)

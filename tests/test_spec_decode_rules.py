@@ -22,6 +22,7 @@ from spec_decode_rules import (
     decide_o3,
     decide_o4,
     delta_pct,
+    eligible_rounds,
     expected_routed_calls,
     identity_labels,
     in_window,
@@ -514,6 +515,40 @@ def test_hard_fallback_invalid_rounds_are_ineligible_for_every_outcome():
     ] == 110.0
     assert decide_o3(cells)["arm1_tps"] == 110.0
     assert decide_o4(cells)["arm1_tps"] == 110.0
+
+
+# The harness sums arm 2's verify and generation times over the O2-eligible
+# rounds (doc, section 5) and must not own a second copy of the exclusion rule.
+# Re-deriving eligibility inside serve_spec_decode.py rather than calling this
+# is what these three tests exist to make impossible.
+def test_public_eligibility_applies_both_filters_for_the_named_outcome():
+    kept = _round(a2=100.0)
+    rounds = [
+        _round(a2=1.0, valid=False),
+        _round(a2=2.0, identity={"kernel-diverged": 3}),
+        kept,
+    ]
+    assert eligible_rounds(rounds, "O2") == (kept,)
+    # O1 excludes the MLX label, not the kernel one, so the same input keeps a
+    # different pair: an outcome-blind filter would return the same tuple twice.
+    assert len(eligible_rounds(rounds, "O1")) == 2
+
+
+# Letting the public selector and the verdict's own selection diverge makes this red.
+def test_the_public_selection_is_the_one_every_verdict_reads():
+    rounds = [
+        _round(a1=1000.0, a2=1000.0, identity={"kernel-diverged": 1}),
+        _round(a1=110.0, a2=100.0),
+        _round(a1=112.0, a2=100.0),
+    ]
+    decision = decide_o2(6, rounds, ceiling=1.0, routed_calls=1)
+    assert len(eligible_rounds(rounds, "O2")) == decision["eligible_rounds"]
+
+
+# Returning an empty tuple instead of refusing would let the harness divide by zero.
+def test_public_eligibility_refuses_when_nothing_survives():
+    with pytest.raises(RunInvalid):
+        eligible_rounds([_round(valid=False)], "O2")
 
 
 # Passing empty paired sets to statistics.median instead of RunInvalid makes these red.
