@@ -265,8 +265,16 @@ def decide_o2(
     *,
     ceiling: float,
     routed_calls: int,
+    routed_sites_at_width: int | None = None,
 ) -> dict[str, object]:
-    """Read arm 1 against arm 2 at one registered K cell."""
+    """Read arm 1 against arm 2 at one registered K cell.
+
+    ``routed_sites_at_width`` is the routing table's site count at this cell's
+    verification width K + 1, and is required at the two null cells: their
+    control is a claim about the TABLE, not about the observed count, which a
+    short final pass can legitimately make non-zero (doc, section 4 amendment
+    of 2026-08-18).
+    """
     comparison = _comparison(rounds, "O2", 1, 2)
     result = {
         "k": k,
@@ -279,10 +287,28 @@ def decide_o2(
     }
 
     if k in _NULL_KS:
-        if routed_calls != 0 or abs(comparison.delta_pct) > comparison.noise_floor_pct:
+        if routed_sites_at_width is None:
             raise RunInvalid(
-                f"K={k} mandatory null control had {routed_calls} routed calls "
-                f"and delta {comparison.delta_pct}% at floor "
+                f"K={k} is a null control and needs the routing table's site "
+                f"count at width {k + 1} to be read"
+            )
+        if routed_sites_at_width != 0:
+            raise RunInvalid(
+                f"K={k} mandatory null control: the routing table routes at "
+                f"{routed_sites_at_width} sites at width {k + 1}, and the "
+                "registration says it routes at none"
+            )
+        if routed_calls:
+            # A short final pass landed inside the routed window, which is
+            # where max_tokens fell rather than anything the interception did.
+            # Section 4's exact-count assertion already bound this number; the
+            # cell simply stops being a control for this run.
+            return {**result, "decider": False, "routed_calls": routed_calls,
+                    "verdict": "NULL-uncontrolled"}
+        if abs(comparison.delta_pct) > comparison.noise_floor_pct:
+            raise RunInvalid(
+                f"K={k} mandatory null control routed nothing yet had delta "
+                f"{comparison.delta_pct}% at floor "
                 f"{comparison.noise_floor_pct}%"
             )
         return {**result, "decider": False, "verdict": "NULL"}

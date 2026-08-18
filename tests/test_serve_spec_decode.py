@@ -207,11 +207,15 @@ class _Patch:
 
 
 def _response(token: int):
+    # No generation_time: mlx_lm 0.31.3's GenerationResponse has no such field,
+    # and the harness derives it as generation_tokens / generation_tps (doc,
+    # section 5 amendment of 2026-08-18). finish_reason is here because the
+    # real one carries it and the row records it.
     return SimpleNamespace(
         token=token,
         generation_tokens=h.GEN_TOKENS,
-        generation_time=1.0,
         generation_tps=100.0,
+        finish_reason="length",
     )
 
 
@@ -228,6 +232,11 @@ def test_main_reaches_the_grid_with_the_machine_stubbed(monkeypatch):
     monkeypatch.setattr(h, "install_patch", lambda model: _Patch())
     monkeypatch.setattr(h, "should_dispatch", lambda *args: False)
     monkeypatch.setattr(h.mx, "clear_cache", lambda: None)
+    # The per-cell probe runs the counter with sync=True, and the fake model
+    # above returns the fake input rather than an array, so the machine's
+    # evaluator is stubbed here for the same reason clear_cache is: this test
+    # walks the wiring, and mx.eval is machine.
+    monkeypatch.setattr(h.mx, "eval", lambda *args: None)
     monkeypatch.setattr(h, "ROUNDS", 1)
 
     guarded = []

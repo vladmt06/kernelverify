@@ -243,18 +243,41 @@ def test_o1_selects_best_k_after_its_identity_exclusions():
 @pytest.mark.parametrize("k", [2, 10])
 def test_o2_registered_null_cells_read_null(k):
     result = decide_o2(
-        k, [_round(a1=100.0, a2=100.0)], ceiling=0.0, routed_calls=0
+        k, [_round(a1=100.0, a2=100.0)], ceiling=0.0, routed_calls=0,
+        routed_sites_at_width=0,
     )
     assert result["decider"] is False
     assert result["verdict"] == "NULL"
 
 
-# Ignoring routed_calls lets this invalid null control be reported as NULL.
-def test_o2_null_cell_with_a_routed_call_invalidates_the_run():
+# The control is a claim about the ROUTING TABLE, so a table that routes at the
+# cell's registered width is the failure it was written to catch.
+def test_o2_null_cell_whose_registered_width_routes_invalidates_the_run():
     with pytest.raises(RunInvalid, match="K=2"):
         decide_o2(
-            2, [_round(a1=100.0, a2=100.0)], ceiling=0.0, routed_calls=1
+            2, [_round(a1=100.0, a2=100.0)], ceiling=0.0, routed_calls=0,
+            routed_sites_at_width=252,
         )
+
+
+# Reading the control off the observed count instead of the table makes this
+# red, and would have voided the 2026-08-18 run: the 1.7B draft's K=10 cell
+# produces one width-6 pass out of 33, which routes.
+def test_o2_null_cell_with_a_routed_short_pass_is_uncontrolled_not_invalid():
+    result = decide_o2(
+        10, [_round(a1=100.0, a2=100.0)], ceiling=0.0, routed_calls=252,
+        routed_sites_at_width=0,
+    )
+    assert result["decider"] is False
+    assert result["verdict"] == "NULL-uncontrolled"
+    assert result["routed_calls"] == 252
+
+
+# Reading a null cell without the table's site count would decide the control
+# from the observed count alone, which is the thing that must not happen.
+def test_o2_null_cell_refuses_without_the_tables_site_count():
+    with pytest.raises(RunInvalid, match="site count"):
+        decide_o2(2, [_round()], ceiling=0.0, routed_calls=0)
 
 
 # Validating only positive null-cell deltas lets the negative case escape.
@@ -262,7 +285,8 @@ def test_o2_null_cell_with_a_routed_call_invalidates_the_run():
 def test_o2_null_cell_outside_spread_in_either_direction_is_invalid(a1):
     with pytest.raises(RunInvalid, match="K=10"):
         decide_o2(
-            10, [_round(a1=a1, a2=100.0)], ceiling=0.0, routed_calls=0
+            10, [_round(a1=a1, a2=100.0)], ceiling=0.0, routed_calls=0,
+            routed_sites_at_width=0,
         )
 
 
