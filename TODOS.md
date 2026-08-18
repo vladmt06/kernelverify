@@ -9,14 +9,17 @@
 - Context: `tests/conftest.py:13-16` states the one-probe rule; AGENTS.md's marker section names these four as predating it; surfaced by the merge gate's standards axis on 2026-08-17.
 - Depends on / blocked by: nothing; deliberately kept off `lane/test-infra-and-record` because these four modules gate correctly today - an in-process `MetalDevice()` raises rather than aborting - so this is consolidation, not a fix.
 
-## Speculation pays only below the width our kernel covers, and K = 4 is the one cell where both hold
+## A single cold first round can make a low-ceiling cell unreadable
 
-- What: pre-register and measure a `(0.6B draft, K = 4)` cell against plain stock decode, with its own primary cell fixed in advance, rather than reading it off the 2026-08-18 grid.
-- Why: that run's O3 is a NO-GO at its registered primary cell K = 6 (-6.11% and -31.90%), and its exploratory grid shows the composed number positive at K = 2 (+21.95%) and K = 4 (+10.22%) with the 0.6B draft. The two are not the same kind of cell: M = 3 is outside the routed window so the whole of the K = 2 gain is speculation with zero kernel contribution, while at K = 4 the kernel contributed +4.02 of the +10.22 points. K = 4 is therefore the only cell in that grid where speculation pays AND the kernel helps, and it is exactly the cell selection bias would invent if it did not exist.
-- Pros: it is the one place the product claim could still live on this stack, and the harness, the rules module and the whole pre-registration already exist, so the marginal cost is a doc and a 3-minute run.
-- Cons: reading a cell chosen after seeing the grid is the mistake section 10 of the e2e doc exists to prevent, so this needs its own written primary cell BEFORE any measurement and must not cite the 2026-08-18 numbers as its result; a K = 4 grid also samples the routed window at one width only, so it says less about the kernel than the K grid did.
-- Context: `docs/research/2026-08-18-spec-decode-e2e.md` sections 9 and 10; `bench/serve_spec_decode.py`; the exploratory field on every O3 RESULT line.
-- Depends on / blocked by: nothing.
+- What: give the noise floor resistance to one outlier, or make the warm-up reliably prevent one, and re-register any cell whose ceiling is the same order as a cold round before measuring it.
+- Why: `machine_state.spread_pct` is `(max - min) / median` over `ROUNDS = 5`, which a single sample dominates completely.
+  Across the two binding speculative-decode runs of 2026-08-18, a first round more than 1% colder than the rest of its arm-cell appeared in 4 of 50 and 3 of 50 arm-cells, landing on a different cell each time and reaching -5.27% at worst.
+  Wherever it lands, that cell's floor becomes the size of the artefact.
+  It cost the K = 4 follow-up its reading: the composed and kernel point estimates reproduced to within 0.05 points, and the cell still read `not-a-decider` because its 4.16% ceiling could not clear a 5.32% floor built from one sample.
+- Pros: cells whose ceiling is a few percent become readable at all, which is every cell at the small-K end of the speculative grid; and the fix is bounded, since `spread_pct` has one definition and one home.
+- Cons: changing what `spread_pct` means moves `MAX_SPREAD_PCT` and every harness that reads it, including the published A/B, so it is a change to a shared registered quantity and needs its own pre-registration rather than an edit; raising `ROUNDS` instead costs run time linearly and does not by itself make `(max - min)` resistant to anything.
+- Context: `docs/research/2026-08-18-spec-decode-k4-followup.md` sections 7 and 8; `bench/machine_state.py` `spread_pct`; the per-arm rounds at 0.6B K = 4 were 69.71, 73.44, 73.62, 73.56, 73.62.
+- Depends on / blocked by: nothing, but it must not be done as a way of re-reading the K = 4 cell, which section 8 of that document closes.
 
 ## Speculative decode is measured only under greedy sampling
 

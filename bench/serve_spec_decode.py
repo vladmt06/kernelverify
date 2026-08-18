@@ -53,6 +53,7 @@ from serve_sub4bit import (  # noqa: E402
 )
 from spec_decode_rules import (  # noqa: E402
     K_GRID,
+    PRIMARY_K,
     RoundSample,
     RunInvalid,
     accepted_per_pass,
@@ -286,6 +287,18 @@ def main(argv=None) -> int:
         type=budget_gb_arg,
         default=BUDGET_GB,
         help="phys_footprint budget in decimal GB",
+    )
+    # A registered input, not a knob: the parent pre-registration fixed K=6
+    # and the K=4 follow-up names 4 in writing before its run (docs/research/
+    # 2026-08-18-spec-decode-k4-followup.md, section 3). Reading any other
+    # cell as primary needs its own pre-registration first.
+    parser.add_argument(
+        "--primary-k",
+        type=int,
+        default=PRIMARY_K,
+        choices=K_GRID,
+        help="the pre-registered primary cell O3 and O4 read "
+             f"(default {PRIMARY_K})",
     )
     args = parser.parse_args(argv)
 
@@ -546,11 +559,17 @@ def main(argv=None) -> int:
                 )
             current_cell = f"{draft_name} O3"
             result_lines.append(
-                _result_line(draft_name, "O3", decide_o3(cells))
+                _result_line(
+                    draft_name, "O3",
+                    decide_o3(cells, primary_k=args.primary_k),
+                )
             )
             current_cell = f"{draft_name} O4"
             result_lines.append(
-                _result_line(draft_name, "O4", decide_o4(cells))
+                _result_line(
+                    draft_name, "O4",
+                    decide_o4(cells, primary_k=args.primary_k),
+                )
             )
         for line in result_lines:
             print(line)

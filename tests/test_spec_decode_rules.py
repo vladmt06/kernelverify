@@ -386,6 +386,42 @@ def test_o3_keeps_k6_primary_and_labels_the_grid_max_exploratory():
     }
 
 
+# The K=4 follow-up (docs/research/2026-08-18-spec-decode-k4-followup.md,
+# section 3) makes the primary cell a registered input rather than a constant.
+# Ignoring the keyword and reading K=6 anyway makes both of these red; the
+# exploratory report is unchanged by which cell is primary.
+def test_o3_reads_the_registered_primary_cell_when_one_is_named():
+    cells = _grid(
+        **{
+            "4": [_round(a0=100.0, a1=110.0, a2=105.0)],
+            "6": [_round(a0=100.0, a1=90.0, a2=95.0)],
+        }
+    )
+    result = decide_o3(cells, primary_k=4)
+    assert result["primary_k"] == 4
+    assert result["composed_pct"] == pytest.approx(10.0)
+    assert result["speculation_pct"] == pytest.approx(5.0)
+    assert result["exploratory"]["ks"] == (4,)
+
+
+def test_o4_reads_the_registered_primary_cell_when_one_is_named():
+    cells = _grid(
+        **{
+            "4": [_round(a0=1000.0, a1=120.0, a2=110.0, a3=100.0)],
+            "6": [_round(a0=1000.0, a1=50.0, a2=50.0, a3=100.0)],
+        }
+    )
+    result = decide_o4(cells, primary_k=4)
+    assert result["primary_k"] == 4
+    assert result["ratio_composed_vs_4bit"] == 1.2
+
+
+# A primary cell outside the registered grid is a run that cannot be read.
+def test_a_primary_cell_outside_the_grid_is_refused():
+    with pytest.raises(RunInvalid, match="K=5"):
+        decide_o3(_grid(), primary_k=5)
+
+
 # Selecting one unregistered winner instead of retaining tied exploratory Ks makes this red.
 def test_o3_exploratory_ties_keep_every_tied_k():
     cells = _grid(
