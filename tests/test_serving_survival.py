@@ -1343,6 +1343,7 @@ def _cell_loop_order(source: str, func_name: str) -> tuple[int, int]:
         (BENCH_DIR / "serve_sub4bit.py", "mde"),
         (BENCH_DIR / "serve_sub4bit.py", "ab"),
         (BENCH_DIR / "serve_spec_decode.py", "main"),
+        (BENCH_DIR / "serve_batch_decode.py", "main"),
     ],
 )
 def test_the_timed_modes_clear_the_buffer_cache_before_the_budget_reads(

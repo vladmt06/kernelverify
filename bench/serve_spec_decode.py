@@ -11,9 +11,6 @@ import json
 import math
 import statistics
 import sys
-import time
-from contextlib import contextmanager
-from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -23,7 +20,6 @@ import mlx.core as mx  # noqa: E402
 from mlx_lm.generate import stream_generate  # noqa: E402
 from mlx_lm.sample_utils import make_sampler  # noqa: E402
 
-from kernelverify.pack.wide_qmv import should_dispatch  # noqa: E402
 from machine_state import MeasurementLock  # noqa: E402
 from memory_guard import (  # noqa: E402
     EXIT_BUDGET_REFUSAL,
@@ -35,6 +31,7 @@ from memory_guard import (  # noqa: E402
     LowMemoryRefusal,
     budget_gb_arg,
 )
+from model_calls import _CallCounter, counting_calls  # noqa: E402
 from serve_sub4bit import (  # noqa: E402
     MODEL_3BIT,
     MODEL_4BIT,
@@ -49,6 +46,8 @@ from serve_sub4bit import (  # noqa: E402
     provenance,
     require_idle,
     require_pinned_zone,
+    routed_sites_at,
+    routed_sites_for,
     verify_pins,
 )
 from spec_decode_rules import (  # noqa: E402
@@ -83,55 +82,11 @@ DRAFT_MODELS = (
 ARM_ORDER = (1, 2, 3, 4, 0)
 
 
-@dataclass
-class _CallCounter:
-    shapes: list[tuple[int, ...]] = field(default_factory=list)
-    seconds: list[float] = field(default_factory=list)
-
-
-@contextmanager
-def counting_calls(target, *, sync: bool = False):
-    """Count calls to one model while leaving same-class models untouched."""
-    model_type = type(target)
-    original = model_type.__call__
-    counter = _CallCounter()
-
-    def counted(self, inputs, *args, **kwargs):
-        if self is not target:
-            return original(self, inputs, *args, **kwargs)
-
-        counter.shapes.append(tuple(inputs.shape))
-        if not sync:
-            return original(self, inputs, *args, **kwargs)
-
-        started = time.perf_counter()
-        result = original(self, inputs, *args, **kwargs)
-        mx.eval(result)
-        counter.seconds.append(time.perf_counter() - started)
-        return result
-
-    model_type.__call__ = counted
-    try:
-        yield counter
-    finally:
-        model_type.__call__ = original
-
-
 def _single_prompt(prompts):
     shape = getattr(prompts, "shape", None)
     if shape is not None and len(shape) == 2:
         return prompts[0]
     return prompts
-
-
-def _sites_routing_at(width: int, site_cells) -> int:
-    """How many wrapped sites the routing table routes at one width."""
-    return sum(1 for site_cell in site_cells if should_dispatch(width, *site_cell))
-
-
-def _routed_sites_at(shapes, site_cells):
-    widths = {math.prod(shape) for shape in shapes}
-    return {width: _sites_routing_at(width, site_cells) for width in widths}
 
 
 def _generate(target, tokenizer, prompt, *, draft_model, k, sync, cell):
@@ -239,7 +194,7 @@ def _run_arm(
         # Section 4: the sum runs over the observed VERIFICATION passes. It
         # would agree numerically over every call today only because the
         # table declines the prefill width, and that is not the rule.
-        routed_sites = _routed_sites_at(verification_shapes, site_cells)
+        routed_sites = routed_sites_for(verification_shapes, site_cells)
         run["routed_sites_at"] = routed_sites
         run["expected_routed_calls"] = expected_routed_calls(
             verification_shapes, routed_sites
@@ -473,7 +428,7 @@ def main(argv=None) -> int:
                 )
                 ceiling = ceiling_for(k, share)
                 site_cells = runs_by_arm[1][0]["site_cells"]
-                routed_sites_at_width = _sites_routing_at(k + 1, site_cells)
+                routed_sites_at_width = routed_sites_at(k + 1, site_cells)
 
                 for arm in ARM_ORDER:
                     row = {
