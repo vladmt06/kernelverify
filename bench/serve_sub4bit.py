@@ -75,6 +75,7 @@ import mlx.nn as nn  # noqa: E402
 
 # One copy of the timing discipline, imported rather than restated: a rule
 # amended in interleave.py must not silently stay old here (AGENTS.md).
+from attribution import composed_attribution  # noqa: F401
 from machine_state import MeasurementLock, spread_pct  # noqa: E402
 
 # The refusal vocabulary, single-sourced: this harness numbers nothing itself,
@@ -897,18 +898,11 @@ def primary_verdict(prim_pct: float, noise_pct: float) -> str:
     return "regression"
 
 
-def composed_attribution(comp_pct: float, base_pct: float,
-                         noise_pct: float) -> str:
-    """Arm 1 against arm 3, one row per outcome cell of the doc's
-    section-6 attribution table; arm 2 against arm 3 (base_pct) is what
-    separates a win the artifact already had from one the kernel unlocked."""
-    if abs(comp_pct) <= noise_pct:
-        return "inconclusive"
-    if comp_pct <= 0:
-        return "negative"
-    if base_pct > noise_pct:
-        return "artifact-alone"
-    return "joint"
+# Arm 1 against arm 3, one row per outcome cell of the doc's section-6
+# attribution table; arm 2 against arm 3 (base_pct) is what separates a win the
+# artifact already had from one the kernel unlocked. Defined in bench/attribution
+# rather than here because bench/spec_decode_rules.py needs the same rule and
+# cannot import this module, which reaches mlx.nn.
 
 
 def ab_row(b: int, arms: dict[str, list[float]], routed: list[str],

@@ -41,7 +41,14 @@ mx = pytest.importorskip("mlx.core")
 # it returns True inside a sandbox that then aborts on first use. METAL_DEVICE
 # asks the only question that matters by trying it in a worker process, where
 # an abort costs that process instead of this one.
-from conftest import METAL_DEVICE, requires_metal  # noqa: E402
+from conftest import (  # noqa: E402
+    METAL_DEVICE,
+    _lock_granted,
+    _never_load,
+    _pins_ok,
+    _raise,
+    requires_metal,
+)
 
 if METAL_DEVICE is None:
     pytest.skip("the interception tests build a real quantized model on Metal",
@@ -569,31 +576,9 @@ def test_perplexity_refuses_a_short_stream():
 TIMED = pytest.mark.parametrize("mode", ["--ab", "--mde"])
 
 
-def _never_load(*a, **k):
-    raise AssertionError("a model was loaded before the gate refused")
-
-
-def _raise(exc):
-    def _f(*a, **k):
-        raise exc
-    return _f
-
-
-def _pins_ok(monkeypatch):
-    monkeypatch.setattr(serve_sub4bit, "verify_pins",
-                        lambda *a, **k: {"pins": "ok"})
-
-
-def _lock_granted(monkeypatch):
-    monkeypatch.setattr(serve_sub4bit.MeasurementLock, "acquire",
-                        lambda self: (True, "acquired"))
-    monkeypatch.setattr(serve_sub4bit.MeasurementLock, "release",
-                        lambda self: None)
-
-
 @TIMED
 def test_timed_modes_refuse_when_the_machine_lock_is_held(monkeypatch, mode):
-    _pins_ok(monkeypatch)
+    _pins_ok(monkeypatch, serve_sub4bit)
     monkeypatch.setattr(serve_sub4bit.MeasurementLock, "acquire",
                         lambda self: (False, "held by pid 1 (test)"))
     monkeypatch.setattr(serve_sub4bit, "load_model", _never_load)
@@ -614,7 +599,7 @@ def test_smoke_never_takes_the_lock(monkeypatch):
     which walks the call graph because a lock inside a helper is exactly what
     this test cannot see.
     """
-    _pins_ok(monkeypatch)
+    _pins_ok(monkeypatch, serve_sub4bit)
 
     def _boom(self):
         raise AssertionError("smoke must not take the machine lock")
@@ -629,8 +614,8 @@ def test_permanent_preconditions_exit_with_their_own_code(monkeypatch, mode):
     monkeypatch.setattr(serve_sub4bit, "verify_pins",
                         _raise(RuntimeError("hash mismatch")))
     assert serve_sub4bit.main([mode]) == serve_sub4bit.EXIT_PRECONDITION
-    _pins_ok(monkeypatch)
-    _lock_granted(monkeypatch)
+    _pins_ok(monkeypatch, serve_sub4bit)
+    _lock_granted(monkeypatch, serve_sub4bit)
     monkeypatch.setattr(serve_sub4bit, "require_idle",
                         lambda label: {"idle": True})
     monkeypatch.setattr(serve_sub4bit, "require_pinned_zone",
@@ -642,8 +627,8 @@ def test_permanent_preconditions_exit_with_their_own_code(monkeypatch, mode):
 
 @TIMED
 def test_a_busy_machine_is_transient(monkeypatch, mode):
-    _pins_ok(monkeypatch)
-    _lock_granted(monkeypatch)
+    _pins_ok(monkeypatch, serve_sub4bit)
+    _lock_granted(monkeypatch, serve_sub4bit)
     monkeypatch.setattr(serve_sub4bit, "require_idle",
                         _raise(serve_sub4bit.NotIdle("WindowServer at 30%")))
     monkeypatch.setattr(serve_sub4bit, "load_model", _never_load)
@@ -652,8 +637,8 @@ def test_a_busy_machine_is_transient(monkeypatch, mode):
 
 @TIMED
 def test_timed_modes_refuse_when_the_budget_is_crossed(monkeypatch, mode):
-    _pins_ok(monkeypatch)
-    _lock_granted(monkeypatch)
+    _pins_ok(monkeypatch, serve_sub4bit)
+    _lock_granted(monkeypatch, serve_sub4bit)
     monkeypatch.setattr(serve_sub4bit, "require_idle",
                         lambda label: {"idle": True})
     monkeypatch.setattr(serve_sub4bit, "require_pinned_zone", lambda: None)
@@ -669,8 +654,8 @@ def test_timed_modes_refuse_when_the_budget_is_crossed(monkeypatch, mode):
 def test_timed_modes_refuse_a_machine_with_no_room(monkeypatch, mode):
     """The budget bounds THIS process; the memory gate bounds the machine.
     Both must refuse before a model lands, and with different codes."""
-    _pins_ok(monkeypatch)
-    _lock_granted(monkeypatch)
+    _pins_ok(monkeypatch, serve_sub4bit)
+    _lock_granted(monkeypatch, serve_sub4bit)
     monkeypatch.setattr(serve_sub4bit, "require_idle",
                         lambda label: {"idle": True})
     monkeypatch.setattr(serve_sub4bit, "require_pinned_zone", lambda: None)
@@ -873,8 +858,8 @@ def test_the_ppl_mode_refuses_a_corpus_that_is_not_the_registered_one(
     """Section 7 registers the corpus by sha256. ppl() computed the digest,
     printed it and never compared it, so any text at that path would have
     been scored and recorded under the registered hash's authority."""
-    _pins_ok(monkeypatch)
-    _lock_granted(monkeypatch)
+    _pins_ok(monkeypatch, serve_sub4bit)
+    _lock_granted(monkeypatch, serve_sub4bit)
     monkeypatch.setattr(serve_sub4bit, "load_model", _never_load)
     wrong = tmp_path / "ppl.txt"
     wrong.write_text("not the wikitext-2 test split")
