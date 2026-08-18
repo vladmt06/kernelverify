@@ -39,7 +39,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mlx.core as mx  # noqa: E402
 import mlx.nn as nn  # noqa: E402
 
-from machine_state import MeasurementLock, spread_pct  # noqa: E402
+from machine_state import (  # noqa: E402
+    MeasurementLock,
+    dispersion_verdict,
+    spread_pct,
+)
 from memory_guard import (  # noqa: E402
     EXIT_BUDGET_REFUSAL,
     EXIT_LOCK_HELD,
@@ -63,6 +67,7 @@ from serve_sub4bit import (  # noqa: E402
     load_model,
     make_prompts,
     provenance,
+    check_idle_after,
     require_idle,
     verify_pins,
 )
@@ -74,6 +79,7 @@ ROUNDS = 5
 PROMPT_T = 64
 DRAFT_K = 6                 # the paper's optimum; verification is K + 1 tokens
 VERIFY_M = DRAFT_K + 1
+PROBE_PASSES = 2            # verify_step's compile warm-up, plus one timed step
 
 
 class _SeqRoutedLinear:
@@ -225,15 +231,23 @@ def main(argv=None) -> int:
         model, tok = load_model(MODEL_3BIT)
         prompt = make_prompts(tok, PROMPT_T, 1)
 
+        # The premise probe. verify_step runs a compile warm-up pass and then
+        # `steps` timed ones, so a probe at steps=1 presents the verification
+        # shape TWICE; the expected routed count is per pass times the passes,
+        # and calling it "one pass" is what an earlier draft of the record got
+        # wrong.
         patch = SeqPatch(model)
         routed_calls_probe = patch.calls
-        s_time = verify_step(model, prompt, 1)       # one pass to count routing
+        verify_step(model, prompt, 1)
         routed = patch.calls - routed_calls_probe
         fallbacks = dict(patch.fallbacks)
         patch.uninstall()
+        routed_per_pass = routed // PROBE_PASSES
         print(json.dumps({"verify_m": VERIFY_M, "wrapped": patch.n_wrapped,
-                          "routed_calls_one_pass": routed,
-                          "fallbacks_one_pass": fallbacks}))
+                          "probe_passes": PROBE_PASSES,
+                          "routed_calls_probe": routed,
+                          "routed_calls_per_pass": routed_per_pass,
+                          "fallbacks_probe": fallbacks}))
         if routed == 0:
             print("STOP: the verification shape routed nothing even with the "
                   "eligibility rule relaxed; the spike's premise is wrong and "
@@ -253,6 +267,17 @@ def main(argv=None) -> int:
             p = SeqPatch(model)
             spec_ms.append(verify_step(model, prompt, args.steps) * 1e3
                            / args.steps)
+            # A round that silently went part-stock would still produce a
+            # number, and the median would absorb it. The count is exact and
+            # cheap, so check it rather than trust it: one warm pass plus
+            # `steps` timed ones, every wrapped site routing in each.
+            want = routed_per_pass * (args.steps + PROBE_PASSES - 1)
+            if p.calls != want:
+                print(f"STOP: round {i + 1} routed {p.calls} calls, expected "
+                      f"{want}; the spec arm was not fully routed and no "
+                      f"timing from it is readable. Fallbacks: {p.fallbacks}")
+                p.uninstall()
+                return 1
             p.uninstall()
 
             stock_ms.append(verify_step(model, prompt, args.steps) * 1e3
@@ -262,6 +287,20 @@ def main(argv=None) -> int:
         sp_spec, sp_stock = spread_pct(spec_ms), spread_pct(stock_ms)
         ratio = m_stock / m_spec
         gain_pct = (ratio - 1.0) * 100.0
+        # The relative rule below only compares the gain to the arms' own
+        # spread, so it would call a 20% gain readable between two arms that
+        # each disperse 12%. machine_state's absolute gate is what the rest of
+        # the repo uses for exactly that case: a median over samples that
+        # disagree by more than MAX_SPREAD_PCT means nothing, however large the
+        # gap between the two medians happens to be.
+        for label, sp in (("spec", sp_spec), ("stock", sp_stock)):
+            d = dispersion_verdict(sp)
+            if d["over_spread_limit"]:
+                print(f"STOP: the {label} arm's samples disperse {sp:.3f}%, "
+                      f"over the {d['max_spread_pct']}% limit; its median is "
+                      f"not a readable quantity and no verdict follows from it")
+                return 1
+
         floor = max(sp_spec, sp_stock)
         if abs(gain_pct) <= floor:
             verdict = "INCONCLUSIVE"
@@ -271,6 +310,10 @@ def main(argv=None) -> int:
             verdict = "NO-GO"
         print(json.dumps({
             "verify_m": VERIFY_M, "rounds": ROUNDS,
+            # --steps is settable and each step adds VERIFY_M cache
+            # positions, so two runs at different values measure
+            # different workloads; the value belongs in the record.
+            "steps": args.steps,
             "spec_ms_median": round(m_spec, 4),
             "stock_ms_median": round(m_stock, 4),
             "spec_spread_pct": round(sp_spec, 3),
@@ -280,7 +323,10 @@ def main(argv=None) -> int:
             "noise_floor_pct": round(floor, 3),
             "verdict": verdict,
         }))
-        return 0
+        # Clean before AND after, which is what the findings doc registers and
+        # what marked the A/B's run 2 non-binding when its closing sample
+        # caught WindowServer at 15% CPU.
+        return check_idle_after(0)
     except NotIdle as e:
         print(f"REFUSAL (exit {EXIT_NOT_IDLE}): {e}")
         return EXIT_NOT_IDLE

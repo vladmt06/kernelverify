@@ -1323,8 +1323,14 @@ def _cell_loop_order(func_name: str) -> tuple[int, int]:
             if isinstance(call.func, ast.Name) and call.func.id == "guard" \
                     and guard_at is None:
                 guard_at = i
+            # The RECEIVER is pinned, not just the method name: `mx` is what
+            # holds the buffers phys_footprint counts, and a check that
+            # accepted any `.clear_cache()` would stay green against a no-op
+            # object - a test that cannot fail from a production change.
             if isinstance(call.func, ast.Attribute) \
-                    and call.func.attr == "clear_cache" and clear_at is None:
+                    and call.func.attr == "clear_cache" \
+                    and isinstance(call.func.value, ast.Name) \
+                    and call.func.value.id == "mx" and clear_at is None:
                 clear_at = i
         if guard_at is not None:
             return clear_at, guard_at
@@ -1363,8 +1369,8 @@ def test_the_registered_budget_default_is_the_one_the_ab_was_priced_at():
 def test_clearing_the_cache_returns_what_the_footprint_counts():
     """The premise the fix rests on, measured rather than assumed: freed MLX
     buffers stay in the cache and phys_footprint counts them until cleared."""
-    mx = pytest.importorskip("mlx.core")
-    mx.clear_cache()
+    import mlx.core as mx      # not importorskip: this module imports
+    mx.clear_cache()             # calibrate_quant_serving, and so mlx, at line 25
     for _ in range(3):                       # a few cells' worth of churn
         big = mx.zeros((2048, 2048), dtype=mx.float32)
         mx.eval(big)
@@ -1434,3 +1440,74 @@ def test_nothing_reachable_from_smoke_can_take_the_machine_lock():
         "one mode that must run while a measurement holds the machine")
     assert "acquire" not in used, (
         "something reachable from smoke() calls acquire(); see above")
+
+
+SPIKE_SRC = (BENCH_DIR / "spike_spec_verify.py").read_text()
+
+
+def test_the_spike_closes_its_quiet_window_as_well_as_opening_it():
+    """A timing mode's window must be clean before AND after.
+
+    The spike shipped with `require_idle` at the start and nothing at the end,
+    so contention arriving after the first sample could not invalidate a GO.
+    That is not hypothetical here: the A/B's run 2 completed all eight cells
+    and was marked NON-BINDING by exactly this closing sample, which caught
+    WindowServer at 15% CPU.
+
+    Checked on the success path specifically, because the refusal paths return
+    their own numbered exits and must NOT be wrapped - a refusal is already a
+    verdict about the machine.
+    """
+    tree = ast.parse(SPIKE_SRC)
+    main = next(n for n in ast.walk(tree)
+                if isinstance(n, ast.FunctionDef) and n.name == "main")
+    # The try that owns the timed section is the one with the finally that
+    # releases the machine lock, NOT main()'s first try, which only wraps the
+    # pin check and returns EXIT_PRECONDITION.
+    tries = [n for n in ast.walk(main)
+             if isinstance(n, ast.Try) and n.finalbody]
+    assert len(tries) == 1, (
+        "expected exactly one try/finally in main(); the one holding the "
+        "machine lock is what owns the timed section")
+    last = tries[0].body[-1]
+    assert isinstance(last, ast.Return), (
+        "the timed section no longer ends in a return; find where the success "
+        "path leaves and check that it still closes the window")
+    call = last.value
+    assert isinstance(call, ast.Call) and isinstance(call.func, ast.Name) \
+        and call.func.id == "check_idle_after", (
+            "the spike's success path returns without a closing idle sample, "
+            "so a run that went non-idle mid-way still exits 0")
+
+
+def test_the_spike_refuses_a_median_over_samples_that_disagree():
+    """The relative rule alone would read a dispersed run.
+
+    A gain is called readable when it exceeds both arms' spread, which is a
+    RATIO test: two arms dispersed 12% each with a 20% gap between their
+    medians satisfy it, while machine_state's absolute gate rejects any spread
+    over MAX_SPREAD_PCT because such a median is not a quantity. Both arms are
+    gated, and before the verdict is computed rather than after.
+    """
+    tree = ast.parse(SPIKE_SRC)
+    main = next(n for n in ast.walk(tree)
+                if isinstance(n, ast.FunctionDef) and n.name == "main")
+    # Ordered by source line, not by ast.walk's index: walk is breadth-first,
+    # so its enumeration says nothing about which statement runs first.
+    gated, verdicts = [], []
+    for node in ast.walk(main):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id == "dispersion_verdict":
+            gated.append(node.lineno)
+        if isinstance(node, ast.Assign) \
+                and any(isinstance(t, ast.Name) and t.id == "verdict"
+                        for t in node.targets):
+            verdicts.append(node.lineno)
+    gated_at = min(gated) if gated else None
+    verdict_at = min(verdicts) if verdicts else None
+    assert gated_at is not None, (
+        "main() no longer consults machine_state.dispersion_verdict, so a run "
+        "whose samples disagree can still publish a verdict")
+    assert verdict_at is not None and gated_at < verdict_at, (
+        "the dispersion gate runs after the verdict is chosen, so a verdict "
+        "exists for samples the gate would have refused")

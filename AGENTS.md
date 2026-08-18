@@ -77,7 +77,13 @@ Vlad's global instructions still apply; this file adds the project's layout, how
 - `bench/emit_pack_certificates.py` - one certificate per specialization: it runs the pack gates' `verify()`, captures the generated translation unit in a fresh process, behaviourally validates it against the live MLX arm, and hashes what it certified.
   It writes into `bench/.certificates/` beside a `MANIFEST.md`, and makes no performance claim.
 - `bench/serve_sub4bit.py` - the four-arm end-to-end serving A/B on 3-bit weights (ours-routed, stock 3-bit, stock 4-bit, and a forced-stock control that evaluates eligibility and discards it), pre-registered in `docs/research/2026-08-15-sub4bit-serve-findings.md`.
-  Built and never run: sections 9 and 10 of that document are still empty placeholders.
+  Run on 2026-08-17 through the detached runner: sections 9 and 10 of that document carry the binding grid and its verdicts, and section 9 also carries the 2026-08-18 re-run that confirmed the `mx.clear_cache()` fix left every in-zone ratio inside a pre-registered band.
+  Its timed modes clear the buffer cache at each cell boundary BEFORE the budget guard reads the footprint, because MLX keeps freed buffers and phys_footprint counts them; `tests/test_serving_survival.py` pins that order and pins the receiver, not just the method name.
+- `bench/spike_spec_verify.py` - the K = 6 meeting-point spike, pre-registered in `docs/research/2026-08-18-spec-verify-meeting-point-spike.md`.
+  It asks one narrow question: a speculative decoder's verification pass presents K+1 tokens of ONE stream, shape (1, 7, d_in), which `serve_sub4bit`'s gate refuses before it computes M, so does the step get faster if the gate lets it through?
+  It installs its OWN interception rather than serve_sub4bit's, because a spike must not be able to move a published number by editing the harness that produced it.
+  There is no kernel-level question in it and the module says so: `_fused` flattens with `x.reshape(-1, d_in)`, so the sequence and batch spellings are the same kernel call on the same rows.
+  Answered GO on 2026-08-18 at 16.44% faster (a throughput ratio, not a cost reduction; the cost falls 14.12%) against a 0.327% noise floor.
 - `bench/price_qmv_boundary.py` - the routing-boundary pricing probe (verify-then-time, interleaved arms, refusal-gated), with its pre-registered rule in the module docstring: what makes a cell WIN, and the only way a routed window may widen.
   ADR 0015 is the reading of its 2026-08-15 run.
 - `bench/calibrate_k.py` - measures what the admissible-implementation contract demands of K, and how many ensemble members it takes to represent that contract.
@@ -93,7 +99,7 @@ Vlad's global instructions still apply; this file adds the project's layout, how
 - `bench/measure_baselines.py` - the one command that measures the machine's baselines across both stacks and appends them to `bench/.baselines/<date>.jsonl`.
   It alternates the arms within each workload cell (one sampling group per cell, schema v3), refuses to call a number binding on a busy or unplugged machine, and refuses sub-millisecond samples as absolute claims.
 - `bench/machine_state.py` - the idle gate, the timing floor, and the one machine-wide measurement lock (`MeasurementLock`, an `fcntl.flock` on a fixed path), with the reason each exists.
-  Four harnesses take it today: `calibrate_quant_serving.py`, `price_qmv_boundary.py`, `derive_repaired_member_column.py` and `derive_prerepair_device_records.py`.
+  Five harnesses take it today: `calibrate_quant_serving.py`, `price_qmv_boundary.py`, `derive_repaired_member_column.py`, `derive_prerepair_device_records.py` and `spike_spec_verify.py`.
   `serve_sub4bit.py`, `calibrate_quant_device.py`, `measure_baselines.py`, `spike_mlx_e2e.py` and `emit_pack_certificates.py` do NOT, which is the gap tasks I1 and I2 of the 2026-08-16 plan close; until they land, running two of those together is on the operator.
 - `bench/interleave.py` - the shared interleaved-timing engine every GPU A/B in bench/ runs on: dispatch-size calibration to `MIN_SAMPLE_MS`, the timed dispatch itself, the shared per-round sampler `interleaved_samples` with its guard seam, the canary spread limit a pack gate withholds a certificate above, and the arms-agree smoke check.
   One copy of the discipline, so a timing rule amended in one gate cannot silently stay old in another.
@@ -140,10 +146,10 @@ cd /Users/vlad/kernelverify
 - The environment needs `torch`, which only `gelu[variant=erf]` uses; a worktree venv created without it fails part-way through a verdict build.
 - It also needs `mlx==0.32.0` and `mlx-lm==0.31.3`, pinned across worktrees so binding comparisons stay on one toolchain.
   Without mlx, the mlx-dependent test modules are skipped whole or fail to collect, so the suite under-reports badly.
-  Skipped modules hide their contents rather than their count, so quote test counts from a fully equipped venv only; `.venv/bin/python -m pytest -q` reported 916 passed in 104 s warm on 2026-08-17.
+  Skipped modules hide their contents rather than their count, so quote test counts from a fully equipped venv only; `.venv/bin/python -m pytest -q` reported 924 passed in 98 s warm on 2026-08-18.
   Two markers exist, registered in `pyproject.toml`, and they answer different questions - one is about time, the other about the machine.
   `slow` is on the four tests in `tests/test_quant_contract_members.py` that recompute serving-grid blocks from committed evidence; measured 2026-08-17 they are 62.8 s, 11.3 s, 4.7 s and 4.5 s of a 104 s suite, so they are 80% of its wall clock and every other test in the repository is under 2 s.
-  `gpu` is on the 153 tests that actually dispatch to the Metal device, which is not the same as the tests that import mlx: `tests/test_serving_survival.py` imports it and 4 of its 66 tests dispatch.
+  `gpu` is on the 155 tests that actually dispatch to the Metal device, which is not the same as the tests that import mlx: `tests/test_serving_survival.py` imports it and 5 of its 73 tests dispatch.
   That set is the union of two instruments, and it needs both.
   Counting MLX allocation (`mx.get_peak_memory` around each test) catches every mlx evaluation however it was triggered, which hooking `mx.eval`/`mx.synchronize` does not: `float()`, `np.array()` and `.item()` force evaluation inside the C++ layer and call neither, so a route-hooking pass undercounted by 7 while each of those tests dispatched up to 942 KB.
   Counting the PyObjC door (`MetalDevice.compile`/`pooled_buffer`, `CompiledKernel.run`, `metal.spawn_isolated`) catches what MLX's counter is blind to, because Metal's own allocator is a different one.
@@ -158,8 +164,8 @@ cd /Users/vlad/kernelverify
   One class of defect this machine cannot detect at all: a test that imports a module reaching `mlx.nn` aborts the interpreter where no device can be created, which takes down the whole collection rather than failing one test, and here that import simply succeeds.
   `bench/serve_sub4bit.py` and `bench/spike_mlx_e2e.py` both reach it at module scope, so any test importing either is gated on `requires_metal` for that reason and not because it needs a GPU.
   Run the suite once on a machine with no Metal device after touching this, because that is the only place the gating is visible.
-  The times, all from 2026-08-17: full suite 104 s / 916 tests; `-m "not gpu"` 91 s / 763 tests; `-m "not slow and not gpu"` 8 s / 759 tests.
-  `-m "not slow"` alone is deliberately not quoted, because it is not a useful subset: it still collects 912 of the 916 tests and every one of the 153 gpu tests.
+  The times, all from 2026-08-18: full suite 98 s / 924 tests; `-m "not gpu"` 80 s / 769 tests; `-m "not slow and not gpu"` 6 s / 765 tests.
+  `-m "not slow"` alone is deliberately not quoted, because it is not a useful subset: it still collects 920 of the 924 tests and every one of the 155 gpu tests.
   Read those numbers before choosing: `not gpu` is the SAFE subset to run while a measurement holds the machine, and it is barely faster than the full suite because the slow tests are CPU-only; `not slow and not gpu` is the edit loop.
   Gate a new Metal test with `conftest.requires_metal`, never a local `pytest.mark.skipif`: that decorator carries the `gpu` marker too, so a local copy skips correctly on a machine without a device and still collides with a measurement on one that has it.
   Gate a Metal MODULE on `conftest.METAL_DEVICE`, never on `mx.metal.is_available()`, which reports whether the framework loaded rather than whether a device can be made, and answers True inside a sandbox where the probe answers None.

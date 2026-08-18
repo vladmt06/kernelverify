@@ -243,3 +243,29 @@ def test_a_typoed_flag_or_missing_harness_never_arms(tmp_path):
     assert "no such harness" in missing.stderr
     assert "<plist" not in missing.stdout, (
         "printing a plist for a nonexistent harness is as wrong as arming it")
+
+
+@requires_metal
+def test_spec_verify_spike_refuses_a_held_lock_before_loading(monkeypatch):
+    """The same contract as the mlx_e2e spike above, on the second spike.
+
+    Gated on Metal for the import, not for the locking: `spike_spec_verify`
+    reaches mlx.nn through serve_sub4bit at module scope, and that import
+    ABORTS the interpreter where no device can be created, taking the whole
+    collection down rather than failing one test.
+    """
+    import spike_spec_verify as spike
+
+    monkeypatch.setattr(
+        spike.MeasurementLock, "acquire",
+        lambda self: (False, "held by pid 1 (test)"))
+    monkeypatch.setattr(
+        spike, "load_model",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("the model loaded before the lock refused")))
+    monkeypatch.setattr(
+        spike, "require_idle",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("the idle path ran before the lock refused")))
+
+    assert spike.main([]) == EXIT_LOCK_HELD
