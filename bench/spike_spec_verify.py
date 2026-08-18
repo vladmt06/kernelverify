@@ -47,10 +47,8 @@ from memory_guard import (  # noqa: E402
     EXIT_NOT_IDLE,
     EXIT_PRECONDITION,
     BudgetExceeded,
-    BudgetGuard,
     LowMemoryRefusal,
     budget_gb_arg,
-    require_available_memory,
 )
 from kernelverify.pack.wide_qmv import launch_config, should_dispatch  # noqa: E402
 from serve_sub4bit import (  # noqa: E402
@@ -61,6 +59,7 @@ from serve_sub4bit import (  # noqa: E402
     SUPPORTED_BITS,
     NotIdle,
     PreconditionFailed,
+    ServeGuard,
     load_model,
     make_prompts,
     provenance,
@@ -215,7 +214,11 @@ def main(argv=None) -> int:
         return EXIT_LOCK_HELD
     try:
         require_idle("spike-start")
-        guard = BudgetGuard(args.budget_gb)
+        # ServeGuard, not BudgetGuard: it is the callable that takes the
+        # footprint budget AND the machine memory gate in the order
+        # price_qmv_boundary fixed, and restating half of it here is the
+        # two-halves mistake AGENTS.md names.
+        guard = ServeGuard(args.budget_gb)
         guard("spike-start")
         print(json.dumps(provenance(manifest)))
 
@@ -246,7 +249,6 @@ def main(argv=None) -> int:
         spec_ms, stock_ms = [], []
         for i in range(ROUNDS):
             guard(f"round {i + 1}/{ROUNDS}")
-            require_available_memory(2.0, f"round {i + 1}")
 
             p = SeqPatch(model)
             spec_ms.append(verify_step(model, prompt, args.steps) * 1e3
