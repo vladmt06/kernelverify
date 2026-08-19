@@ -21,8 +21,10 @@ The order below is the whole safety argument, and it is deliberate:
 3. Refuse the modes this package does not cover, in one line each.
 4. Decide routing and PRINT it, before training, so what is about to happen
    to the step is known in advance rather than reported afterwards.
-5. Run mlx-lm's trainer.
-6. Write the receipt.
+5. Install the seams, refusing if any of them is not what it should be.
+6. Run mlx-lm's trainer, and remove the seams afterwards whatever happened.
+7. Write the receipt, including what the trainer reported about itself and
+   how many times each seam was actually reached.
 
 Today step 4 always decides to route nothing, because no training kernel has
 been kept yet. The run is then stock mlx-lm with a stack check and a
@@ -35,11 +37,16 @@ import os
 import sys
 import types
 
-from metalrunner import receipt, routing
+from metalrunner import progress, receipt, routing, seams
 from metalrunner.versions import UnverifiedStack, require_verified_stack
 
 EXIT_UNVERIFIED_STACK = 3
 EXIT_UNSUPPORTED_MODE = 4
+EXIT_SEAM_REFUSED = 5
+
+# The one name metalrunner replaces today. `run()` looks it up on its own
+# module at call time, so replacing it here reaches the call run() makes.
+TRAIN_MODEL = seams.Seam("mlx_lm.lora", "train_model")
 
 UNSUPPORTED_MODES = {
     "dora": "metalrunner covers LoRA only; run mlx_lm.lora for DoRA.",
@@ -80,6 +87,32 @@ def unsupported_mode(args) -> str | None:
     return UNSUPPORTED_MODES.get(getattr(args, "fine_tune_type", "lora"))
 
 
+def _recording(recorder):
+    """Hand mlx-lm's trainer a callback that keeps what it reports.
+
+    This is done one level down rather than by passing the callback to
+    `run()`, which takes a `training_callback` argument and then overwrites
+    it on its own next line with whatever `get_reporting_callbacks` builds
+    from `--report-to`. That parameter is dead in mlx-lm 0.31.3, so using it
+    would look correct and record nothing. `train_model` is where the
+    callback actually arrives, so that is where it is injected, in front of
+    whatever `run()` decided on so that a user who asked for wandb keeps it.
+
+    The signature is spelled out rather than forwarded blind because the
+    file it mirrors is pinned by hash: if upstream changes these arguments,
+    the stack check refuses the run before this is ever reached.
+    """
+
+    def wrap(original):
+        def train_model(args, model, train_set, valid_set,
+                        training_callback=None):
+            return original(args, model, train_set, valid_set,
+                            recorder.chained(training_callback))
+        return train_model
+
+    return wrap
+
+
 def main(argv=None) -> int:
     os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
@@ -107,13 +140,31 @@ def main(argv=None) -> int:
     started = receipt.utc_now()
     from mlx_lm.lora import run
 
-    run(args)
+    recorder = progress.LossRecorder()
+    installation = seams.Installation()
+    try:
+        installation.install(TRAIN_MODEL, _recording(recorder))
+    except seams.SeamRefusal as refusal:
+        # The disk hashes passed and the running process still disagrees with
+        # them, so this is the same condition the stack check exists to catch,
+        # found a moment later. Refusing here rather than training anyway
+        # keeps the rule that metalrunner never runs through a stack it has
+        # not verified.
+        print(refusal, file=sys.stderr)
+        return EXIT_SEAM_REFUSED
 
-    print(_finish(args, stack, decisions, chip, started))
+    try:
+        run(args)
+    finally:
+        installation.remove()
+
+    print(_finish(args, stack, decisions, chip, started, recorder,
+                  installation))
     return 0
 
 
-def _finish(args, stack, decisions, chip, started) -> str:
+def _finish(args, stack, decisions, chip, started, recorder,
+            installation) -> str:
     import mlx.core as mx
 
     try:
@@ -125,7 +176,11 @@ def _finish(args, stack, decisions, chip, started) -> str:
                                                            None),
                            peak_bytes=peak, started=started,
                            finished=receipt.utc_now(),
-                           forced_to_stock=routing.forced_to_stock())
+                           forced_to_stock=routing.forced_to_stock(),
+                           progress=recorder.summary(),
+                           seams={"calls": installation.counts,
+                                  "foreign_on_removal":
+                                      installation.foreign_on_removal})
     written = receipt.write(record, getattr(args, "adapter_path", None))
     if written is None:
         return "metalrunner: no adapter path, so no receipt was written."

@@ -22,6 +22,7 @@ import pytest
 
 from metalrunner import receipt, routing
 from metalrunner.lora import (
+    EXIT_SEAM_REFUSED,
     EXIT_UNSUPPORTED_MODE,
     EXIT_UNVERIFIED_STACK,
     main,
@@ -300,3 +301,132 @@ def test_an_ordinary_receipt_is_not_marked_as_a_control(tmp_path):
         chip="c", adapter_path=str(tmp_path), peak_bytes=1,
         started="a", finished="b")
     assert record["forced_to_stock"] is False
+
+
+# ---------------------------------------------------------------------------
+# The seam: what metalrunner replaces inside mlx-lm, and what it records
+#
+# `run()` takes a `training_callback` argument and overwrites it on its own
+# next line with whatever `--report-to` built, so that parameter is dead in
+# mlx-lm 0.31.3. The callback is injected at `train_model` instead, which is
+# where it actually arrives. These tests drive main() with a stubbed trainer
+# so the wiring is exercised without loading a model.
+# ---------------------------------------------------------------------------
+@pytest.fixture()
+def stub_trainer(monkeypatch):
+    """mlx-lm's `train_model` and `run`, reduced to the shape main() needs.
+
+    The stub declares itself as defined in mlx_lm.lora because that is what
+    it stands in for, and the installer refuses a name holding a foreign
+    object. `run` looks the trainer up on the module at call time, exactly as
+    the real one does, which is the property that makes the name a seam.
+    """
+    import mlx_lm.lora
+
+    seen = {}
+
+    def train_model(args, model, train_set, valid_set,
+                    training_callback=None):
+        seen["callback"] = training_callback
+        training_callback.on_train_loss_report(
+            {"iteration": 1, "train_loss": 2.5, "trained_tokens": 128})
+
+    train_model.__module__ = "mlx_lm.lora"
+    monkeypatch.setattr(mlx_lm.lora, "train_model", train_model)
+
+    def run(args, training_callback=None):
+        import mlx_lm.lora as module
+
+        module.train_model(args, None, None, None, None)
+
+    monkeypatch.setattr(mlx_lm.lora, "run", run)
+    return seen
+
+
+def _train(tmp_path, extra=()):
+    return main(["--model", "some/model", "--train",
+                 "--adapter-path", str(tmp_path)] + list(extra))
+
+
+def test_the_receipt_carries_what_the_trainer_reported(stub_trainer, tmp_path):
+    """The loss curve reaches the receipt through mlx-lm's own callback, so
+    a run's own numbers survive without anyone parsing its printed output."""
+    assert _train(tmp_path) == 0
+
+    record = json.loads((tmp_path / "metalrunner-receipt.json").read_text())
+    assert record["progress"]["train_reports"] == 1
+    assert record["progress"]["last_train_loss"] == 2.5
+    # Supervised tokens, the quantity the end-to-end fairness rule compares.
+    assert record["progress"]["trained_tokens"] == 128
+
+
+def test_the_receipt_says_how_often_the_seam_was_reached(stub_trainer,
+                                                         tmp_path):
+    """An installed seam that was never called and one that carried the
+    whole run look identical without this count."""
+    assert _train(tmp_path) == 0
+
+    record = json.loads((tmp_path / "metalrunner-receipt.json").read_text())
+    assert record["seams"]["calls"] == {"mlx_lm.lora.train_model": 1}
+    assert record["seams"]["foreign_on_removal"] == []
+
+
+def test_the_recorded_loss_is_never_called_attested(stub_trainer, tmp_path):
+    """Recording a number is not checking it, and the receipt has to say so
+    or it converts an absent check into an apparent one."""
+    assert _train(tmp_path) == 0
+
+    record = json.loads((tmp_path / "metalrunner-receipt.json").read_text())
+    assert any("loss values" in line for line in record["not_attested"])
+    assert "Not recomputed" in record["progress"]["_meaning"]
+
+
+def test_the_seam_is_gone_once_the_run_is_over(stub_trainer, tmp_path):
+    """metalrunner must not outlive its own run inside the interpreter."""
+    import mlx_lm.lora
+
+    before = mlx_lm.lora.train_model
+    assert _train(tmp_path) == 0
+    assert mlx_lm.lora.train_model is before
+
+
+def test_a_foreign_patch_on_the_seam_refuses_before_training(
+        monkeypatch, never_trains, capsys):
+    """The disk hashes can pass while the running process disagrees with
+    them. That is the same condition the stack check exists to catch, found
+    a moment later, so it gets the same answer: refuse, change nothing."""
+    import mlx_lm.lora
+
+    def someone_elses(*_args, **_kwargs):
+        raise AssertionError("the foreign trainer was reached")
+
+    someone_elses.__module__ = "some_other_package"
+    monkeypatch.setattr(mlx_lm.lora, "train_model", someone_elses)
+
+    assert main(["--model", "some/model", "--train"]) == EXIT_SEAM_REFUSED
+    assert not never_trains
+    assert "already replaced it" in capsys.readouterr().err
+    assert mlx_lm.lora.train_model is someone_elses
+
+
+def test_a_user_who_asked_for_reporting_still_gets_it(stub_trainer, tmp_path):
+    """Recording sits in front of whatever `--report-to` built rather than
+    replacing it, so instrumenting a run costs the user nothing."""
+    import metalrunner.lora as entry
+
+    downstream = []
+
+    class Downstream:
+        def on_train_loss_report(self, info):
+            downstream.append(info)
+
+        def on_val_loss_report(self, info):
+            pass
+
+    recorder = entry.progress.LossRecorder()
+    wrapped = entry._recording(recorder)(lambda *a, **k: None)
+    wrapped(None, None, None, None, Downstream())
+    assert recorder.wrapped is not None
+
+    recorder.on_train_loss_report({"train_loss": 1.0, "trained_tokens": 4})
+    assert len(downstream) == 1

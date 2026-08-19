@@ -14,10 +14,15 @@ their reasons, the arguments the run was given, fingerprints of the base
 model config and the adapter that came out, and the peak memory the process
 reached.
 
+It also carries what the trainer reported about its own progress, which
+reaches this package through mlx-lm's own callback rather than through its
+printed output, and a count of how many times each replaced name was
+actually called.
+
 What it does NOT attest, and says so in its own text: per-step numerical
-containment, which would need shadow computation the run did not do; and
-the loss curve, which lives in mlx-lm's own reporting callbacks and is not
-reachable from outside its trainer without instrumenting it.
+containment, which would need shadow computation the run did not do; the
+loss values, which are recorded exactly as the trainer reported them and
+are not recomputed here; and anything at all about speed.
 """
 
 from __future__ import annotations
@@ -30,8 +35,8 @@ from pathlib import Path
 
 NOT_ATTESTED = (
     "per-step numerical containment: no shadow computation was run",
-    "the loss curve: mlx-lm's trainer owns its reporting and this run did "
-    "not instrument it",
+    "the loss values: they are mlx-lm's own reported numbers, recorded "
+    "verbatim, and nothing here recomputed or checked them",
     "throughput or speed: this receipt records what ran, never how fast",
 )
 
@@ -79,7 +84,8 @@ def read_quantization(model: str) -> tuple[int | None, int | None]:
 
 def build(*, args, stack, decisions, chip: str, adapter_path: str | None,
           peak_bytes: int | None, started: str, finished: str,
-          forced_to_stock: bool = False) -> dict:
+          forced_to_stock: bool = False, progress: dict | None = None,
+          seams: dict | None = None) -> dict:
     """The record itself, as a plain dictionary."""
     adapters = Path(adapter_path) if adapter_path else None
     adapter_file = adapters / "adapters.safetensors" if adapters else None
@@ -111,6 +117,12 @@ def build(*, args, stack, decisions, chip: str, adapter_path: str | None,
         # run measures the wrapper, not a kernel, and quoting it as a real
         # run would be quoting the wrong thing.
         "forced_to_stock": forced_to_stock,
+        # What the trainer said about itself, and how often each replaced
+        # name was reached. A routing report claiming an operation was
+        # replaced and a run in which it never happened are the same
+        # document without this count.
+        "progress": progress,
+        "seams": seams,
         "adapter": {
             "path": str(adapters) if adapters else None,
             "sha256": _digest_file(adapter_file) if adapter_file else None,

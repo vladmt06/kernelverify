@@ -76,3 +76,21 @@ def test_a_real_two_iteration_fine_tune_runs_and_accounts_for_itself(dataset,
     # Nothing was routed, so the record must say so rather than being empty.
     assert receipt["routing"] and not any(r["routed"] for r in receipt["routing"])
     assert all(r["reason"] for r in receipt["routing"])
+
+    # The trainer's own progress reached the receipt. Reporting every step of
+    # two gives two reports; the token count is the supervised total, which is
+    # the quantity the end-to-end fairness rule compares between arms.
+    assert receipt["progress"]["train_reports"] == 2
+    assert receipt["progress"]["trained_tokens"] > 0
+    assert isinstance(receipt["progress"]["last_train_loss"], float)
+    assert receipt["progress"]["last_val_loss"] is not None
+
+    # The seam was installed, reached exactly once, and nothing else had
+    # touched it by the time it came out.
+    assert receipt["seams"]["calls"] == {"mlx_lm.lora.train_model": 1}
+    assert receipt["seams"]["foreign_on_removal"] == []
+
+    # And the process is clean: metalrunner does not outlive its own run.
+    import mlx_lm.lora
+
+    assert mlx_lm.lora.train_model.__module__ == "mlx_lm.lora"
