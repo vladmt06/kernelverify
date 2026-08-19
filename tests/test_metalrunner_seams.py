@@ -270,3 +270,91 @@ def test_no_downstream_callback_is_not_an_error():
     recorder = progress.LossRecorder().chained(None)
     recorder.on_train_loss_report({"train_loss": 1.0, "trained_tokens": 5})
     assert recorder.summary()["train_reports"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Re-exports: bound in one module, defined in another
+#
+# mlx-lm binds `train` and `get_reporting_callbacks` into mlx_lm.lora but
+# defines them under mlx_lm.tuner. A seam on either is a legitimate re-export,
+# and a check that demanded the binding and defining modules agree would refuse
+# exactly the names a measurement needs to reach.
+# ---------------------------------------------------------------------------
+def test_a_declared_re_export_installs(monkeypatch):
+    home = types.ModuleType("metalrunner_seam_home")
+    away = types.ModuleType("metalrunner_seam_away")
+
+    def borrowed():
+        return "stock"
+
+    borrowed.__module__ = away.__name__
+    away.borrowed = borrowed
+    home.borrowed = borrowed
+    for module in (home, away):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+
+    seam = seams.Seam(home.__name__, "borrowed", defined_in=away.__name__)
+    installation = seams.Installation()
+    installation.install(seam, lambda _o: lambda: "ours")
+    assert home.borrowed() == "ours"
+    installation.remove()
+    assert home.borrowed is borrowed
+
+
+def test_an_undeclared_re_export_still_refuses(monkeypatch):
+    """Silence about the re-export is not permission for one: a seam that did
+    not say where its object comes from is refused, so the surprise surfaces
+    at the seam rather than being absorbed."""
+    home = types.ModuleType("metalrunner_seam_home2")
+    away = types.ModuleType("metalrunner_seam_away2")
+
+    def borrowed():
+        return "stock"
+
+    borrowed.__module__ = away.__name__
+    home.borrowed = borrowed
+    for module in (home, away):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+
+    installation = seams.Installation()
+    with pytest.raises(seams.SeamRefusal, match="already replaced it"):
+        installation.install(seams.Seam(home.__name__, "borrowed"),
+                             lambda _o: lambda: "ours")
+
+
+def test_a_foreign_object_at_a_declared_re_export_refuses(monkeypatch):
+    """Declaring the origin narrows the check, it does not remove it."""
+    home = types.ModuleType("metalrunner_seam_home3")
+    away = types.ModuleType("metalrunner_seam_away3")
+
+    def interloper():
+        return "theirs"
+
+    interloper.__module__ = "some_other_package"
+    home.borrowed = interloper
+    for module in (home, away):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+
+    installation = seams.Installation()
+    with pytest.raises(seams.SeamRefusal, match="already replaced it"):
+        installation.install(
+            seams.Seam(home.__name__, "borrowed", defined_in=away.__name__),
+            lambda _o: lambda: "ours")
+
+
+def test_the_real_mlx_lm_re_exports_are_reachable():
+    """The acceptance case, against the live install rather than a fake: the
+    two names an end-to-end measurement reaches are both re-exports, and both
+    must be installable."""
+    import mlx_lm.lora
+
+    for attribute, origin in (("train", "mlx_lm.tuner.trainer"),
+                              ("get_reporting_callbacks",
+                               "mlx_lm.tuner.callbacks")):
+        assert getattr(mlx_lm.lora, attribute).__module__ == origin
+        installation = seams.Installation()
+        installation.install(
+            seams.Seam("mlx_lm.lora", attribute, defined_in=origin),
+            lambda original: original)
+        installation.remove()
+        assert getattr(mlx_lm.lora, attribute).__module__ == origin

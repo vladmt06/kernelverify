@@ -19,6 +19,14 @@ catch is a replacement that copied the original's identity metadata, or an
 edit to the original's own source. The second of those is what the file
 hashes in versions.py are for.
 
+Where the object is defined is not always where it is bound. mlx-lm binds
+`train` and `get_reporting_callbacks` into `mlx_lm.lora` but defines them
+under `mlx_lm.tuner`, so a seam on either is a legitimate re-export rather
+than a foreign patch, and a check that demanded the two agree would refuse
+the very names a measurement needs. So the expected defining module is part
+of the seam, stated by whoever declares it, and it defaults to the module the
+name is bound in because that is the common case.
+
 It counts. Every call through a replaced name is counted, so afterwards the
 run can state how many times each replacement was actually reached. A seam
 that was installed and never called is the failure this exists to make
@@ -50,10 +58,21 @@ class SeamRefusal(RuntimeError):
 
 @dataclass(frozen=True)
 class Seam:
-    """A module-level name, by the module that defines it."""
+    """A module-level name, and where the object bound to it is defined.
+
+    `defined_in` is the module the object's own `__module__` should name. It
+    differs from `module` only for a re-export, and stating it is how a seam
+    declares that it knows it is taking a re-export rather than accidentally
+    accepting a foreign object.
+    """
 
     module: str
     attribute: str
+    defined_in: str | None = None
+
+    @property
+    def origin(self) -> str:
+        return self.defined_in or self.module
 
     def __str__(self) -> str:
         return f"{self.module}.{self.attribute}"
@@ -88,10 +107,10 @@ class Installation:
             ) from None
 
         defined_in = getattr(original, "__module__", None)
-        if defined_in != seam.module:
+        if defined_in != seam.origin:
             raise SeamRefusal(
                 f"{seam} currently holds an object defined in "
-                f"{defined_in!r}, not {seam.module!r}: something else has "
+                f"{defined_in!r}, not {seam.origin!r}: something else has "
                 "already replaced it, and installing on top of it would "
                 "produce behaviour nobody wrote down. Nothing was changed.")
 
