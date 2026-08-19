@@ -558,6 +558,18 @@ def expected_calls(patch: Patch, b: int, steps: int) -> int:
                        if should_dispatch(b, *cell))
 
 
+def routed_sites_at(width: int, site_cells) -> int:
+    """How many wrapped sites the routing table routes at one width."""
+    return sum(1 for site_cell in site_cells
+               if should_dispatch(width, *site_cell))
+
+
+def routed_sites_for(widths, site_cells):
+    observed_widths = {math.prod(shape) for shape in widths}
+    return {width: routed_sites_at(width, site_cells)
+            for width in observed_widths}
+
+
 def routed_shapes(patch: Patch, b: int) -> list[str]:
     """The distinct intercepted shapes the pack routes at this batch size."""
     return sorted({f"{d_out}x{d_in}"

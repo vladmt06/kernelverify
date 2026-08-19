@@ -21,6 +21,25 @@
 - Context: `docs/research/2026-08-18-spec-decode-k4-followup.md` sections 7 and 8; `bench/machine_state.py` `spread_pct`; the per-arm rounds at 0.6B K = 4 were 69.71, 73.44, 73.62, 73.56, 73.62.
 - Depends on / blocked by: nothing, but it must not be done as a way of re-reading the K = 4 cell, which section 8 of that document closes.
 
+## Batched decode is measured on equal-length prompts admitted all at once
+
+- What: measure the engine's ragged path, prompts of different lengths admitted together, which exercises the right-padded prefill and the left-padded decode cache that the equal-length grid never touches.
+- Why: `docs/research/2026-08-18-batch-decode-e2e.md` section 3 gives every stream the same 512-token window so that the width of every decode pass is exactly B, which is what makes the exact routed count and the decider reading possible; a real queue does not do that, and `BatchKVCache.finalize` rolls the cache into a left-padded layout whose masks this run never sees.
+- Pros: it is the nearest question to the one this lane answers, and the engine already implements the whole padding path, so the work is a pre-registration and a harness variant rather than new machinery.
+- Cons: with ragged lengths the decode width is still B but the per-stream cache depths differ, so the per-stream throughput a reader wants is no longer the aggregate divided by B, and the metric needs registering before the run rather than after.
+- Context: `mlx_lm/generate.py` `PromptProcessingBatch.prompt` right-pads and `BatchKVCache.finalize` rolls to left padding; section 7 of the batched pre-registration excludes this explicitly.
+- Depends on / blocked by: the batched grid reading out first, so there is a fixed-width number to compare against.
+
+## The server's default admission decodes a burst above eight streams at width eight
+
+- What: measure the engine as `mlx_lm.server` actually runs it, with requests arriving over time and `prefill_batch_size` at its default of 8, and read what the kernel does when the width is whatever the scheduler happens to produce.
+- Why: found while pre-registering the batched grid and reproduced from the engine's scheduler on 2026-08-18: `BatchGenerator._next` admits at most `prefill_batch_size` prompts per turn, so a burst of more than 8 streams has its first 8 admitted and decoded at width 8 for at least one step before the rest join, and width 8 is inside the routed window.
+  The batched grid registers `prefill_batch_size = 16` precisely so that every decode call has full width B, which means it measures the engine but not the server's own admission.
+- Pros: it is the only remaining question between "the kernel helps at a fixed width" and "the kernel helps a person running a server", and the finding above says the routed window is reached under the default without anyone arranging it.
+- Cons: with arrivals and turnover the width varies within a run, so there is no fixed M, no exact routed-call expectation and no per-cell ceiling; the honesty instruments this repository relies on do not survive the move, and replacements have to be designed rather than reused.
+- Context: `mlx_lm/generate.py` `BatchGenerator._next` and its `prefill_batch_size` default; `mlx_lm/server.py` `--decode-concurrency` 32 and `--prompt-concurrency` 8; section 7 of `docs/research/2026-08-18-batch-decode-e2e.md` excludes it.
+- Depends on / blocked by: nothing technical, but it must not be read as a re-run of the batched grid; it is a different question with different instruments.
+
 ## Speculative decode is measured only under greedy sampling
 
 - What: extend the e2e pre-registration to non-greedy sampling, with its own identity rule.
@@ -111,7 +130,12 @@
 - Why: deferred by ruling D6 of the 2026-08-15 pivot review (design doc vlad-pivot-kernel-design-20260815.md) because the producer's llama.cpp wrapper cannot measure parallel decode honestly today.
 - Pros: completes the serving comparison the product claim lives in; the mlx-only labels on the `batch_decode` cells can then be lifted cell by cell as real A/B groups form.
 - Cons: new parser against an unversioned text format is exactly the kind of code that breaks silently on a llama.cpp bump, which is why it gets its own block rather than riding along in this one.
-- Context: `llama-bench`, the binary the producer wraps via `-o json`, has no parallel-sequence mode at the pinned commit (verified 2026-08-15: its only batch knobs are `-b/--batch-size` and `-ub/--ubatch-size`, which chunk one sequence's prompt, not independent streams); the honest path is `llama-batched-bench`, which does run n_parallel decode streams but emits a text table rather than JSON, so it needs a new sample runner plus a dedicated output parser under the same interleave, idle-gate, and dispersion discipline as every other cell.
+- Context: `llama-bench`, the binary the producer wraps via `-o json`, has no parallel-sequence mode at the pinned commit, and that half of this entry still holds (re-verified 2026-08-18 at commit a94d563: its own argument parser never reaches the generic `-np/--parallel`, and its only batch knobs are `-b/--batch-size` and `-ub/--ubatch-size`, which chunk one sequence's prompt rather than running independent streams).
+  The honest path is still `llama-batched-bench`, which runs `-npl` parallel decode streams, and the binary is already built at `/Users/vlad/llama.cpp/build/bin/`.
+  CORRECTION, 2026-08-18: this entry said that binary "emits a text table rather than JSON, so it needs a new sample runner plus a dedicated output parser".
+  At the pinned commit it accepts `--output-format jsonl` and prints one JSON object per (pp, tg, pl) cell, so the parser is `json.loads` per line and the cost of this item is lower than the entry claimed.
+  Two caveats survive the correction: it is JSON Lines rather than the JSON array `llama-bench -o json` produces, so `bench/external.py`'s reader does not fit unchanged; and it has no `-r/--repetitions`, so repeats come from re-invocation and every sample pays the process start and model load.
+  It also has a `-tgs` flag that decodes the sequences one after another at the same `-npl`, which is a serialised control arm from the same binary and the same clock.
 - Depends on / blocked by: nothing technical; deliberately NOT built in the 2026-08-15 block, and it must be planned through /plan-eng-review before dispatch like every lane task.
 
 ## STEP 3's per-block records are checkpointed and never read back
@@ -238,3 +262,14 @@
 - Cons: the answer may be that 4.0 is wrong in either direction, and a K that moves obliges re-emission of the kv certificates and a bump of a kv ensemble version; the operator's floor also carries a softmax, so the zero-variance regimes that bind every other tolerance decision here may not be the binding ones and the grid needs its own thought.
 - Context: `native_ops.py::kv_tolerance` (its docstring states the borrow), `KV_MEMBERS` beside it, `bench/emit_pack_certificates.py::contract_version_for` (the certificate prose that now says "K borrowed from quantized_matmul, uncalibrated"); surfaced by the verification-design audit of 2026-08-15 and labelled by task V2 of the 2026-08-16 amendments plan.
 - Depends on / blocked by: nothing technical; it is a CPU harness that can run beside any GPU measurement.
+
+## The closing idle check discards a whole run on one sample
+
+- What: decide what evidence the end of a run needs, and give `check_idle_after` that instead of a single `idle_check()` snapshot; a streak like the opening gate's, a mid-run sampler that records when the window broke, or a rule that separates a blip from a busy machine.
+- Why: the opening gate requires five clean samples thirty seconds apart before a run may start, and the closing check requires one, so the two ends of the same run are held to different standards.
+  Measured on 2026-08-18 and 2026-08-19: two batched-decode runs of forty-four minutes each completed all ten cells with zero diverged rounds, zero hard fallbacks and exact routed counts at every cell, and both were discarded by their closing sample, the first on `airportd at 46% CPU` and the second on `WindowServer at 15% CPU` against a threshold of 15.
+  The two runs agreed to within 0.4 points on every cell, so what was thrown away was not a doubtful measurement.
+- Pros: a run is the expensive thing here and a sample is the cheap thing, so the asymmetry is backwards; and the closing check is one function with one caller pattern, so whatever replaces it lands in one place.
+- Cons: the closing sample is the only evidence the harness has that the quiet window held for the whole run, and a weaker rule admits a run whose middle was disturbed, which is the failure the check exists to catch; a mid-run sampler is new machinery on the honesty path and has to decide what a disturbed round means before it can annotate one.
+- Context: `bench/machine_state.idle_check` samples load averages, `ps -Ao pcpu` competitors above `BUSY_PROCESS_PCT = 15.0`, and power state, all at one instant; `bench/serve_sub4bit.check_idle_after` returns 1 when that instant is dirty; the detached runner's opening streak is five clean samples.
+- Depends on / blocked by: nothing technical, but it must not be done while a run of this lane is waiting to bind, because changing the rule that judges a measurement after seeing the measurement is what the pre-registration discipline exists to prevent.

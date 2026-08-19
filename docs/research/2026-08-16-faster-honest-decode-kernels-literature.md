@@ -260,6 +260,14 @@ This section's reasoning was that speculative decoding is the one mechanism that
 That is the paper's own finding rather than a contradiction of it: arXiv 2607.17283 reports three of five draft/target configurations DECELERATING on a consumer Apple-silicon laptop, and two of our two decelerate at K = 6.
 What this section may now say is narrower than what it said: the meeting point exists and the kernel reaches it, and reaching it is not sufficient, because the drafting cost at the widths the kernel covers exceeds what the kernel returns.
 
+#### Amendment, 2026-08-19: the same width regime pays when the width is free
+
+The width this section spent its argument on can be reached two ways, and the second one was measured end to end on 2026-08-19; `docs/research/2026-08-18-batch-decode-e2e.md` sections 9 and 10 carry it.
+Speculation buys width with drafting cost, and the amendment above records that the cost exceeds what the kernel returns.
+Concurrent streams give the same width for nothing, because an operator serving several requests already has B rows at every decode step, and mlx-lm's own batched engine is what `mlx_lm.server` runs.
+Measured there, the routed window pays at every cell of it: ZONE GO at B = 5, 6, 7, 8 and 9, +5.2% to +22.2% against stock 3-bit and +4.1% to +17.0% against stock 4-bit, with the engine's ratios sitting just below the loop's published ones at all three widths that have one.
+So this section's meeting point is real and the kernel reaches it; what decides whether reaching it pays is where the width came from.
+
 **Quantization paying for itself at decode has been measured once, on Apple silicon, and the mechanism was dispatch.**
 arXiv 2605.05699 reports an int4 KV cache running FASTER than fp16 across 256 to 4096-token prefixes on Apple M1 (37.0 against 39.4 ms/token on SmolLM2-360M, 211.9 against 246.8 on a 1.7B), with the whole transform in fp32 and quality preserved.
 Its own explanation is ours: "the cost is dispatch, not compute", and the fused single-dispatch kernel is what closed a 12-17% eager-mode penalty.

@@ -38,6 +38,7 @@ h = pytest.importorskip(
     reason="bench/serve_spec_decode.py is missing; these are its host-side "
            "contracts and cannot run without it",
 )
+serve_sub4bit = pytest.importorskip("serve_sub4bit")
 
 
 # These tests stop before or wrap the harness boundary, so no honest change
@@ -248,13 +249,22 @@ def _stub_the_machine(monkeypatch):
     _pins_ok(monkeypatch, h)
     _lock_granted(monkeypatch, h)
     monkeypatch.setattr(h, "require_idle", lambda label: {"idle": True})
+    # The pack-zone precondition is machine state like the idle gate, and it
+    # reads the same `should_dispatch` the routed-site helper does, so a walk
+    # that stubs routing has to stub this too or the stub refuses the run.
+    # `tests/test_serve_sub4bit.py` covers this check on its own terms.
+    monkeypatch.setattr(h, "require_pinned_zone", lambda: None)
     monkeypatch.setattr(h, "check_idle_after", lambda exit_code: exit_code)
     monkeypatch.setattr(h, "provenance", lambda manifest: {"pins": manifest})
     monkeypatch.setattr(h, "load_model", lambda name: (_Model(), object()))
     monkeypatch.setattr(h, "make_prompts", lambda *args, **kwargs: [1, 2, 3])
     monkeypatch.setattr(h, "make_sampler", lambda *args, **kwargs: object())
     monkeypatch.setattr(h, "install_patch", lambda model: _Patch())
-    monkeypatch.setattr(h, "should_dispatch", lambda *args: False)
+    # `should_dispatch` moved with the routed-site helpers into
+    # `serve_sub4bit`, so that is where the helper looks it up now.
+    # Stubbing it on this module would leave the name unused and the
+    # test silently no longer controlling routing.
+    monkeypatch.setattr(serve_sub4bit, "should_dispatch", lambda *args: False)
     monkeypatch.setattr(h.mx, "clear_cache", lambda: None)
     # The per-cell probe runs the counter with sync=True, and the fake model
     # above returns the fake input rather than an array, so the machine's
