@@ -366,3 +366,41 @@ The design was refuted twice before being built, and both attacks changed it.
 
 Both planted faults are acceptance tests now and both are refused; the correct kernel screens clean at every judged target.
 Nondeterminism abstains rather than refusing, per amendment 1, and abstentions count as no coverage.
+
+## Amendment 3, 2026-08-19: where the noise floor lives, and what detects a clock that moved
+
+Sections 8.3 and 9 were written before the harness existed and they turn out to say two things that cannot both be implemented literally.
+The harness was reviewed against them by six independent reviewers, each finding adversarially refuted; two of the surviving findings are about this document rather than about the code, so they are settled here before the code moves.
+
+### The noise floor applies to a comparison, not to an outcome
+
+Section 8.3 states the floor rule for "a comparison": the floor is the larger of the two arms' spreads, and a delta equal to its floor does not clear it.
+Section 9 gives O1 exactly two conjuncts, the interval's lower endpoint above 1.10 and the peak footprint no worse, and gives O3 "the same comparison and same floor rule" as O1.
+
+Implemented literally these disagree, and the harness reproduced the disagreement: O1 computed whether the delta cleared its floor and then dropped the answer, while O3 used it to override the interval verdict.
+The same samples therefore read GO at one cell and REFUSED at another, which is not two readings of one rule.
+
+The ruling is that the floor belongs to the comparison, in one place, and every outcome inherits it.
+A comparison may claim WIN or LOSS only if its interval clears 1.0 on one side AND its delta clears its own noise floor; otherwise it is REFUSED, which means undecided and never a direction.
+O1 then keeps the two conjuncts section 9 gave it, reading a verdict that already respects the floor, and O3 reports that verdict directly.
+This is the conservative direction: it can only make a GO harder to obtain, never easier, so it cannot manufacture a claim that the original text would have refused.
+
+### A reference arm whose spread says the clock moved rejects the round
+
+Section 8.3 named the noise floor as this measurement's whole defence against timing noise.
+That is not sufficient, and AGENTS.md already says why in general terms: equalising a clock excursion across arms is not detecting one, and the reference arm's own spread is the detector.
+
+The gap is concrete rather than theoretical.
+With ours at [100, 101, 102, 101, 100] seconds and stock at [130, 190, 200, 195, 205], stock's delta of 93.1% clears a floor of 38.5%, the interval's lower endpoint is 1.27, and the run reads GO, while the uncontaminated truth is about 1.02, which is NO-GO.
+The floor rule does not catch this because a contaminated reference arm widens the floor more slowly than it moves the ratio.
+
+So a comparison whose REFERENCE arm's spread exceeds the class limit is REJECTED, and a rejected comparison makes its cell non-binding rather than contributing a verdict.
+The reference arm is the second of the two, which is stock for the two comparisons against stock and control for ours-against-control.
+
+The limit is 1.5x max-to-min, inherited from the decode lane's kernel arms and NOT calibrated for full-job wall time.
+That is stated plainly because it is a weakness: AGENTS.md says steadier quantities warrant a tighter limit, and a five-round wall time on an idle machine is a far steadier quantity than a microsecond dispatch, so 1.5x is a loose upper bound that catches gross excursions and will miss small ones.
+It is not tightened here because nothing has yet measured what round-to-round variation is normal for this quantity; the Day 1 profile measures it, and tightening afterwards is a narrowing of what may be claimed and needs no further authority.
+
+Two limits of this rule are recorded so nobody reads more from a passing canary than it says.
+It cannot see a contamination that lands evenly on every reference round, because such a contamination leaves the spread small while still moving the ratio; the opening and closing idle gates remain the only defence there.
+And it is a per-comparison rule, so a cell may be rejected on one comparison and readable on another; a cell is non-binding if any of its comparisons is rejected, because the arms it is reading came from the same rounds.
