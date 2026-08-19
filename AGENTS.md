@@ -126,6 +126,9 @@ Vlad's global instructions still apply; this file adds the project's layout, how
 - `bench/.baselines/SCHEMA.md` - the row contract the per-chip matrix renderer consumes. The producer validates against it on every write.
 - `bench/reinterpret_serving_adequacy.py` - the ADR 0014 reading of the committed ADR 0013 evidence: a pure CPU re-read (sha256-checked) that writes a separate derived artifact and refuses to write if any in-contract quantity drifts from the recorded tables.
 - `kernelverify/schemas/heldout_eligibility.py` - which held-out implementations are admissible in which (batch, dtype) cells: versioned contract data, each exclusion hash-guarded against the MLX kernel source it was ruled on, failing loudly on mismatch so an MLX fix is never waved through on a stale label.
+- `kernelverify/schemas/bfloat16.py` - the two conversions between bfloat16 and its uint16 host carrier, and the only place that knows the layout.
+  numpy has no bfloat16 and raises on the direct conversion, so the training dtype travels as raw bits the way packed quantized codes already do.
+  ADR 0019 is the ruling, including the one measured place host and device disagree: Metal flushes bfloat16 subnormals to zero and MLX's CPU stream does not, so that band is declared outside the contract.
 - `bench/results/` - the recorded baselines, the committed serving-adequacy evidence plus its derived reinterpretation, the device-grid records, and the qmv boundary pricing recording. ADR 0007 is the reading of the baselines, ADR 0013/0014/0016 of the serving records, ADR 0016 of the device grid, ADR 0015 of the pricing recording.
 - `docs/adr/` - decisions with the measurements that forced them.
   Read these before changing any method.

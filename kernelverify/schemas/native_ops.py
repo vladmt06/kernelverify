@@ -42,7 +42,11 @@ from kernelverify.tolerance.floor import floored_tolerance
 K_QUANT = 4.0
 K_NATIVE = 1.5   # unquantized ensembles, same value ADR 0004 measured
 
-_EPS = {"float16": 9.77e-4, "float32": 1.19e-7}
+# One ulp at 1.0 per dtype, by the convention 2**-(stored mantissa bits):
+# float32 keeps 23, float16 keeps 10, bfloat16 keeps 7. bfloat16 is the
+# training dtype (ADR 0019) and its eps is 60x float16's, so a tolerance
+# written for float16 is not a bfloat16 tolerance.
+_EPS = {"float16": 9.77e-4, "float32": 1.19e-7, "bfloat16": 2.0 ** -7}
 
 
 def _base_tol(dtype: str, ref: np.ndarray) -> float:
