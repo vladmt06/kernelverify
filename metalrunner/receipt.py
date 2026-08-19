@@ -78,7 +78,8 @@ def read_quantization(model: str) -> tuple[int | None, int | None]:
 
 
 def build(*, args, stack, decisions, chip: str, adapter_path: str | None,
-          peak_bytes: int | None, started: str, finished: str) -> dict:
+          peak_bytes: int | None, started: str, finished: str,
+          forced_to_stock: bool = False) -> dict:
     """The record itself, as a plain dictionary."""
     adapters = Path(adapter_path) if adapter_path else None
     adapter_file = adapters / "adapters.safetensors" if adapters else None
@@ -106,6 +107,10 @@ def build(*, args, stack, decisions, chip: str, adapter_path: str | None,
         },
         "routing": [{"operation": d.operation, "routed": d.routed,
                      "reason": d.reason} for d in decisions],
+        # A control arm's receipt must be unmistakable afterwards: a forced
+        # run measures the wrapper, not a kernel, and quoting it as a real
+        # run would be quoting the wrong thing.
+        "forced_to_stock": forced_to_stock,
         "adapter": {
             "path": str(adapters) if adapters else None,
             "sha256": _digest_file(adapter_file) if adapter_file else None,

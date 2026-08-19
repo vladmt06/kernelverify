@@ -247,3 +247,56 @@ def test_a_local_model_is_fingerprinted_and_a_hub_id_is_not_pretended_to_be(
 
     remote = receipt.fingerprint_model("mlx-community/Qwen3-4B-4bit")
     assert remote["kind"] == "hub-id" and remote["config_sha256"] is None
+
+
+# ---------------------------------------------------------------------------
+# The control arm: the wrapper installed, routing forced off
+# ---------------------------------------------------------------------------
+def test_force_stock_is_off_unless_the_environment_says_otherwise(monkeypatch):
+    monkeypatch.delenv(routing.FORCE_STOCK_ENV, raising=False)
+    assert not routing.forced_to_stock()
+    monkeypatch.setenv(routing.FORCE_STOCK_ENV, "0")
+    assert not routing.forced_to_stock(), "an explicit 0 must not arm it"
+    monkeypatch.setenv(routing.FORCE_STOCK_ENV, "1")
+    assert routing.forced_to_stock()
+
+
+def test_a_forced_run_declines_for_that_reason_and_no_other():
+    """The decline must read as the control it is. An ordinary lack of
+    coverage and a deliberate control arm are different facts, and a
+    measurement that confused them would be comparing the wrong things."""
+    decisions = routing.decide("lora", 4, 64, on_chip="Apple M3 Pro",
+                               force_stock=True)
+    assert not any(d.routed for d in decisions)
+    assert all("control run" in d.reason for d in decisions)
+    assert all(routing.FORCE_STOCK_ENV in d.reason for d in decisions)
+
+
+def test_the_report_announces_a_control_run(monkeypatch):
+    monkeypatch.setenv(routing.FORCE_STOCK_ENV, "1")
+    text = routing.render(routing.decide("lora", 4, 64, on_chip="c"),
+                          observed(), model="m", fine_tune_type="lora",
+                          bits=4, group_size=64)
+    assert "CONTROL RUN" in text
+    assert "measures the wrapper's own cost" in text
+
+
+def test_a_control_receipt_is_unmistakable_afterwards(tmp_path):
+    """Arm 3 of the end-to-end measurement produces receipts too, and one of
+    them must never be quoted as a real run."""
+    record = receipt.build(
+        args=types.SimpleNamespace(model="m"), stack=observed(),
+        decisions=routing.decide("lora", 4, 64, on_chip="c", force_stock=True),
+        chip="c", adapter_path=str(tmp_path), peak_bytes=1,
+        started="a", finished="b", forced_to_stock=True)
+
+    assert record["forced_to_stock"] is True
+    assert all("control run" in r["reason"] for r in record["routing"])
+
+
+def test_an_ordinary_receipt_is_not_marked_as_a_control(tmp_path):
+    record = receipt.build(
+        args=types.SimpleNamespace(model="m"), stack=observed(), decisions=[],
+        chip="c", adapter_path=str(tmp_path), peak_bytes=1,
+        started="a", finished="b")
+    assert record["forced_to_stock"] is False

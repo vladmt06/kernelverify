@@ -124,7 +124,8 @@ def _finish(args, stack, decisions, chip, started) -> str:
                            chip=chip, adapter_path=getattr(args, "adapter_path",
                                                            None),
                            peak_bytes=peak, started=started,
-                           finished=receipt.utc_now())
+                           finished=receipt.utc_now(),
+                           forced_to_stock=routing.forced_to_stock())
     written = receipt.write(record, getattr(args, "adapter_path", None))
     if written is None:
         return "metalrunner: no adapter path, so no receipt was written."

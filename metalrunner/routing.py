@@ -21,7 +21,17 @@ so shipping a kernel is a data change here rather than a code change.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+
+# The control arm's switch. An end-to-end measurement needs a third arm that
+# installs this wrapper and then routes nothing, so that the wrapper's own
+# host cost can be measured against stock separately from any kernel's
+# effect. It is an environment variable rather than a flag because the
+# argument surface is mlx-lm's and must stay identical to it; and it is
+# reported in the routing report and recorded in the receipt, so a control
+# run can never be mistaken afterwards for a real one.
+FORCE_STOCK_ENV = "METALRUNNER_FORCE_STOCK"
 
 # The training operations this package knows how to replace. Named here so a
 # decline can be specific about what did not happen, rather than silent.
@@ -61,21 +71,34 @@ def chip() -> str:
         return "unknown"
 
 
+def forced_to_stock() -> bool:
+    """Is this process a control arm? Read from the environment each call, so
+    a harness can set it per subprocess without importing anything."""
+    return os.environ.get(FORCE_STOCK_ENV, "") not in ("", "0")
+
+
 def decide(fine_tune_type: str, bits: int | None, group_size: int | None,
-           *, on_chip: str | None = None) -> list[Decision]:
+           *, on_chip: str | None = None,
+           force_stock: bool | None = None) -> list[Decision]:
     """One decision per known operation, each carrying its own reason.
 
     `bits` and `group_size` are None when the model's quantization could not
     be read; that is a decline rather than an assumption, because routing a
     kernel verified for 4-bit group-64 onto something else is exactly the
     kind of guess this package exists not to make.
+
+    Under force-stock every operation declines for that reason and no other,
+    so the decline is legible as the control it is rather than looking like
+    an ordinary lack of coverage.
     """
     where = chip() if on_chip is None else on_chip
+    forced = forced_to_stock() if force_stock is None else force_stock
     decisions = []
     for operation, _description in KNOWN_OPERATIONS:
-        decisions.append(Decision(operation, False,
-                                  _why_not(operation, fine_tune_type, bits,
-                                           group_size, where)))
+        reason = (f"forced to stock by {FORCE_STOCK_ENV}: this is a control run"
+                  if forced else
+                  _why_not(operation, fine_tune_type, bits, group_size, where))
+        decisions.append(Decision(operation, False, reason))
     return decisions
 
 
@@ -119,7 +142,11 @@ def render(decisions: list[Decision], stack, *, model: str,
     lines += [f"    {d.operation}: {d.reason}"
               for d in decisions if not d.routed]
     lines.append("")
-    if not routed:
+    if forced_to_stock():
+        lines.append(f"  CONTROL RUN: {FORCE_STOCK_ENV} is set, so every "
+                     "routing decision was forced to stock. This run measures "
+                     "the wrapper's own cost and nothing else.")
+    elif not routed:
         lines.append("  This run is stock mlx-lm. metalrunner changed nothing "
                      "about the training itself and makes no speed claim; it "
                      "checked the stack and will write a receipt.")
