@@ -90,10 +90,20 @@ class Funnel:
 
     def screen(self, store: CandidateStore, candidate: str,
                **context) -> FunnelResult:
-        """Run one candidate down the funnel, recording every step it reached."""
+        """Run one candidate down the funnel, recording every step it reached.
+
+        Every stage is handed the candidate's id as well as its source, since
+        the funnel already knows it and a stage that needed it would otherwise
+        have to be passed it a second time by the caller. `candidate` is this
+        method's own parameter name, so a caller trying to supply a second one
+        through the context is refused by Python before any stage runs; there
+        is no path by which a stage is told it is judging something other than
+        what is being recorded.
+        """
         for stage in self.stages:
             try:
-                outcome = stage.run(store.source(candidate), **context)
+                outcome = stage.run(store.source(candidate),
+                                    candidate=candidate, **context)
             except Exception as error:  # a candidate is hostile input
                 detail = f"{type(error).__name__}: {error}"
                 store.record(candidate, stage=stage.name, passed=False,

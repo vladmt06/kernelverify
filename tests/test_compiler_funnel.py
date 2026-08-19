@@ -123,8 +123,30 @@ def test_context_is_passed_through_to_every_stage(store):
                            or StageOutcome(True)),
                      Stage("b", lambda source, **kw: got.append(kw)
                            or StageOutcome(True))])
-    funnel.screen(store, store.propose(SOURCE, origin="seed"), runner="R")
-    assert got == [{"runner": "R"}, {"runner": "R"}]
+    candidate = store.propose(SOURCE, origin="seed")
+    funnel.screen(store, candidate, runner="R")
+    assert got == [{"runner": "R", "candidate": candidate}] * 2
+
+
+def test_every_stage_is_told_which_candidate_it_is_judging(store):
+    """A stage that needs the id, like the held-out draw, gets it from the
+    funnel rather than from a caller who could pass a different one."""
+    got = []
+    candidate = store.propose(SOURCE, origin="seed")
+    Funnel([Stage("a", lambda source, *, candidate, **_:
+                  got.append(candidate) or StageOutcome(True))]).screen(
+        store, candidate)
+    assert got == [candidate]
+
+
+def test_a_caller_cannot_tell_a_stage_a_different_candidate(store):
+    """`candidate` is screen's own parameter, so a second one through the
+    context is refused by Python before any stage runs. No guard needed, and
+    an unreachable guard would only look like one."""
+    candidate = store.propose(SOURCE, origin="seed")
+    with pytest.raises(TypeError, match="candidate"):
+        Funnel([_stage("a", True)]).screen(store, candidate,
+                                           candidate="something else")
 
 
 # ---------------------------------------------------------------------------
