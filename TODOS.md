@@ -273,3 +273,44 @@
 - Cons: the closing sample is the only evidence the harness has that the quiet window held for the whole run, and a weaker rule admits a run whose middle was disturbed, which is the failure the check exists to catch; a mid-run sampler is new machinery on the honesty path and has to decide what a disturbed round means before it can annotate one.
 - Context: `bench/machine_state.idle_check` samples load averages, `ps -Ao pcpu` competitors above `BUSY_PROCESS_PCT = 15.0`, and power state, all at one instant; `bench/serve_sub4bit.check_idle_after` returns 1 when that instant is dirty; the detached runner's opening streak is five clean samples.
 - Depends on / blocked by: nothing technical, but it must not be done while a run of this lane is waiting to bind, because changing the rule that judges a measurement after seeing the measurement is what the pre-registration discipline exists to prevent.
+
+## Two tolerance-free gates are blocked on a ruling, not on work
+
+- What: decide whether the compiler loop declares, as its own policy rather than as a contract amendment, that it will only KEEP kernels that are deterministic and that write only inside their declared extent; then build the guard-rows and determinism gates against that policy.
+- Why: five gate designs were adversarially reviewed on 2026-08-19 and all five were broken, three of them because they refuse kernels the tolerance contract admits.
+  Amendment 1 of the sprint pre-registration resolved three of those by abstention, and two have no abstention escape, because abstaining on the very property they test leaves them testing nothing.
+  A determinism gate in particular would contradict `kernelverify/report/certificate.py`, which already states in its protocol block that output values are not asserted identical.
+- Pros: the funnel gets two more cheap screens before the expensive tolerance gate, and the loop stops generating kernels it would never keep.
+- Cons: the policy narrows what the loop accepts below what the verifier admits, which must be said plainly wherever a kept kernel is quoted, and it excludes formulations that are standard on Metal (cross-threadgroup split-K can only be assembled through the output buffer, and simdgroup stores have no partial-store variant).
+- Context: prereg amendment 1; the ruling was put to Vlad on 2026-08-19 as options A (amend the contract), B (funnel policy, recommended) and C (build neither).
+- Depends on / blocked by: Vlad's ruling. No code is blocked otherwise.
+
+## metalrunner is not installable, and the distribution shape is undecided
+
+- What: decide whether `pip install metalrunner` ships one distribution containing the parts of kernelverify it needs at runtime, or two distributions with metalrunner depending on kernelverify; then add the packaging and a fresh-venv install test.
+- Why: R7 promises `pip install metalrunner`, and today the package runs only from a clone.
+  `pyproject.toml` states in its own words that this project is deliberately not packaged, so adding a `[project]` table changes a documented fact rather than adding a field.
+- Pros: the product becomes installable by someone who is not looking at this repository, which is the whole of "operational on a MacBook".
+- Cons: a user needs the routing tables, the certified kernel sources and the pack dispatch at runtime, but not the mutation catalogue, the vendored corpus or the bench harnesses, so a naive one-distribution answer ships hundreds of megabytes of verification apparatus to every user.
+- Context: `metalrunner/` landed 2026-08-19 and works from the tree, with a real two-iteration fine-tune passing; the sprint plan puts the wheel on Day 6.
+- Depends on / blocked by: nothing technical; it wants one decision about scope.
+
+## The support gate cannot screen the scales and biases bindings
+
+- What: add a target that scales one quantization group by a power of two, which leaves the integer codes bit-identical while moving the scale and the bias together, and extend the gate's attribution rule to accept a declared two-binding extent.
+- Why: `kernelverify/compiler/support.py` derives its device inputs from raw weights through the contract quantizer, and that oracle has no single-binding perturbation of a scale: editing a scale alone leaves the reference bit-identical, so the gate abstains forever.
+  Two of the four data bindings of the only kernel in the pack are therefore unscreened, which the policy string names honestly but does not fix.
+- Pros: closes the wrong-group-index and stale-scale fault classes on the bindings that currently have no coverage from any gate.
+- Cons: it is the first target that perturbs two bindings at once, so the attribution rule that currently reads "every binding byte-identical except one" has to be generalised without becoming a rule that admits an unattributable edit.
+- Context: measured and reported by the contract-lens refutation of 2026-08-19; recorded in prereg amendment 2 as the named extension.
+- Depends on / blocked by: nothing.
+
+## The serving-reinterpretation guard invalidates its artefact on a comment change
+
+- What: narrow what `bench/reinterpret_serving_adequacy.py`'s `interpretation_identity()` hashes, so that a change which cannot move a derived number does not invalidate the committed artefact.
+- Why: it hashes whole files including `kernelverify/schemas/native_ops.py`, so adding an unrelated dict entry and three comment lines turned `tests/test_serving_reinterpretation.py` red on 2026-08-19.
+  Regenerating showed exactly one leaf differing, the hash itself, with every derived number bit-identical, which is the guard doing its job at a granularity coarser than the drift it exists to catch.
+- Pros: the guard keeps its meaning while stopping unrelated edits from costing a regeneration and a commit.
+- Cons: any narrowing is a judgement about which bytes can move a number, and getting it wrong reintroduces exactly the silent drift the header was added to refuse, so a coarse-and-annoying guard is safer than a clever one.
+- Context: surfaced while adding the bfloat16 contract entry (ADR 0019); the artefact was regenerated and the invariance check confirmed no number moved.
+- Depends on / blocked by: nothing; deliberately not fixed on the way past, per the do-not-touch-unrelated-code rule.

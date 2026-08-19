@@ -143,6 +143,11 @@ Vlad's global instructions still apply; this file adds the project's layout, how
   numpy has no bfloat16 and raises on the direct conversion, so the training dtype travels as raw bits the way packed quantized codes already do.
   ADR 0019 is the ruling, including the one measured place host and device disagree: Metal flushes bfloat16 subnormals to zero and MLX's CPU stream does not, so that band is declared outside the contract.
 - `bench/results/` - the recorded baselines, the committed serving-adequacy evidence plus its derived reinterpretation, the device-grid records, and the qmv boundary pricing recording. ADR 0007 is the reading of the baselines, ADR 0013/0014/0016 of the serving records, ADR 0016 of the device grid, ADR 0015 of the pricing recording.
+- `metalrunner/` - the user-facing package, and the only thing a person installs and runs.
+  `versions.py` pins the mlx and mlx-lm versions AND the sha256 of the mlx-lm files whose internals are reached into, because a patch release can move a seam without moving the version a user sees; a mismatch refuses the run rather than degrading to stock, since a silent fallback would let someone believe they ran verified kernels when they ran none.
+  `lora.py` is the entry point: it builds mlx-lm's own parser and merges configuration mlx-lm's way, so every flag and config file is unchanged, then verifies, refuses DoRA and full fine-tuning, prints the routing report BEFORE training, runs mlx-lm's own trainer, and writes the receipt.
+  `routing.py` decides what is swapped and reports every decline with its reason; `CERTIFIED` is empty until the keep stage fills it from a committed recording, so shipping a kernel is a data change rather than a code change.
+  `receipt.py` records what a run can prove about itself and, in its own text, what it does not attest; a receipt that overstates is worse than none.
 - `docs/adr/` - decisions with the measurements that forced them.
   Read these before changing any method.
 - `vendor/gpuemu-corpus/` - vendored unmodified at the commit pinned in `vendor/PINNED.txt`.
