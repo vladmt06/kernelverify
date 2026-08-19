@@ -271,3 +271,75 @@ Nothing about mlx or mlx-lm versions other than 0.32.0 and 0.31.3; on any other 
 
 Written after the sprint.
 This section records the profile's shares and floors, which operation the section 4 rule selected, the funnel census, the held-out draws with the salt revealed, and the end-to-end verdicts O1 to O5 as measured.
+
+---
+
+## Amendment 1, 2026-08-19: the tolerance-free gates are not free of false positives, and three of five need a rule that does not exist
+
+Section 6 item 3 named five tolerance-free gates and asserted that "these have no tolerance in them and therefore no false positives by construction".
+That assertion was wrong, and the reason it was wrong is worth more than the gates it cost.
+
+Five independent designs were built against the real runner API and each was then handed to an independent reviewer whose instruction was to refuse it.
+All five were broken, and every one of the five was broken twice: a correct kernel it would refuse, and a kernel carrying its own named fault class that it would pass.
+
+### What the assertion missed
+
+Having no tolerance in it stops a gate flagging a correct kernel for being numerically different.
+It does not stop a gate flagging a correct kernel for being structurally different, and structure is exactly what these five gates read.
+Three of the five refuse kernels the tolerance contract admits:
+
+| Gate | What it assumes | What the contract grants |
+|---|---|---|
+| Unwritten output | a kernel does not read its own output buffer | C2 and C3 grant a reduction blocked at any width, and on Metal a reduction blocked across threadgroups can only be assembled through the output buffer |
+| Guard rows | every store lands inside the declared extent | C3 explicitly grants padded-block formulations, and Metal's simdgroup store has no partial-store variant, so a correct tiled matmul spills past a ragged edge |
+| Determinism | the same case produces the same bytes twice | C2 grants any evaluation order, so two threadgroups each computing an admissible order and both storing is admissible; `kernelverify/report/certificate.py` already states in its own protocol block that "output values are NOT asserted to be identical, which is not achievable on a GPU" |
+
+Verified directly rather than accepted: the contract module contains no determinism requirement of any kind, and the certificate's protocol assertion reads as quoted.
+
+### The ruling
+
+Where a gate would need a new rule about what a kernel may do, it abstains instead of refusing.
+
+An abstention says the gate has nothing to report about this candidate, records why, and counts as no coverage.
+It is not a pass: a case that was abstained is excluded from the screened count, so a session can never present abstentions as things it checked.
+
+This is what makes the unwritten-output gate buildable without a contract change.
+Rather than forbidding kernels that read their own output, it detects them: a kernel that does not read its output writes identical bytes under two different fills, so any cell that differs between the fills without being unwritten is proof the fill was read, and the case is not screened.
+Abstaining costs coverage; refusing would have cost a promise this repository has kept.
+
+Guard rows and determinism have no equivalent escape, because abstaining on the very property they test would leave them testing nothing.
+They are therefore NOT built in sprint 1 and are recorded here as blocked on a decision that belongs to a separate ruling: whether kernelverify's compiler loop declares, as its own policy and not as a contract amendment, that it will only keep kernels that are deterministic and stay inside their declared extent.
+That decision is deliberately left out of this sprint.
+
+### Mechanism change to the unwritten-output gate
+
+Section 6 said "NaN sentinel". The gate as built uses two dispatches per case with complementary byte fills, 0xA5 and 0x5A, refusing only cells that came back holding both.
+
+Two reasons, neither of them preference.
+A shipped and already-verified kernel in this repository writes NAN into every declared output cell on its capacity-overflow path, and the next gate in the funnel exists to run kernels whose correct output is NaN, so "a NaN left behind means unwritten" refuses correct kernels.
+And half of the runner's tensor dtypes are integer carriers where no value is out of range, so no single sentinel value can be safe for them; a byte fill is dtype-blind.
+
+### Scope correction to the same gate
+
+A clean verdict attests that a store reached every declared cell.
+It does NOT attest that the kernel produced each cell's value.
+A kernel that clears its own output and then applies a wrong bound stores into every cell, passes this gate, and computes half of them wrongly; no choice of fill pattern changes that, because the mechanism can only observe whether a store arrived.
+That sentence is now in the gate's policy string and travels with every verdict it issues, so a clean result can never be read as coverage of the wrong-bounds class.
+
+One residual hole is named rather than hidden: a kernel that reads its output AND whose every declared cell is absorbed by the fill pattern shows no differing cell, so the abstention does not trigger.
+The abstention fires the moment any one cell is not absorbed.
+
+### Correction to a claim made during the review
+
+The reviewer of the awkward-shapes gate argued it has no work to do, on the grounds that every shape the operator dispatches at is a whole number of 256-wide tiles.
+That is false at one shape, and it is the shape that matters most here.
+The output head is 151936 wide, which is 593.5 tiles of 256, a remainder of 128; every other dispatched dimension is exact.
+So exactly one awkward shape exists in the operator's own domain today, and it is the output head, which section 4 lists as candidate operation L.
+The reviewer's structural point stands and is adopted: the shape domain must come from the operator's own producer, never from an incumbent kernel's docstring, and outside that domain the gate abstains rather than refusing.
+
+### Effect on the sprint
+
+Section 6's funnel is unchanged in order.
+Stage 3 ships with one gate rather than five in sprint 1: unwritten output, built as described above.
+NaN and infinity propagation and awkward shapes remain buildable without a ruling and are narrowed by their reviews; guard rows and determinism are blocked as recorded.
+This amendment is written after the unwritten-output gate's code landed rather than before, which is late by this document's own rule, and is recorded as such.

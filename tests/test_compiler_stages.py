@@ -137,3 +137,41 @@ def test_the_two_fault_tables_do_not_overlap():
 
 def test_harness_error_is_what_the_stage_raises():
     assert issubclass(HarnessError, RuntimeError)
+
+
+# ---------------------------------------------------------------------------
+# The unwritten-output gate, as a funnel stage
+# ---------------------------------------------------------------------------
+HALF_WRITER = GOOD.replace("if (gid < n)", "if (gid < n / 2)")
+
+
+@requires_metal
+def test_the_unwritten_stage_kills_a_half_writing_kernel(store, context):
+    from kernelverify.compiler.stages import unwritten_stage
+
+    context["gate_cases"] = [context["probe_case"]]
+    funnel = Funnel([compile_stage(), lint_stage(), unwritten_stage()])
+    candidate = store.propose(HALF_WRITER, origin="generator")
+    result = funnel.screen(store, candidate, **context)
+
+    assert not result.passed and result.reached == "unwritten"
+    assert "never written" in result.detail
+    assert store.get(candidate).outcome == "unwritten:failed"
+
+
+@requires_metal
+def test_the_unwritten_stage_screens_the_source_the_store_recorded(store, context):
+    """The stage builds its own spec from the positional source. A spec handed
+    in through the context would let the gate judge text the journal never
+    recorded, so there is no parameter for one."""
+    import inspect
+
+    from kernelverify.compiler.stages import unwritten_stage
+
+    parameters = inspect.signature(unwritten_stage().run).parameters
+    assert "spec" not in parameters
+    assert list(parameters)[0] == "source"
+
+    context["gate_cases"] = [context["probe_case"]]
+    candidate = store.propose(GOOD, origin="seed")
+    assert Funnel([unwritten_stage()]).screen(store, candidate, **context).passed

@@ -63,6 +63,16 @@ SCALAR_DTYPES = {
     "float16": np.float16,
 }
 
+# What an output buffer holds before the kernel runs. "zero" is what every
+# ordinary run gets and what device.py's reuse argument is written around. The
+# two sentinels exist for the unwritten-output gate, which runs one case under
+# each and refuses only cells that came back holding BOTH: a kernel whose
+# output does not depend on the buffer's prior contents writes identical bytes
+# under both fills, so it can match at most one, and refusal is impossible for
+# it by construction rather than by luck. Byte-uniform, so one fill serves
+# every dtype and endianness never enters.
+PREFILL_PATTERNS = {"zero": 0x00, "sentinel_a": 0xA5, "sentinel_b": 0x5A}
+
 MAX_DIMENSIONS = 3  # Metal grids are three dimensional
 
 
@@ -285,8 +295,13 @@ class RunCase:
     params: dict = field(default_factory=dict)
     output_shapes: tuple = ()
     label: str = ""
+    prefill: str = "zero"
 
     def __post_init__(self):
+        if self.prefill not in PREFILL_PATTERNS:
+            raise SpecError(
+                f"prefill {self.prefill!r} is not one of "
+                f"{sorted(PREFILL_PATTERNS)}")
         normalized = []
         for entry in self.output_shapes:
             shape, dtype = entry
@@ -332,6 +347,7 @@ class RunCase:
             "output_shapes": [{"shape": list(shape), "dtype": dtype}
                               for shape, dtype in self.output_shapes],
             "label": self.label,
+            "prefill": self.prefill,
         }
 
     @staticmethod
@@ -342,6 +358,7 @@ class RunCase:
             output_shapes=tuple((tuple(o["shape"]), o["dtype"])
                                 for o in raw.get("output_shapes", ())),
             label=raw.get("label", ""),
+            prefill=raw.get("prefill", "zero"),
         )
 
 

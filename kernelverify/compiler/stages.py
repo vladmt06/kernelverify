@@ -22,6 +22,7 @@ from __future__ import annotations
 from kernelverify.compiler.funnel import Stage, StageOutcome
 from kernelverify.compiler.heldout import Verdict, draw
 from kernelverify.compiler.lint import lint
+from kernelverify.compiler.unwritten import screen
 from kernelverify.runners.result import RunStatus
 from kernelverify.runners.spec import KernelSpec
 
@@ -93,5 +94,24 @@ def heldout_stage(space: dict[str, list], check, name: str = "heldout") -> Stage
     def run(source, *, candidate, **_context) -> StageOutcome:
         verdict = Verdict(bool(check(source, draw(candidate, space))))
         return StageOutcome(verdict.passed, "")
+
+    return Stage(name=name, run=run, verifies=True)
+
+
+def unwritten_stage(name: str = "unwritten") -> Stage:
+    """Was every declared output cell reached by a store?
+
+    Like the compile stage, this builds its spec from the source the funnel
+    handed it, never from a spec passed through the context. The two would
+    almost always agree, and on the run where they did not the gate would be
+    screening text the store never recorded, which is the one thing a
+    candidate journal must never allow.
+    """
+    def run(source, *, runner, entry_point, bindings, launch, gate_cases,
+            **_context) -> StageOutcome:
+        spec = KernelSpec(source=source, entry_point=entry_point,
+                          bindings=bindings, launch=launch)
+        report = screen(runner, spec, gate_cases)
+        return StageOutcome(report.ok, report.reason)
 
     return Stage(name=name, run=run, verifies=True)

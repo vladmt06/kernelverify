@@ -72,6 +72,7 @@ import Metal  # PyObjC; absent on non-Apple platforms, which the worker reports
 
 from kernelverify.runners.result import DeviceInfo, RunResult, RunStatus, Timing
 from kernelverify.runners.spec import (
+    PREFILL_PATTERNS,
     SCALAR_DTYPES,
     TENSOR_DTYPES,
     Binding,
@@ -318,8 +319,9 @@ class CompiledKernel:
             with objc.autorelease_pool():
                 self._check_launch(group, memory)
                 buffers, scalars, output_indices = self._make_buffers(case)
+                pattern = PREFILL_PATTERNS[case.prefill]
                 for slot, index in enumerate(output_indices):
-                    _zero(buffers[index], *case.output_shapes[slot])
+                    _fill(buffers[index], *case.output_shapes[slot], pattern)
                 self._dispatch(buffers, scalars, grid, group, memory)
                 outputs = [_read_back(buffers[index], *case.output_shapes[slot])
                            for slot, index in enumerate(output_indices)]
@@ -375,13 +377,23 @@ def _output_view(buffer, shape: tuple, dtype: str) -> np.ndarray:
     return np.frombuffer(memory, dtype=numpy_dtype).reshape(shape)
 
 
-def _zero(buffer, shape: tuple, dtype: str) -> None:
-    """Clear an output before the correctness dispatch.
+def _fill(buffer, shape: tuple, dtype: str, byte: int) -> None:
+    """Put a known pattern in an output before the correctness dispatch.
 
     A kernel that only writes part of its output would otherwise be judged on
     whatever the allocator handed back, which is not a property of the kernel.
+    Zero is what every ordinary case asks for, and what the reuse argument at
+    the top of this module is written around.
+
+    The fill is a byte pattern rather than a typed value so that one code path
+    serves every dtype, including the integer carriers where no value is out
+    of range and a "sentinel" would be indistinguishable from a legitimate
+    result. The unwritten-output gate asks for the two complementary
+    sentinels; see PREFILL_PATTERNS in spec.py for what it does with them.
     """
-    _output_view(buffer, shape, dtype)[...] = 0
+    nbytes = int(np.prod(shape)) * np.dtype(TENSOR_DTYPES[dtype]).itemsize
+    memory = buffer.contents().as_buffer(nbytes)
+    np.frombuffer(memory, dtype=np.uint8, count=nbytes)[...] = byte
 
 
 def _read_back(buffer, shape: tuple, dtype: str) -> np.ndarray:
