@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import subprocess
+import types
 from datetime import date
 
 import pytest
@@ -1580,3 +1581,89 @@ def test_the_reference_arm_is_the_second_of_the_two():
     assert wild_first["verdict"] != "REJECTED"
     wild_second = time_comparison([10.0, 10.0], [1.0, 100.0])
     assert wild_second["verdict"] == "REJECTED"
+
+
+# ---------------------------------------------------------------------------
+# The measurement module's own refusal is permanent; everything else is a bug.
+# The detached runner reads exit 1 plus a traceback as a crash and spends a
+# retry on it, and no retry will make an unkept candidate kept.
+# ---------------------------------------------------------------------------
+def _measurement_module(raises=None):
+    """A stand-in measurement module that declares its refusal type the way
+    the real one does, and raises whatever the test hands it."""
+    module = types.ModuleType("fake_measurement_module")
+
+    class MeasurementRefusal(RuntimeError):
+        pass
+
+    def verify_backward_exact(**_kwargs):
+        raise raises if raises is not None else MeasurementRefusal("refused")
+
+    module.MeasurementRefusal = MeasurementRefusal
+    module.verify_backward_exact = verify_backward_exact
+    module.install = lambda **_kwargs: None
+    return module
+
+
+def _backward_task(tmp_path):
+    plan = _plan()
+    return {"kind": "backward", "cell": "backward", "plan": plan,
+            "provenance": {"base_model": {"directory": str(tmp_path)}}}
+
+
+def test_a_typed_measurement_refusal_maps_to_the_precondition_exit(
+        tmp_path, monkeypatch):
+    module = _measurement_module()
+    module.verify_backward_exact = lambda **_k: (_ for _ in ()).throw(
+        module.MeasurementRefusal("candidate ab is not kept"))
+    monkeypatch.setattr(harness, "_load_measurement_module", lambda _p: module)
+
+    with pytest.raises(PreconditionFailed, match="is not kept"):
+        harness._backward_child(_backward_task(tmp_path), guard=None)
+
+
+def test_an_untyped_measurement_crash_still_escapes(tmp_path, monkeypatch):
+    """A real bug keeps its retryable traceback: narrowing the mapping to
+    the declared type is the whole point of reading it off the module."""
+    module = _measurement_module(ValueError("a genuine bug"))
+    monkeypatch.setattr(harness, "_load_measurement_module", lambda _p: module)
+
+    with pytest.raises(ValueError, match="a genuine bug"):
+        harness._backward_child(_backward_task(tmp_path), guard=None)
+
+
+def test_a_module_declaring_no_refusal_type_is_not_special_cased(
+        tmp_path, monkeypatch):
+    module = _measurement_module(RuntimeError("no declared type here"))
+    del module.MeasurementRefusal
+    monkeypatch.setattr(harness, "_load_measurement_module", lambda _p: module)
+
+    with pytest.raises(RuntimeError, match="no declared type"):
+        harness._backward_child(_backward_task(tmp_path), guard=None)
+
+
+# The wrapper fingerprint has one implementation, and the harness uses it.
+def test_the_wrapper_hash_is_the_wrappers_own_implementation():
+    """Three places compare this digest and any drift refuses every run, so
+    identity is the guarantee rather than two algorithms kept in step."""
+    from metalrunner.measurement import tree_sha256
+
+    wrapper = harness.ROOT / "metalrunner"
+    assert harness._wrapper_sha256(wrapper) == tree_sha256(wrapper)
+
+
+def test_the_wrapper_hash_ignores_interpreter_caches(tmp_path):
+    """The child imports metalrunner between the preflight and the evidence,
+    which writes .pyc files; if those counted, every run would refuse."""
+    (tmp_path / "real.py").write_text("x = 1\n")
+    before = harness._wrapper_sha256(tmp_path)
+
+    cache = tmp_path / "__pycache__"
+    cache.mkdir()
+    (cache / "real.cpython-312.pyc").write_bytes(b"\x00\x01")
+    (tmp_path / "stray.pyc").write_bytes(b"\x00\x02")
+    (tmp_path / ".DS_Store").write_bytes(b"\x00\x03")
+
+    assert harness._wrapper_sha256(tmp_path) == before
+    (tmp_path / "real.py").write_text("x = 2\n")
+    assert harness._wrapper_sha256(tmp_path) != before

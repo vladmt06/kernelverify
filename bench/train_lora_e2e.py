@@ -1209,6 +1209,23 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _wrapper_sha256(wrapper: Path) -> str:
+    """The wrapper fingerprint, from the wrapper's own implementation.
+
+    Three places compare this digest - the preflight, the child's re-check
+    and the wrapper's own evidence object - and any disagreement between
+    them refuses every run at the evidence gate. So there is one
+    implementation and the other two import it, rather than three copies of
+    a hashing algorithm kept in step by tests.
+
+    Imported here rather than at module scope because this file's decision
+    rules must stay importable wherever the wrapper is not installed.
+    """
+    from metalrunner.measurement import tree_sha256
+
+    return tree_sha256(wrapper)
+
+
 def _tree_sha256(root: Path, files: Sequence[Path] | None = None) -> str:
     selected = (
         sorted(files, key=lambda path: str(path.relative_to(root)))
@@ -1406,6 +1423,7 @@ def preflight_inputs(
     wrapper = root / "metalrunner"
     if not wrapper.is_dir():
         raise PreconditionFailed(f"metalrunner wrapper is missing: {wrapper}")
+    wrapper_digest = _wrapper_sha256(wrapper)
     return {
         "base_model": {
             "directory": str(model_dir.resolve()),
@@ -1415,7 +1433,7 @@ def preflight_inputs(
         "model_manifest": model_manifest,
         "data": _data_record(Path(plan["data"])),
         "stack": stack,
-        "wrapper_sha256": _tree_sha256(wrapper),
+        "wrapper_sha256": wrapper_digest,
         "plan_sha256": _json_sha256(plan),
         "measurement_module": plan["measurement_module"],
     }
@@ -1731,9 +1749,34 @@ def _check_child_inputs(task: Mapping[str, object], observed_stack: dict) -> Non
     observed_data = _data_record(Path(plan["data"]))
     if observed_data != provenance.get("data"):
         raise PreconditionFailed("child training data differs from preflight")
-    wrapper = ROOT / "metalrunner"
-    if _tree_sha256(wrapper) != provenance.get("wrapper_sha256"):
+    if _wrapper_sha256(ROOT / "metalrunner") != provenance.get(
+            "wrapper_sha256"):
         raise PreconditionFailed("child wrapper hash differs from preflight")
+
+
+def _measurement_call(module, function, **kwargs):
+    """Call into the measurement module, mapping its ONE declared refusal.
+
+    A typed refusal is permanent: an unkept candidate, a schema-invalid
+    entry, a kernel certified for another chip. It must land on the shared
+    precondition exit, because the detached runner reads exit 1 with a
+    traceback as a crash and spends a retry on it, and no retry will make a
+    misspelled plan work.
+
+    Every OTHER exception still escapes as a traceback. Real bugs keep their
+    retryable semantics; this narrows nothing except the one case the module
+    declares. The refusal type is read off the module rather than imported,
+    because the measurement module is named by plan data and every other
+    check the harness makes of it is attribute-shaped too.
+    """
+    refusal = getattr(module, "MeasurementRefusal", None)
+    try:
+        return function(**kwargs)
+    except Exception as error:
+        if (isinstance(refusal, type) and issubclass(refusal, BaseException)
+                and isinstance(error, refusal)):
+            raise PreconditionFailed(str(error)) from error
+        raise
 
 
 def _load_measurement_module(plan: Mapping[str, object]):
@@ -1755,7 +1798,8 @@ def _backward_child(task: Mapping[str, object], guard: BudgetGuard) -> dict:
         raise PreconditionFailed(
             "measurement module must expose verify_backward_exact"
         )
-    result = verify(
+    result = _measurement_call(
+        module, verify,
         model_path=task["provenance"]["base_model"]["directory"],
         candidate_sha256s=tuple(plan["kept_candidates"]),
         guard=guard,
@@ -1903,7 +1947,8 @@ def _training_child(task: Mapping[str, object], guard: BudgetGuard,
                 raise PreconditionFailed(
                     "measurement module must expose install"
                 )
-            installed = install(
+            installed = _measurement_call(
+                module, install,
                 candidate_sha256s=tuple(plan["kept_candidates"]),
                 force_stock=(arm == "control"),
                 guard=guard,
