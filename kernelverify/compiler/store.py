@@ -99,11 +99,15 @@ class CandidateStore:
 
     # -- writing ----------------------------------------------------------
     def propose(self, source: str, *, origin: str, parent: str | None = None,
-                prompt: str | None = None) -> str:
+                prompt: str | None = None, response: str | None = None) -> str:
         """Record a new candidate and return its id, which is its source hash.
 
         Raises `Reproposed` if this exact source is already here, which is
         the loop's cheapest rejection and the only one that costs no compile.
+
+        `response` is the model's raw reply, stored verbatim the way the
+        prompt is: R14 requires both, because a candidate whose generation
+        cannot be re-read is not a data point about the generator.
         """
         candidate = digest(source)
         if self._blob_path(candidate, "metal").exists():
@@ -114,6 +118,9 @@ class CandidateStore:
                  "parent": parent}
         if prompt is not None:
             entry["prompt"] = self._write_blob(digest(prompt), "prompt", prompt)
+        if response is not None:
+            entry["response"] = self._write_blob(digest(response), "response",
+                                                 response)
         self._append(entry)
         return candidate
 
@@ -133,6 +140,35 @@ class CandidateStore:
         self._append({"event": "stage", "candidate": candidate, "stage": stage,
                       "passed": passed, "detail": detail, "errored": errored})
 
+    def no_candidate(self, kind: str, *, prompt: str, response: str | None = None,
+                     detail: str = "") -> None:
+        """A model call that produced nothing to hash: refused, timed out,
+        or came back in a shape nothing could extract a kernel from.
+
+        These cannot live under a candidate because there is no source, and
+        dropping them would make the census undercount what the session asked
+        for. The prompt and whatever text came back are stored verbatim, the
+        same R14 rule that covers successful generations; the detail may
+        carry a bounded stderr tail for the operator and is never read by the
+        brief. A journal holding these is not byte-reproducible between runs,
+        because the nondeterminism is the model's, not the store's.
+        """
+        entry = {"event": "no_candidate", "kind": kind,
+                 "prompt": self._write_blob(digest(prompt), "prompt", prompt),
+                 "response": None if response is None else
+                 self._write_blob(digest(response), "response", response),
+                 "detail": detail}
+        self._append(entry)
+
+    def note_generator(self, *, model: str, argv: list[str], schema: dict,
+                       timeout: float) -> None:
+        """The session's audit record: which binary, flags, model id and
+        schema actually ran (R14's "pinned model id"), in the same journal as
+        everything the run produced."""
+        self._append({"event": "generator", "model": model,
+                      "argv": list(argv), "schema": schema,
+                      "timeout": timeout})
+
     # -- reading ----------------------------------------------------------
     def source(self, candidate: str) -> str:
         self._require_known(candidate)
@@ -147,9 +183,19 @@ class CandidateStore:
                     self._blob_path(stored, "prompt").read_text()
         return None
 
+    def response(self, candidate: str) -> str | None:
+        """The model's raw reply this candidate was extracted from, if any."""
+        for entry in self._entries:
+            if entry["event"] == "propose" and entry["candidate"] == candidate:
+                stored = entry.get("response")
+                return None if stored is None else \
+                    self._blob_path(stored, "response").read_text()
+        return None
+
     def get(self, candidate: str) -> Candidate:
         self._require_known(candidate)
-        events = [e for e in self._entries if e["candidate"] == candidate]
+        events = [e for e in self._entries
+                  if e.get("candidate") == candidate]
         proposal = events[0]
         return Candidate(id=candidate, source=self.source(candidate),
                          origin=proposal["origin"], parent=proposal["parent"],
@@ -161,15 +207,22 @@ class CandidateStore:
                 if e["event"] == "propose"]
 
     def census(self) -> dict[str, int]:
-        """How many candidates ended where: the loop's own yield, which is
-        reported whether or not anything was kept."""
+        """How many candidates ended where, and how many model calls produced
+        no candidate at all: the loop's own yield, reported whether or not
+        anything was kept. The no-candidate lines are per event rather than
+        per candidate, because each one was a real request the session paid
+        for and there is no candidate to fold them into."""
         last: dict[str, str] = {}
-        for entry in self._entries:
-            if entry["event"] == "propose":
-                last[entry["candidate"]] = "proposed"
-            else:
-                last[entry["candidate"]] = _outcome_of(entry)
         counts: dict[str, int] = {}
+        for entry in self._entries:
+            event = entry["event"]
+            if event == "propose":
+                last[entry["candidate"]] = "proposed"
+            elif event == "stage":
+                last[entry["candidate"]] = _outcome_of(entry)
+            elif event == "no_candidate":
+                key = f"no-candidate:{entry['kind']}"
+                counts[key] = counts.get(key, 0) + 1
         for outcome in last.values():
             counts[outcome] = counts.get(outcome, 0) + 1
         return counts

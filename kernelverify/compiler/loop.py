@@ -42,6 +42,7 @@ class Proposal:
     source: str
     origin: str
     prompt: str | None = None
+    response: str | None = None
     parent: str | None = None
     extra: dict = field(default_factory=dict)
 
@@ -80,7 +81,8 @@ def run(proposals, funnel: Funnel, store: CandidateStore, *, context: dict,
         try:
             candidate = store.propose(proposal.source, origin=proposal.origin,
                                       parent=proposal.parent,
-                                      prompt=proposal.prompt)
+                                      prompt=proposal.prompt,
+                                      response=proposal.response)
         except Reproposed:
             repeated += 1
             continue

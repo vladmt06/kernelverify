@@ -113,6 +113,83 @@ def test_a_stage_cannot_have_both_errored_and_passed(store):
 
 
 # ---------------------------------------------------------------------------
+# The model's side of the record: responses, misfires, and the session header
+# ---------------------------------------------------------------------------
+def test_a_response_blob_is_stored_verbatim_and_content_addressed(store, tmp_path):
+    """R14: prompt and response verbatim. The response is a blob like the
+    prompt, so identical text is stored once and the journal names it."""
+    reply = '{"kernel_source": "kernel void k() { }"}\n'
+    candidate = store.propose(SOURCE, origin="llm test-model r1",
+                              prompt="write me a kernel", response=reply)
+    assert store.response(candidate) == reply
+    from kernelverify.compiler.store import digest
+    assert (tmp_path / "blobs" / f"{digest(reply)}.response").exists()
+
+
+def test_a_candidate_without_a_response_says_none(store):
+    assert store.response(store.propose(SOURCE, origin="seed")) is None
+
+
+def test_an_old_journal_without_the_new_events_still_loads(tmp_path):
+    """The change is additive: a journal written before responses and
+    no-candidate events existed must read back identically."""
+    first = CandidateStore(tmp_path)
+    candidate = first.propose(SOURCE, origin="seed")
+    first.record(candidate, stage="lint", passed=True)
+
+    reopened = CandidateStore(tmp_path)
+    assert reopened.census() == {"lint:passed": 1}
+    assert reopened.get(candidate).outcome == "lint:passed"
+    assert reopened.response(candidate) is None
+
+
+def test_a_no_candidate_event_is_counted_and_its_response_readable(store, tmp_path):
+    """A model call that yields nothing to hash is still a request the
+    session paid for: it gets its own census line, and the text that came
+    back is stored verbatim so the refusal can be re-read."""
+    store.no_candidate("schema", prompt="the brief",
+                       response="I cannot write that kernel.",
+                       detail="kernel_source missing")
+    store.propose(SOURCE, origin="llm test-model r1")
+
+    assert store.census() == {"no-candidate:schema": 1, "proposed": 1}
+    assert store.candidates() == [store.candidates()[0]], (
+        "a no-candidate event must never appear as a candidate")
+    from kernelverify.compiler.store import digest
+    blob = tmp_path / "blobs" / f"{digest('I cannot write that kernel.')}.response"
+    assert blob.read_text() == "I cannot write that kernel."
+
+
+def test_a_no_candidate_event_may_have_no_response_at_all(store):
+    """A timeout can kill the process before any text arrives."""
+    store.no_candidate("timeout", prompt="the brief")
+    assert store.census() == {"no-candidate:timeout": 1}
+
+
+def test_the_generator_event_carries_model_and_argv_and_breaks_no_reader(store,
+                                                                         tmp_path):
+    """The R14 audit record: the journal proves which binary, flags, model id
+    and schema ran. It names no candidate, so every reader must skip it."""
+    import json
+
+    store.note_generator(model="claude-fable-5",
+                         argv=["claude", "-p", "--model", "claude-fable-5"],
+                         schema={"type": "object"}, timeout=300.0)
+    candidate = store.propose(SOURCE, origin="llm claude-fable-5 r1")
+    store.record(candidate, stage="lint", passed=True)
+
+    [line] = [json.loads(l) for l in
+              (tmp_path / "journal.jsonl").read_text().splitlines()
+              if json.loads(l)["event"] == "generator"]
+    assert line["model"] == "claude-fable-5"
+    assert line["argv"] == ["claude", "-p", "--model", "claude-fable-5"]
+
+    assert store.census() == {"lint:passed": 1}
+    assert store.get(candidate).outcome == "lint:passed"
+    assert store.candidates() == [candidate]
+
+
+# ---------------------------------------------------------------------------
 # The census, which is reported whether or not anything is kept
 # ---------------------------------------------------------------------------
 def test_the_census_counts_where_candidates_died(store):

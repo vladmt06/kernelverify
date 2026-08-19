@@ -68,9 +68,19 @@ def writing_rules() -> str:
 def attempts(store: CandidateStore, *, limit: int = 20) -> str:
     """What has already been tried, newest last, from the typed records only."""
     candidates = store.candidates()
+    census = store.census()
     shown = candidates[-limit:] if limit else candidates
-    if not shown:
+    if not shown and not census:
         return "WHAT HAS BEEN TRIED\n\nNothing yet: this is the first round."
+    if not shown:
+        # Every call so far misfired before producing a candidate. The counts
+        # are still feedback: a model told nothing repeats the same failure.
+        lines = ["WHAT HAS BEEN TRIED", "",
+                 "No candidate has been produced yet; the census below counts "
+                 "the calls that misfired.", "", "CENSUS", ""]
+        for outcome, count in sorted(census.items()):
+            lines.append(f"- {outcome}: {count}")
+        return "\n".join(lines)
 
     lines = ["WHAT HAS BEEN TRIED", ""]
     if len(shown) < len(candidates):
@@ -84,7 +94,7 @@ def attempts(store: CandidateStore, *, limit: int = 20) -> str:
         lines.append(f"{line} - {detail}" if detail else line)
 
     lines += ["", "CENSUS", ""]
-    for outcome, count in sorted(store.census().items()):
+    for outcome, count in sorted(census.items()):
         lines.append(f"- {outcome}: {count}")
     return "\n".join(lines)
 
