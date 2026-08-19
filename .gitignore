@@ -27,3 +27,9 @@ bench/.corpus/
 # repo so it can never reach a generator's context, and is published in the
 # closing record.
 bench/.heldout_salt
+
+# The compiler loop's candidate stores: session evidence, local-only by the
+# same dot-dir convention as .cache/ and .models/. What a session KEEPS is
+# committed through the keep stage (kept bodies, certificates, recordings),
+# never by sweeping a whole store in.
+bench/.candidates/
