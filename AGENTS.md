@@ -47,6 +47,7 @@ Vlad's global instructions still apply; this file adds the project's layout, how
   `stages.py` adapts the real machinery into stages, and is the only place deciding which runner statuses are a verdict about the candidate and which are our own bug.
   `lint.py` attests contract clause C1 from the source text, because a narrow accumulator compiles fine and is deterministic, so nothing else in the funnel can see it.
   `unwritten.py` is the one tolerance-free gate built in sprint 1; read its module docstring before adding another, because it is the worked example of the abstention ruling below.
+  `support.py` is the input-support gate for packed weight codes, built after two adversarial refutations (prereg amendment 2): it derives every device input itself from raw weights, probes by the binding's address arithmetic, and names scales and biases as unscreened in its policy.
   `heldout.py` is the sealed draw: seeded from the candidate hash plus a salt kept out of the repository, with the salt's digest pinned so it cannot be re-rolled, and a verdict type with nowhere to put a reason.
   `brief.py` builds the generator's prompt from typed records only, and derives its writing rules from `lint.py`'s own token list so the rule given and the rule enforced cannot drift.
   `search_space.py` prunes knob settings by what the chip reports it can launch and by nothing else, keeping every rejection with its reason.
