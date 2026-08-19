@@ -41,6 +41,18 @@ Vlad's global instructions still apply; this file adds the project's layout, how
 - `kernelverify/runners/` - the backends that execute a candidate kernel and hand its output to the oracle.
   `metal.py` compiles and dispatches raw Metal shading language inside a worker process the candidate cannot take down with it; `device.py` holds the buffer pool whose absence was the per-case allocation leak; `specialize.py` is template substitution, the door a generated candidate would enter through.
   Importing the package does not import Metal, so a machine without a GPU can still load the harness.
+- `kernelverify/compiler/` - the generate-gate-price-keep loop, which feeds candidates to everything above and decides nothing about correctness itself.
+  `store.py` is append-only memory: a candidate's identity is the sha256 of its source, so a re-proposal is refused before it costs a compile, and stages record `passed`, `failed` or `errored`, the third being a stage that raised and therefore judged nothing.
+  `funnel.py` owns the order and enforces rule V1 twice: a stage list putting a timing stage ahead of a verification stage is refused at construction, and a failure makes every later stage unreachable.
+  `stages.py` adapts the real machinery into stages, and is the only place deciding which runner statuses are a verdict about the candidate and which are our own bug.
+  `lint.py` attests contract clause C1 from the source text, because a narrow accumulator compiles fine and is deterministic, so nothing else in the funnel can see it.
+  `unwritten.py` is the one tolerance-free gate built in sprint 1; read its module docstring before adding another, because it is the worked example of the abstention ruling below.
+  `heldout.py` is the sealed draw: seeded from the candidate hash plus a salt kept out of the repository, with the salt's digest pinned so it cannot be re-rolled, and a verdict type with nowhere to put a reason.
+  `brief.py` builds the generator's prompt from typed records only, and derives its writing rules from `lint.py`'s own token list so the rule given and the rule enforced cannot drift.
+  `search_space.py` prunes knob settings by what the chip reports it can launch and by nothing else, keeping every rejection with its reason.
+- Standing ruling for anything added under `kernelverify/compiler/`, from amendment 1 of `docs/research/2026-08-19-metalrunner-sprint1-prereg.md`: where a gate would need a new rule about what a kernel may do, it ABSTAINS rather than refusing.
+  Five gate designs were adversarially reviewed and all five were broken, three of them because they refused kernels clauses C2 and C3 admit; a determinism gate in particular would contradict what `report/certificate.py` already states in print, that output values are not asserted identical.
+  An abstention reports nothing, records why, and counts as NO coverage, never as a pass, so a session can never present what it declined to judge as something it checked.
 - `kernelverify/extraction/` - captures the final MSL that MLX actually runs, and validates the capture.
   A certificate about "the kernel MLX runs" is worthless if it describes the template instead, so the capture worker rebinds file descriptor 1 itself and one process serves exactly one specialization.
 - `kernelverify/report/` - `certificate.py` says what a kernel's verification proves, splitting byte-bound hashes (what was verified) from protocol-bound assertions (what reproduces); `matrix.py` is the per-chip matrix that decides which measured rows a reader is allowed to believe, and says why for the ones it refuses.
