@@ -64,8 +64,7 @@ class Candidate:
         stages = [e for e in self.events if e["event"] == "stage"]
         if not stages:
             return "proposed"
-        last = stages[-1]
-        return f"{last['stage']}:{'passed' if last['passed'] else 'failed'}"
+        return _outcome_of(stages[-1])
 
     @property
     def alive(self) -> bool:
@@ -75,6 +74,12 @@ class Candidate:
 
 def digest(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _outcome_of(entry: dict) -> str:
+    if entry.get("errored"):
+        return f"{entry['stage']}:errored"
+    return f"{entry['stage']}:{'passed' if entry['passed'] else 'failed'}"
 
 
 class CandidateStore:
@@ -113,11 +118,20 @@ class CandidateStore:
         return candidate
 
     def record(self, candidate: str, *, stage: str, passed: bool,
-               detail: str = "") -> None:
-        """Note what one stage of the funnel did to one candidate."""
+               detail: str = "", errored: bool = False) -> None:
+        """Note what one stage of the funnel did to one candidate.
+
+        `errored` is a third state, not a synonym for failing. A stage that
+        raised did not reach a verdict about the candidate, and counting that
+        as a refusal would let a bug in our own stage code masquerade as a
+        census of bad kernels. Kept separate, the same exception recurring
+        across many candidates is visible for what it is.
+        """
         self._require_known(candidate)
+        if errored and passed:
+            raise ValueError("a stage that errored cannot also have passed")
         self._append({"event": "stage", "candidate": candidate, "stage": stage,
-                      "passed": passed, "detail": detail})
+                      "passed": passed, "detail": detail, "errored": errored})
 
     # -- reading ----------------------------------------------------------
     def source(self, candidate: str) -> str:
@@ -154,8 +168,7 @@ class CandidateStore:
             if entry["event"] == "propose":
                 last[entry["candidate"]] = "proposed"
             else:
-                verdict = "passed" if entry["passed"] else "failed"
-                last[entry["candidate"]] = f"{entry['stage']}:{verdict}"
+                last[entry["candidate"]] = _outcome_of(entry)
         counts: dict[str, int] = {}
         for outcome in last.values():
             counts[outcome] = counts.get(outcome, 0) + 1

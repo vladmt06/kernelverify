@@ -97,6 +97,21 @@ def test_recording_against_an_unknown_candidate_refuses(store):
         store.record("f" * 64, stage="lint", passed=True)
 
 
+def test_a_stage_that_errored_is_a_third_state_not_a_refusal(store):
+    """A stage that raised did not judge the candidate. Counting it as a
+    refusal would let a bug in our own stage code read as a bad kernel."""
+    candidate = store.propose(SOURCE, origin="generator")
+    store.record(candidate, stage="compile", passed=False,
+                 detail="RuntimeError: segfault", errored=True)
+    assert store.get(candidate).outcome == "compile:errored"
+
+
+def test_a_stage_cannot_have_both_errored_and_passed(store):
+    candidate = store.propose(SOURCE, origin="generator")
+    with pytest.raises(ValueError, match="cannot also have passed"):
+        store.record(candidate, stage="compile", passed=True, errored=True)
+
+
 # ---------------------------------------------------------------------------
 # The census, which is reported whether or not anything is kept
 # ---------------------------------------------------------------------------
