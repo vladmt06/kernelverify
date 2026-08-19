@@ -262,3 +262,14 @@
 - Cons: the answer may be that 4.0 is wrong in either direction, and a K that moves obliges re-emission of the kv certificates and a bump of a kv ensemble version; the operator's floor also carries a softmax, so the zero-variance regimes that bind every other tolerance decision here may not be the binding ones and the grid needs its own thought.
 - Context: `native_ops.py::kv_tolerance` (its docstring states the borrow), `KV_MEMBERS` beside it, `bench/emit_pack_certificates.py::contract_version_for` (the certificate prose that now says "K borrowed from quantized_matmul, uncalibrated"); surfaced by the verification-design audit of 2026-08-15 and labelled by task V2 of the 2026-08-16 amendments plan.
 - Depends on / blocked by: nothing technical; it is a CPU harness that can run beside any GPU measurement.
+
+## The closing idle check discards a whole run on one sample
+
+- What: decide what evidence the end of a run needs, and give `check_idle_after` that instead of a single `idle_check()` snapshot; a streak like the opening gate's, a mid-run sampler that records when the window broke, or a rule that separates a blip from a busy machine.
+- Why: the opening gate requires five clean samples thirty seconds apart before a run may start, and the closing check requires one, so the two ends of the same run are held to different standards.
+  Measured on 2026-08-18 and 2026-08-19: two batched-decode runs of forty-four minutes each completed all ten cells with zero diverged rounds, zero hard fallbacks and exact routed counts at every cell, and both were discarded by their closing sample, the first on `airportd at 46% CPU` and the second on `WindowServer at 15% CPU` against a threshold of 15.
+  The two runs agreed to within 0.4 points on every cell, so what was thrown away was not a doubtful measurement.
+- Pros: a run is the expensive thing here and a sample is the cheap thing, so the asymmetry is backwards; and the closing check is one function with one caller pattern, so whatever replaces it lands in one place.
+- Cons: the closing sample is the only evidence the harness has that the quiet window held for the whole run, and a weaker rule admits a run whose middle was disturbed, which is the failure the check exists to catch; a mid-run sampler is new machinery on the honesty path and has to decide what a disturbed round means before it can annotate one.
+- Context: `bench/machine_state.idle_check` samples load averages, `ps -Ao pcpu` competitors above `BUSY_PROCESS_PCT = 15.0`, and power state, all at one instant; `bench/serve_sub4bit.check_idle_after` returns 1 when that instant is dirty; the detached runner's opening streak is five clean samples.
+- Depends on / blocked by: nothing technical, but it must not be done while a run of this lane is waiting to bind, because changing the rule that judges a measurement after seeing the measurement is what the pre-registration discipline exists to prevent.
