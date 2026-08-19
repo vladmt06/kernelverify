@@ -22,6 +22,7 @@ from __future__ import annotations
 from kernelverify.compiler.funnel import Stage, StageOutcome
 from kernelverify.compiler.heldout import Verdict, draw
 from kernelverify.compiler.lint import lint
+from kernelverify.compiler.support import screen as support_screen
 from kernelverify.compiler.unwritten import screen
 from kernelverify.runners.result import RunStatus
 from kernelverify.runners.spec import KernelSpec
@@ -112,6 +113,27 @@ def unwritten_stage(name: str = "unwritten") -> Stage:
         spec = KernelSpec(source=source, entry_point=entry_point,
                           bindings=bindings, launch=launch)
         report = screen(runner, spec, gate_cases)
+        return StageOutcome(report.ok, report.reason)
+
+    return Stage(name=name, run=run, verifies=True)
+
+
+def support_stage(name: str = "support") -> Stage:
+    """Does the output depend on the weight bytes it is specified to depend on?
+
+    Only meaningful for candidates of the quantized-matmul shape, so the
+    context supplies the raw weights and the bit width; operations without
+    weights simply do not wire this stage. Like every gate stage, the spec is
+    built from the source the funnel handed over, so the text screened is the
+    text the journal recorded.
+    """
+    def run(source, *, runner, entry_point, bindings, launch, support_weights,
+            support_bits, **_context) -> StageOutcome:
+        def spec_for(_d_out, _d_in):
+            return KernelSpec(source=source, entry_point=entry_point,
+                              bindings=bindings, launch=launch)
+
+        report = support_screen(runner, spec_for, support_weights, support_bits)
         return StageOutcome(report.ok, report.reason)
 
     return Stage(name=name, run=run, verifies=True)

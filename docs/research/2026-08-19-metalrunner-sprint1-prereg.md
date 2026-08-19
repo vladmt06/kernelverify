@@ -343,3 +343,26 @@ Section 6's funnel is unchanged in order.
 Stage 3 ships with one gate rather than five in sprint 1: unwritten output, built as described above.
 NaN and infinity propagation and awkward shapes remain buildable without a ruling and are narrowed by their reviews; guard rows and determinism are blocked as recorded.
 This amendment is written after the unwritten-output gate's code landed rather than before, which is late by this document's own rule, and is recorded as such.
+
+---
+
+## Amendment 2, 2026-08-19: a sixth gate, input support, built after two adversarial rounds
+
+The NaN-dye review measured a blind spot no planned gate covers: for a quantized matmul the packed integer codes carry essentially all the weight data, no out-of-range value exists in an integer carrier for a dye to use, and a real support fault on the codes was measured passing the shipped tolerance gate on this repository's own near-zero input mode.
+A kernel can ignore a quarter of its weights and leave every gate green.
+
+The support gate closes that class: perturb one weight code through the contract quantizer, and every output cell whose fp64 reference moves by more than both runs' error envelopes plus two output ulps must change its bits.
+The witness condition is an inequality, not a threshold, so no tolerance enters; judgement is one-directional, so formulation freedom under C2 and C3 cannot produce a false positive.
+
+The design was refuted twice before being built, and both attacks changed it.
+
+- The contract attack measured a correct kernel being refused when the builder's packing disagreed with the oracle's by one code position.
+  The gate now derives every device input itself from the raw weights through the contract-anchored quantize-and-pack path, and its API has no parameter through which pre-packed device bytes can arrive.
+- The same attack proved the scales and biases bindings unscreenable through the raw-weight oracle: no single-binding perturbation of them exists.
+  They are named as unscreened in the gate's policy string rather than left as a silent gap; the two-binding power-of-two group rescale is recorded here as the future extension.
+- The coverage attack planted two one-line support faults in the shipped kernel, a dead guard on the two-word read and a wrong lane stride, and both passed the first design at 49x to 443x margin because its probe positions came from the operator's index space, which provably never reaches a word-straddling code.
+  Probe positions now come from the binding's address arithmetic: every alignment residue a code can have inside a word is covered completely, and a lane-stride band of block indices is covered so a wrong stride in (32, 64] is caught at its first skipped block; beyond that band block positions are sampled, and the policy says which is which.
+- One further change came from re-deriving the dead-guard case: a straddling code's perturbation flips exactly the bits living in its second word, leaving the first word identical, so a broken two-word read sees no change at all and the fault is caught for every original value rather than only when the low bits happen to differ.
+
+Both planted faults are acceptance tests now and both are refused; the correct kernel screens clean at every judged target.
+Nondeterminism abstains rather than refusing, per amendment 1, and abstentions count as no coverage.
