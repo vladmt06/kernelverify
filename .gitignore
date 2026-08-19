@@ -21,3 +21,9 @@ bench/.corpus/
 
 # Rendered planning pages from the lavish CLI: session artefacts, not source.
 .lavish/
+
+# The held-out draw's secret salt (sprint 1 pre-registration, section 7). Its
+# sha256 is committed in the pre-registration; the salt itself stays off the
+# repo so it can never reach a generator's context, and is published in the
+# closing record.
+bench/.heldout_salt
