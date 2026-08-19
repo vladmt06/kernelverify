@@ -97,6 +97,9 @@ Vlad's global instructions still apply; this file adds the project's layout, how
   Four arms at `B_GRID = [1, 4, 5, 6, 7, 8, 9, 11, 12, 16]`; the in-window cells 5 to 9 are the whole routed zone and all five must pass for GO.
   It configures the engine with `prefill_batch_size = 16` so every decode call has full width B; under the server default of 8 a burst above 8 streams decodes its first steps at width 8, which is inside the routed window, and that is registered as out of scope.
   A decode pass is a rank-2 call of width B and the one prefill is width `B * (PROMPT_T - 1)`; the engine samples one step ahead, so the decode-call count is observed and never asserted to equal `GEN_TOKENS`.
+  Run on 2026-08-19 through the detached runner, 44 minutes: ZONE GO, all five in-zone cells WIN, +5.2% to +22.2% against stock 3-bit and +4.1% to +17.0% against stock 4-bit, with zero diverged rounds and the exact routed count matched at every cell.
+  Two earlier attempts completed the whole grid and were discarded by the closing idle check; their per-cell deltas agreed with the binding run to within 0.4 points and section 9 records them as reproducibility rather than as a result.
+  Read B = 7 with its finding: both stock arms dip at width 7 while the routed arm rises, so that cell's +22.2% is inflated by a weak baseline and the window's lower end is the number to lean on.
 - `bench/price_qmv_boundary.py` - the routing-boundary pricing probe (verify-then-time, interleaved arms, refusal-gated), with its pre-registered rule in the module docstring: what makes a cell WIN, and the only way a routed window may widen.
   ADR 0015 is the reading of its 2026-08-15 run.
 - `bench/calibrate_k.py` - measures what the admissible-implementation contract demands of K, and how many ensemble members it takes to represent that contract.
@@ -146,7 +149,7 @@ cd /Users/vlad/kernelverify
 .venv/bin/python bench/emit_pack_certificates.py      # needs the Metal GPU; rewrites bench/.certificates/ and its MANIFEST.md
 .venv/bin/python -u bench/serve_sub4bit.py --ab       # needs the Metal GPU and both pinned artifacts; fills sections 9-10 of the sub4bit findings doc
 bench/start_binding_run.sh bench/serve_spec_decode.py # ~14 min detached; needs the Metal GPU and ALL FOUR pinned models; fills sections 9-10 of the spec-decode e2e doc
-bench/start_binding_run.sh bench/serve_batch_decode.py # ~25 min detached; needs the Metal GPU and BOTH pinned 4B models; fills sections 9-10 of the batch-decode e2e doc
+bench/start_binding_run.sh bench/serve_batch_decode.py # ~45 min detached; needs the Metal GPU and BOTH pinned 4B models; fills sections 9-10 of the batch-decode e2e doc
 ```
 
 - `serve_spec_decode.py` is the one harness that needs four pinned models rather than two: the 3-bit and 4-bit targets plus `qwen3-0.6b-4bit-g64` and `qwen3-1.7b-4bit-g64` as drafts.

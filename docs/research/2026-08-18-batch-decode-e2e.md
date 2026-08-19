@@ -187,3 +187,106 @@ Section 4 says a hard fallback invalidates its round, and says separately that a
 A hard fallback at a routed site drops the observed count below the expected one, so reading an invalid round in that check would turn a registered per-round exclusion into a run-wide stop, which is the opposite of what invalidating one round means.
 From this amendment the arm 1 check reads the rounds section 4 leaves valid, which is what the apparatus this run inherits already does.
 Arm 4's expected zero is unchanged and is read in every round, because no fallback can push a count above zero.
+
+## 9. What the run did
+
+The binding run is `bench/serve_batch_decode.py` under the detached runner on 2026-08-19, forty-four minutes, exit 0, with the opening idle streak and the closing idle sample both clean.
+It is the third attempt.
+The first two completed all ten cells and were discarded by the closing idle check, on `airportd at 46% CPU` and on `WindowServer at 15% CPU` against a threshold of 15.
+Their per-cell deltas agreed with the binding run to within 0.4 points everywhere, which is recorded here as evidence that the measurement reproduces and is not quoted as a result, because a run that fails its closing check is not binding.
+The asymmetry that discarded them, five clean samples required to start against one to finish, is queued in `TODOS.md` rather than changed, because the rule that judges a measurement must not move while that measurement waits to bind.
+
+Provenance: MLX 0.32.0, mlx-lm 0.31.3, Apple M3 Pro (Mac15,7), 12 cores, 36 GiB, Darwin 26.5.2 build 25F84, both targets pinned by sha256 over every file.
+The ten prompt digests were identical across all three attempts, so every attempt fed the engine the same token ids.
+
+The engine behaved exactly as section 4 registered.
+Every arm of every round made one prefill call of width `B * 511` and 129 decode calls of width exactly B, while returning 128 tokens per stream: the extra call is the engine's one-step lookahead, which is why section 4 records the decode-call count rather than asserting it is 128.
+The decode-call count was equal across the four arms in every round of every cell.
+Every stream finished on `length`, and `generation_tokens` was `128 * B` in every arm of every round.
+
+The interception is exact.
+The routing table admits 252 sites at every in-zone width, so the expected routed count per cell is 129 decode passes times 252 sites times 5 rounds, which is 162,540, and arm 1 observed exactly that at B = 5, 6, 7, 8 and 9.
+Arm 4 routed zero in every round, and the null cells routed zero with zero admitting sites.
+There were no hard fallbacks in any round.
+
+Divergence report: none.
+Arm 1 and arm 2 produced identical tokens in every stream of every round of every cell, and arm 4 equalled arm 2 everywhere, so no round was excluded and no cell was `identity-unstable`.
+
+Per arm per cell, median aggregate throughput in tokens per second with `spread_pct` beside it:
+
+| B | arm 1 ours | arm 2 stock 3-bit | arm 3 stock 4-bit | arm 4 control |
+|---|---|---|---|---|
+| 1 | 62.92 (2.51) | 62.60 (5.71) | 51.12 (2.47) | 62.70 (6.24) |
+| 4 | 166.60 (8.93) | 166.77 (2.05) | 168.01 (3.11) | 166.92 (2.08) |
+| 5 | 186.80 (0.75) | 177.50 (0.40) | 179.47 (0.22) | 177.47 (0.35) |
+| 6 | 195.13 (0.08) | 170.80 (0.05) | 178.73 (0.09) | 170.79 (0.14) |
+| 7 | 200.79 (0.04) | 164.28 (0.10) | 171.62 (0.04) | 164.32 (0.09) |
+| 8 | 210.99 (0.98) | 183.20 (0.11) | 190.77 (0.06) | 183.19 (0.08) |
+| 9 | 208.40 (1.09) | 175.58 (0.05) | 178.71 (0.04) | 175.60 (0.05) |
+| 11 | 180.39 (0.08) | 180.41 (0.05) | 181.52 (0.02) | 180.38 (0.06) |
+| 12 | 193.60 (0.04) | 193.61 (0.03) | 193.52 (0.02) | 193.63 (0.04) |
+| 16 | 248.59 (1.46) | 248.64 (1.44) | 249.04 (1.37) | 248.50 (1.48) |
+
+OB1, the kernel question, arm 1 against arm 2, with the interception's own host cost as arm 4 against arm 2:
+
+| B | delta | floor F12 | ceiling | decider | host cost | routed calls | verdict |
+|---|---|---|---|---|---|---|---|
+| 1 | +0.497% | 5.713 | 0 | no | +0.148% | 0 | NULL |
+| 4 | -0.106% | 8.931 | 0 | no | +0.085% | 0 | NULL |
+| 5 | +5.237% | 0.753 | 5.70 | yes | -0.015% | 162,540 | WIN |
+| 6 | +14.246% | 0.082 | 14.69 | yes | -0.004% | 162,540 | WIN |
+| 7 | +22.225% | 0.097 | 16.44 | yes | +0.024% | 162,540 | WIN |
+| 8 | +15.174% | 0.981 | 15.65 | yes | -0.001% | 162,540 | WIN |
+| 9 | +18.690% | 1.090 | 15.65 | yes | +0.006% | 162,540 | WIN |
+| 11 | -0.013% | 0.078 | 0 | no | -0.019% | 0 | NULL |
+| 12 | -0.007% | 0.038 | 0 | no | +0.010% | 0 | NULL |
+| 16 | -0.018% | 1.457 | 0 | no | -0.056% | 0 | NULL |
+
+OB2, the capability question, arm 1 against arm 3, with the artifact's own contribution as arm 2 against arm 3:
+
+| B | delta | floor F13 | artifact alone | clears upward | attribution | perplexity pair |
+|---|---|---|---|---|---|---|
+| 5 | +4.083% | 0.753 | -1.097% | yes | joint | 22.7069 against 15.2355 |
+| 6 | +9.177% | 0.086 | -4.437% | yes | joint | 22.7069 against 15.2355 |
+| 7 | +17.001% | 0.042 | -4.274% | yes | joint | 22.7069 against 15.2355 |
+| 8 | +10.601% | 0.981 | -3.971% | yes | joint | 22.7069 against 15.2355 |
+| 9 | +16.613% | 1.090 | -1.750% | yes | joint | 22.7069 against 15.2355 |
+
+OB3, the engine against the loop, read before the zone verdict:
+
+| B | engine ratio | published loop ratio | ratio delta | threshold | reading |
+|---|---|---|---|---|---|
+| 5 | 1.0524 | 1.0570 | -0.44% | 0.753 | AT-OR-BELOW-LOOP |
+| 6 | 1.1425 | 1.1469 | -0.39% | 0.100 | AT-OR-BELOW-LOOP |
+| 7 | 1.2222 | none | none | none | no-loop-number |
+| 8 | 1.1517 | 1.1565 | -0.41% | 0.981 | AT-OR-BELOW-LOOP |
+| 9 | 1.1869 | none | none | none | no-loop-number |
+
+## 10. What it means
+
+The zone verdict is **GO**.
+Every in-zone cell reads OB1 WIN and clears its OB2 floor upward: B = 5, 6, 7, 8 and 9 all pass.
+The quoted numbers are the ranges, never a single favourite: through mlx-lm's own batched engine, our kernel makes a 3-bit Qwen3-4B **5.2% to 22.2%** faster than the same engine running stock 3-bit, and **4.1% to 17.0%** faster than the same engine running stock 4-bit, at 5 to 9 concurrent streams, against 22.7069 perplexity for the 3-bit artifact and 15.2355 for the 4-bit one.
+For an operator that is 26.4 tokens per second per stream at eight concurrent streams where stock 4-bit gives 23.9, on a model whose weights are 1.76 GB against the 4-bit artifact's 2.26 GB.
+
+The win the A/B measured in our own loop survives the engine, and it survives it in the direction registered in advance.
+At all three widths with a published loop number the engine's ratio sits below the loop's, by 0.39 to 0.44 points, which is section 6's `AT-OR-BELOW-LOOP` expectation: routing inside a real engine recovers a little less than a bare decode loop, because the engine adds work the loop never did.
+
+Three findings sit beside the verdict.
+
+The overshoot at B = 7 and B = 9 is a baseline effect, not extra kernel.
+Both cells beat their ceilings, +22.2% against 16.44% and +18.7% against 15.65%, and both of those ceilings were substitutions written into section 5 because no serve-level number existed at those widths.
+The run shows why the substitutions were wrong: stock 3-bit's aggregate throughput falls from 177.50 at B = 5 to 164.28 at B = 7 and then jumps to 183.20 at B = 8, and stock 4-bit dips at exactly the same width, 179.47 to 171.62 and back to 190.77.
+Two independent stock paths dipping together at width 7 while the routed arm rises monotonically, 186.80 to 195.13 to 200.79 to 210.99, is evidence that MLX's stock quantized matmul is width-sensitive, with a peak at 8 and a trough at 7, and that our fused kernel is not.
+The honest reading of B = 7 is therefore that the ratio is inflated by a weak baseline at that width, and the claim's lower end, +5.2% and +4.1% at B = 5, is the number to lean on.
+
+The capability gain is entirely the kernel's doing.
+Stock 3-bit is *slower* than stock 4-bit through this engine at every in-zone width, by 1.1 to 4.4 points, so the artifact alone loses on speed as well as on perplexity, and every point of "3-bit beating 4-bit" comes from routing.
+That is why `composed_attribution` reads `joint` at all five cells rather than crediting the smaller model.
+
+The interception costs nothing measurable.
+Arm 4 against arm 2, the same code path with eligibility evaluated and the result discarded, differs by at most 0.024% inside the window and 0.148% anywhere in the grid, and every null cell reads NULL with zero routed calls by the table and arm 1 within its control floor.
+
+Two limits belong on the record.
+B = 1 and B = 4 have floors of 5.71 and 8.93 points, far larger than the rest of the grid, so their NULL readings rest on the routing table's zero rather than on tight throughput agreement; they are honest null cells but not precise ones.
+And every exclusion in section 7 still stands: this says nothing about ragged prompts, about arrivals over time, about the server's default admission in eights, about the HTTP path, about non-greedy sampling, or about 4-bit routing, which routes nowhere today.
