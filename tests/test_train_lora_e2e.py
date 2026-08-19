@@ -455,15 +455,33 @@ def test_o3_reports_the_cell_c_interval_verdict():
     assert decide_o3(result)["verdict"] == "REFUSED"
 
 
-def test_o1_o2_keep_their_exact_thresholds_while_o3_applies_its_floor():
+def test_one_floor_rule_serves_every_outcome(_amendment_3=None):
+    """Amendment 3. These samples used to read GO at O1 and REFUSED at O3,
+    which is not two readings of one rule. The floor now lives in the
+    comparison, so the endpoints clearing 1.0 is no longer enough on its own
+    and every outcome inherits the same answer."""
     noisy = time_comparison([1.0, 100.0], [111.0, 112.0])
-    assert noisy["verdict"] == "WIN"
-    assert noisy["delta_pct"] < noisy["noise_floor_pct"]
-    assert decide_o1(
-        noisy, ours_peak_gb=20.0, stock_peak_gb=20.0
-    )["verdict"] == "GO"
+
+    assert noisy["ratio_lo"] > 1.10, "the endpoints alone would have claimed"
+    assert abs(noisy["delta_pct"]) < noisy["noise_floor_pct"]
+    assert noisy["clears_noise_floor"] is False
+    assert noisy["verdict"] == "REFUSED", "a delta inside its floor is noise"
+
+    assert decide_o1(noisy, ours_peak_gb=20.0,
+                     stock_peak_gb=20.0)["verdict"] == "NO-GO"
     assert decide_o2(noisy)["verdict"] == "BELOW-TARGET"
     assert decide_o3(noisy)["verdict"] == "REFUSED"
+
+
+def test_o1_keeps_its_two_registered_conjuncts_on_a_clean_comparison():
+    """Narrowing what may be claimed must not make GO unreachable."""
+    clean = time_comparison([10.0, 10.1, 10.05], [12.0, 12.1, 12.05])
+    assert clean["verdict"] == "WIN" and clean["ratio_lo"] > 1.10
+    assert decide_o1(clean, ours_peak_gb=20.0,
+                     stock_peak_gb=21.0)["verdict"] == "GO"
+    # ... and the peak-footprint conjunct still bites on its own.
+    assert decide_o1(clean, ours_peak_gb=22.0,
+                     stock_peak_gb=21.0)["verdict"] == "NO-GO"
 
 
 # Slower forced-stock control is an interface finding only when it clears its floor.
@@ -616,6 +634,92 @@ def test_every_cell_void_still_produces_every_registered_outcome():
     assert all(result["O4"][name]["interface_finding"] is False
                for name in CELL_BY_NAME)
     assert result["O5"]["generated"] >= result["O5"]["kept"]
+
+
+# Section 9 owes O4 at every cell and O3 alongside O1 whatever else happened,
+# so a void cell may not delete the readings the other cells did produce.
+def test_a_void_cell_does_not_erase_the_other_outcomes_from_the_record():
+    """The driver, not the pure function: reporting only O5 because one cell
+    voided would throw away three registered readings that were measured."""
+    runtime = _Runtime()
+    real_run_arm = runtime.run_arm
+
+    def one_bad_cell(plan, provenance, cell, round_number, arm):
+        record = real_run_arm(plan, provenance, cell, round_number, arm)
+        if cell.name == "D" and arm == "ours" and round_number > 1:
+            record["adapter_written"] = False
+        return record
+
+    runtime.run_arm = one_bad_cell
+    assert run_binding(_plan(), runtime, results_dir="/results") == 1
+
+    [(path, record)] = runtime.writes
+    assert record["binding"] is False, "a void cell must not bind"
+    assert path.name.endswith(".REFUSED.json")
+    # ... and yet every registered outcome is still on the page.
+    assert set(record["outcomes"]) >= {"O1", "O2", "O3", "O4", "O5"}
+    assert list(record["outcomes"])[0] == "O4"
+    assert record["outcomes"]["O4"]["D"]["interface_finding"] is False
+    assert record["outcomes"]["O3"]["verdict"] in {"WIN", "LOSS", "REFUSED"}
+
+
+# O4 registers the distance the interval sits BELOW 1.0, which is not the same
+# number as how much longer the wrapper takes, and is always the smaller of the
+# two. Using the larger one manufactures findings against the interface.
+def test_o4_measures_the_wrapper_against_the_registered_distance():
+    """Section 9 registers how far the interval sits BELOW 1.0, which is not
+    how much longer the wrapper takes. The second is always the larger, so
+    gating on it would report a finding against the interface on a comparison
+    the floor rule calls noise."""
+    comparison = time_comparison([10.475, 11.0, 11.52], [10.0, 10.0, 10.0])
+    below_one = 100 * (1 - comparison["ratio"])
+    slowdown = 100 * (1 / comparison["ratio"] - 1)
+
+    assert below_one < comparison["noise_floor_pct"] < slowdown, (
+        "the two quantities must straddle the floor for this to be a test")
+    assert comparison["verdict"] == "REFUSED"
+
+    result = decide_o4({name: comparison for name in CELL_BY_NAME})["A"]
+    assert result["wrapper_below_one_pct"] == pytest.approx(below_one)
+    assert result["wrapper_slowdown_pct"] == pytest.approx(slowdown)
+    assert result["interface_finding"] is False
+
+
+def test_o4_still_finds_a_wrapper_cost_that_clears_its_floor():
+    """Narrowing what counts must not make the finding unreachable."""
+    comparison = time_comparison([12.0, 12.1, 12.05], [10.0, 10.05, 10.02])
+    assert comparison["verdict"] == "LOSS"
+    result = decide_o4({name: comparison for name in CELL_BY_NAME})["A"]
+    assert result["interface_finding"] is True
+
+
+# One warmed sample is a point, not an interval, and its spread is 0.0.
+def test_a_single_warmed_round_refuses_rather_than_reading_a_verdict():
+    rounds = _rounds()
+    for number in (3, 4, 5):
+        rounds[number - 1]["ours"]["adapter_written"] = False
+    reading = build_cell_reading("B", rounds)
+
+    assert reading["binding"] is False
+    assert reading["eligible_rounds"] == [1, 2]
+    assert "fewer than two eligible rounds after the first" in reading["reasons"]
+
+
+def test_arm_metrics_refuses_a_single_warmed_sample_directly():
+    rounds = [_round(1), _round(2)]
+    with pytest.raises(RunInvalid, match="after the first"):
+        arm_metrics(rounds, "ours")
+
+
+def test_a_zero_width_warmed_interval_would_have_read_as_a_win():
+    """Why the guard above is needed, stated as the number it prevents: one
+    sample per arm gives a 0.0% floor and an interval of zero width, so any
+    direction at all clears it."""
+    comparison = time_comparison([2.0], [2.2])
+    assert comparison["noise_floor_pct"] == 0.0
+    assert comparison["ratio_lo"] == comparison["ratio_hi"]
+    assert comparison["verdict"] == "WIN"
+    assert clears_floor(comparison["delta_pct"], comparison["noise_floor_pct"])
 
 
 # A larger batch is throughput at equal memory and is never relabelled speed.
@@ -1384,3 +1488,95 @@ def test_child_precondition_refusal_happens_before_training(tmp_path, monkeypatc
     )
     assert harness.child_main(task, out) == EXIT_PRECONDITION
     assert not out.exists()
+
+
+# A misspelled measurement module is a permanent refusal, never a crash: the
+# detached runner reads exit 1 with a traceback as something worth retrying.
+@pytest.mark.parametrize("name", [
+    "definitely_not_a_module",          # absent top level: find_spec returns None
+    "definitely_not_a_module.lora",     # absent parent: find_spec RAISES
+    "metalrunnr.lora",                  # the transposition that motivated this
+])
+def test_an_unimportable_measurement_module_refuses_by_number(name):
+    plan = _plan()
+    plan["measurement_module"] = name
+    with pytest.raises(PreconditionFailed, match="measurement module"):
+        preflight_inputs(
+            plan,
+            machine={"chip": "Apple M3 Pro", "memory_bytes": 36 * 2**30},
+        )
+
+
+def test_find_spec_really_does_raise_on_an_absent_parent():
+    """The premise of the guard above, asserted against the interpreter rather
+    than assumed, so the guard cannot outlive its reason."""
+    import importlib.util
+
+    assert importlib.util.find_spec("definitely_not_a_module") is None
+    with pytest.raises(ModuleNotFoundError):
+        importlib.util.find_spec("definitely_not_a_module.lora")
+
+
+# ---------------------------------------------------------------------------
+# Amendment 3: the reference arm's own spread is what detects a moved clock.
+# These arms are separate processes in rotated slots, not interleaved, so
+# nothing else in the harness can see an excursion that lands on one arm.
+# ---------------------------------------------------------------------------
+def test_a_reference_arm_that_moved_rejects_rather_than_claiming():
+    """The scenario that motivated the amendment, with its own numbers: the
+    floor does not catch it, because a contaminated reference arm widens the
+    floor more slowly than it moves the ratio."""
+    ours = [100.0, 101.0, 102.0, 101.0, 100.0]
+    contaminated = [130.0, 190.0, 200.0, 195.0, 205.0]
+
+    comparison = time_comparison(ours, contaminated)
+    assert comparison["reference_spread"] > harness.MAX_REFERENCE_SPREAD
+    assert comparison["verdict"] == "REJECTED"
+
+    # Without the rule this reads as a comfortable win that clears its floor.
+    assert comparison["ratio_lo"] > 1.10
+    assert abs(comparison["delta_pct"]) > comparison["noise_floor_pct"]
+
+    # And the truth, had the machine held still, is nowhere near a GO.
+    honest = time_comparison(ours, [104.0, 105.0, 104.0, 106.0, 105.0])
+    assert honest["verdict"] == "WIN" and honest["ratio_lo"] < 1.10
+
+
+def test_a_rejected_comparison_never_reaches_a_go():
+    rejected = time_comparison([100.0, 101.0], [130.0, 205.0])
+    assert rejected["verdict"] == "REJECTED"
+    assert decide_o1(rejected, ours_peak_gb=20.0,
+                     stock_peak_gb=21.0)["verdict"] == "NO-GO"
+    assert decide_o2(rejected)["verdict"] == "BELOW-TARGET"
+    assert decide_o3(rejected)["verdict"] == "REJECTED"
+
+
+def test_a_rejected_comparison_stops_its_whole_cell_binding():
+    """Every comparison in a cell reads the same rounds, so a clock that moved
+    under one of them moved under all of them."""
+    rounds = _rounds()
+    for number, wall in enumerate([130.0, 190.0, 200.0, 195.0, 205.0], 1):
+        rounds[number - 1]["stock"]["full_job_wall_s"] = wall
+
+    reading = build_cell_reading("B", rounds)
+    assert reading["binding"] is False
+    assert reading["verdict"] == "REJECTED"
+    assert "reference arm spread" in reading["reasons"][0]
+
+
+def test_a_steady_reference_arm_still_binds():
+    """The rule must not refuse an ordinary run: a limit that rejects
+    everything measures nothing."""
+    reading = build_cell_reading("B", _rounds())
+    assert reading["binding"] is True
+    assert reading["ours_vs_stock"]["verdict"] != "REJECTED"
+
+
+def test_the_reference_arm_is_the_second_of_the_two():
+    """Orientation matters: a wild FIRST arm is not what this detects, because
+    the interval endpoints already pair its worst against the reference's
+    best. Only the reference arm's own movement is invisible to them."""
+    wild_first = time_comparison([1.0, 100.0], [10.0, 10.0])
+    assert wild_first["verdict"] != "REJECTED"
+    wild_second = time_comparison([10.0, 10.0], [1.0, 100.0])
+    assert wild_second["verdict"] == "REJECTED"

@@ -50,6 +50,13 @@ from memory_guard import (
 
 
 ARMS = ("ours", "stock", "control")
+# Amendment 3. A comparison whose REFERENCE arm's samples spread wider than
+# this describes the machine, not the arms, so it claims no direction and its
+# cell does not bind. Inherited from the decode lane's kernel arms and NOT
+# calibrated for full-job wall time, which is a far steadier quantity: this is
+# a loose upper bound that catches gross excursions, to be tightened once the
+# Day 1 profile has measured what round-to-round variation is normal.
+MAX_REFERENCE_SPREAD = 1.5
 ROUNDS = 5
 MLX_VERSION = "0.32.0"
 MLX_LM_VERSION = "0.31.3"
@@ -366,12 +373,28 @@ def _spread_pct(samples: Sequence[float]) -> float:
 
 
 def time_comparison(first: Sequence[float], second: Sequence[float]) -> dict:
-    """The pricing probe's strict interval rule for elapsed-time samples.
+    """The interval verdict for elapsed-time samples, floor rule included.
 
-    The probe itself is not a clean CPU-only dependency: importing it imports
-    MLX and registers a Metal shutdown callback even when no device exists.
-    These are the same endpoint formulas, kept here so this module stays
-    importable on the no-Metal machines its decision tests target.
+    The endpoint formulas are the pricing probe's, kept here rather than
+    imported because importing that probe pulls in MLX, and these decision
+    rules must stay testable on a machine with no device.
+
+    Two things beyond the probe's endpoints, both from amendment 3, and both
+    living HERE rather than in the outcomes so that one rule serves every
+    outcome instead of each one deciding again:
+
+    REJECTED when the reference arm - the second of the two - spreads wider
+    than the class limit. Interleaving would equalise a clock excursion across
+    arms but cannot detect one, and these arms are not even interleaved: they
+    are separate processes in rotated slots. The reference arm's own spread is
+    the only registered signal that the machine moved, and an excursion that
+    lifts the reference arm's minimum moves the ratio faster than it widens
+    the floor, so the floor alone does not see it.
+
+    And a direction is claimed only when the delta also clears its own noise
+    floor. Section 8.3 states that rule for every comparison; an outcome that
+    read the endpoints directly would be deciding it a second time, which is
+    how O1 and O3 came to disagree about the same samples.
     """
     first_values = _positive_samples(first, "first arm")
     second_values = _positive_samples(second, "second arm")
@@ -380,24 +403,31 @@ def time_comparison(first: Sequence[float], second: Sequence[float]) -> dict:
     ratio = median_second / median_first
     ratio_lo = min(second_values) / max(first_values)
     ratio_hi = max(second_values) / min(first_values)
-    if ratio_lo > 1.0:
+    spread_first = _spread_pct(first_values)
+    spread_second = _spread_pct(second_values)
+    floor = max(spread_first, spread_second)
+    delta_pct = 100 * (ratio - 1)
+    reference_spread = max(second_values) / min(second_values)
+    if reference_spread > MAX_REFERENCE_SPREAD:
+        verdict = "REJECTED"
+    elif ratio_lo > 1.0 and clears_floor(abs(delta_pct), floor):
         verdict = "WIN"
-    elif ratio_hi < 1.0:
+    elif ratio_hi < 1.0 and clears_floor(abs(delta_pct), floor):
         verdict = "LOSS"
     else:
         verdict = "REFUSED"
-    spread_first = _spread_pct(first_values)
-    spread_second = _spread_pct(second_values)
     return {
         "median_first_s": median_first,
         "median_second_s": median_second,
         "ratio": ratio,
         "ratio_lo": ratio_lo,
         "ratio_hi": ratio_hi,
-        "delta_pct": 100 * (ratio - 1),
+        "delta_pct": delta_pct,
         "spread_first_pct": spread_first,
         "spread_second_pct": spread_second,
-        "noise_floor_pct": max(spread_first, spread_second),
+        "noise_floor_pct": floor,
+        "reference_spread": reference_spread,
+        "clears_noise_floor": clears_floor(abs(delta_pct), floor),
         "verdict": verdict,
         "samples_first_s": first_values,
         "samples_second_s": second_values,
@@ -510,8 +540,15 @@ def arm_metrics(rounds: Sequence[Mapping[str, Mapping[str, object]]],
         statistics.median(records[arm]["step_seconds"][warmup_steps:])
         for records in rounds if records[arm]["round"] > 1
     ]
-    if not warmed:
-        raise RunInvalid("no eligible warmed round remains after round 1")
+    if len(warmed) < 2:
+        # Section 8.3 reads the secondary metric as medians over roundS after
+        # the first, and takes the noise floor from a spread over rounds. One
+        # sample has a spread of zero, so a single warmed round would hand the
+        # comparison a zero-width interval and a 0.0% floor, and any direction
+        # at all would then read as a WIN that cleared its floor.
+        raise RunInvalid(
+            "at least two eligible rounds after the first are required "
+            "for the warmed comparison")
     peaks = [records[arm]["peak_footprint_gb"] for records in rounds]
     return {
         "full_job_samples_s": full,
@@ -557,18 +594,20 @@ def decide_o1(comparison: Mapping[str, object], *, ours_peak_gb: float,
                 "stock_peak_footprint_gb": stock_peak_gb,
                 "verdict": "NO-GO"}
     memory_no_worse = ours_peak_gb <= stock_peak_gb
-    clears_noise = clears_floor(
-        abs(comparison["delta_pct"]), comparison["noise_floor_pct"]
-    )
     return {
         **comparison,
         "memory_no_worse": memory_no_worse,
-        "clears_noise_floor": clears_noise,
         "ours_peak_footprint_gb": ours_peak_gb,
         "stock_peak_footprint_gb": stock_peak_gb,
+        # Section 9's two conjuncts, on a comparison whose verdict already
+        # carries amendment 3's floor and reference-spread rules. Requiring
+        # the WIN is what makes those rules reach the shipping question: a
+        # decider reading the endpoints alone would ship a claim the
+        # comparison had already declined to make.
         "verdict": (
             "GO"
-            if (comparison["ratio_lo"] > 1.10
+            if (comparison["verdict"] == "WIN"
+                and comparison["ratio_lo"] > 1.10
                 and memory_no_worse)
             else "NO-GO"
         ),
@@ -579,15 +618,12 @@ def decide_o2(comparison: Mapping[str, object]) -> dict:
     if comparison.get("void"):
         return {**comparison, "clears_noise_floor": False,
                 "verdict": "BELOW-TARGET"}
-    clears_noise = clears_floor(
-        abs(comparison["delta_pct"]), comparison["noise_floor_pct"]
-    )
     return {
         **comparison,
-        "clears_noise_floor": clears_noise,
         "verdict": (
             "AT-TARGET"
-            if comparison["ratio_lo"] >= 1.30
+            if (comparison["verdict"] == "WIN"
+                and comparison["ratio_lo"] >= 1.30)
             else "BELOW-TARGET"
         ),
     }
@@ -597,14 +633,13 @@ def decide_o3(comparison: Mapping[str, object]) -> dict:
     if comparison.get("void"):
         return {**comparison, "interval_verdict": "REFUSED",
                 "clears_noise_floor": False, "verdict": "REFUSED"}
-    clears_noise = clears_floor(
-        abs(comparison["delta_pct"]), comparison["noise_floor_pct"]
-    )
+    # The floor is already in the verdict, so O3 reports it rather than
+    # applying a second rule of its own. That is what "the same floor rule"
+    # as O1 now means: there is one rule, and it lives upstream of both.
     return {
         **comparison,
         "interval_verdict": comparison["verdict"],
-        "clears_noise_floor": clears_noise,
-        "verdict": comparison["verdict"] if clears_noise else "REFUSED",
+        "verdict": comparison["verdict"],
     }
 
 
@@ -619,14 +654,24 @@ def decide_o4(comparisons: Mapping[str, Mapping[str, object]]) -> dict:
             result[cell.name] = {**comparison, "wrapper_slowdown_pct": None,
                                  "interface_finding": False}
             continue
+        # Two different quantities, and only one of them is registered.
+        # `wrapper_slowdown_pct` is how much longer the wrapper takes, which
+        # is what a reader wants to see. The floor comparison must use how far
+        # the interval sits BELOW 1.0, which is 100 * (1 - ratio) and is
+        # exactly abs(delta_pct), the quantity O1, O2 and O3 all pass to
+        # clears_floor. The two differ, and 1/ratio - 1 is always the larger,
+        # so using it here reports a finding against the interface on a
+        # comparison the registered floor rule calls noise.
         slowdown = 100 * (1 / comparison["ratio"] - 1)
         result[cell.name] = {
             **comparison,
+            # How much longer the wrapper takes, which is what a reader wants
+            # to see, beside how far the interval sits below 1.0, which is
+            # what section 9 registers. They are different numbers and the
+            # first is always the larger, so only the second may gate.
             "wrapper_slowdown_pct": slowdown,
-            "interface_finding": (
-                comparison["verdict"] == "LOSS"
-                and clears_floor(slowdown, comparison["noise_floor_pct"])
-            ),
+            "wrapper_below_one_pct": abs(comparison["delta_pct"]),
+            "interface_finding": comparison["verdict"] == "LOSS",
         }
     return result
 
@@ -909,6 +954,23 @@ def build_cell_reading(
             "round_validity": validity,
             "raw_rounds": list(rounds),
         }
+    warmed_rounds = [
+        records for records in eligible if records["stock"]["round"] > 1
+    ]
+    if len(warmed_rounds) < 2:
+        # Refused here rather than raised out of arm_metrics, so a cell too
+        # thin for the secondary metric becomes one non-binding cell instead
+        # of an exception that takes the other cells' outcomes with it.
+        return {
+            "cell": cell_name,
+            "binding": False,
+            "verdict": "REFUSED",
+            "invalid_rounds": invalid,
+            "eligible_rounds": eligible_numbers,
+            "reasons": ["fewer than two eligible rounds after the first"],
+            "round_validity": validity,
+            "raw_rounds": list(rounds),
+        }
     loss_gate = loss_curve_gate(eligible)
     arms = {arm: arm_metrics(eligible, arm) for arm in ARMS}
     if not loss_gate["valid"]:
@@ -930,7 +992,21 @@ def build_cell_reading(
     def compare(first: str, second: str, field: str) -> dict:
         return time_comparison(arms[first][field], arms[second][field])
 
-    return {
+    comparisons = {
+        "ours_vs_stock": compare("ours", "stock", "full_job_samples_s"),
+        "ours_vs_control": compare("ours", "control", "full_job_samples_s"),
+        "control_vs_stock": compare("control", "stock", "full_job_samples_s"),
+        "warmed_ours_vs_stock": compare(
+            "ours", "stock", "warmed_step_samples_s"
+        ),
+        "warmed_ours_vs_control": compare(
+            "ours", "control", "warmed_step_samples_s"
+        ),
+        "warmed_control_vs_stock": compare(
+            "control", "stock", "warmed_step_samples_s"
+        ),
+    }
+    reading = {
         "cell": cell_name,
         "binding": True,
         "invalid_rounds": invalid,
@@ -941,24 +1017,24 @@ def build_cell_reading(
         "peaks_gb": {
             arm: arms[arm]["peak_footprint_gb"] for arm in ARMS
         },
-        "ours_vs_stock": compare("ours", "stock", "full_job_samples_s"),
-        "ours_vs_control": compare(
-            "ours", "control", "full_job_samples_s"
-        ),
-        "control_vs_stock": compare(
-            "control", "stock", "full_job_samples_s"
-        ),
-        "warmed_ours_vs_stock": compare(
-            "ours", "stock", "warmed_step_samples_s"
-        ),
-        "warmed_ours_vs_control": compare(
-            "ours", "control", "warmed_step_samples_s"
-        ),
-        "warmed_control_vs_stock": compare(
-            "control", "stock", "warmed_step_samples_s"
-        ),
+        **comparisons,
         "raw_rounds": list(rounds),
     }
+    # Amendment 3. A reference arm that spread past the class limit describes
+    # the machine, so the comparison claims nothing. The whole cell stops
+    # binding rather than only that comparison, because every comparison here
+    # reads the same rounds: a clock that moved under one of them moved under
+    # all of them.
+    rejected = sorted(name for name, comparison in comparisons.items()
+                      if comparison["verdict"] == "REJECTED")
+    if rejected:
+        reading["binding"] = False
+        reading["verdict"] = "REJECTED"
+        reading["reasons"] = [
+            f"reference arm spread past {MAX_REFERENCE_SPREAD}x in "
+            f"{', '.join(rejected)}"
+        ]
+    return reading
 
 
 def _print_refusal(reason: object) -> None:
@@ -1087,10 +1163,13 @@ def run_binding(plan: Mapping[str, object], runtime,
             for cell in CELLS
         }
         scientific_binding = all(cell["binding"] for cell in cells.values())
-        outcomes = (
-            pre_registered_outcomes(cells, loop)
-            if scientific_binding else {"O5": loop}
-        )
+        # Every outcome is written even when a cell did not bind. Section 9
+        # requires O4 at every cell whatever O1 says, O3 never omitted from a
+        # quotation of O1, and O5 whatever the kernel did; reporting only O5
+        # because one cell voided would delete three registered readings that
+        # the surviving cells did measure. The record still says binding is
+        # false, which is what stops any of it being quoted as a claim.
+        outcomes = pre_registered_outcomes(cells, loop)
         closing_idle = runtime.idle_check(machine["cores"])
         binding = scientific_binding and closing_idle["idle"]
         record = {
@@ -1265,6 +1344,22 @@ def _data_record(path: Path) -> dict:
     }
 
 
+def _absent_module(name: str, find_module) -> bool:
+    """Is the named measurement module missing, however it is missing?
+
+    `find_spec` returns None for an absent top-level name and RAISES for a
+    dotted name whose parent package does not resolve, so a plan naming
+    "metalrunnr.lora" would leave a bare traceback and exit 1 rather than a
+    numbered refusal. The detached runner reads exit 1 with a traceback as a
+    crash and spends a retry on it, when the answer for a misspelled plan is a
+    permanent refusal that should not be retried at all.
+    """
+    try:
+        return find_module(name) is None
+    except (ImportError, ValueError, TypeError):
+        return True
+
+
 def preflight_inputs(
     plan: Mapping[str, object],
     *,
@@ -1303,7 +1398,8 @@ def preflight_inputs(
             raise PreconditionFailed(
                 f"stack record does not bind {package} {expected_version}"
             )
-    if plan["kept_candidates"] and find_module(plan["measurement_module"]) is None:
+    if plan["kept_candidates"] and _absent_module(
+            plan["measurement_module"], find_module):
         raise PreconditionFailed(
             f"measurement module {plan['measurement_module']!r} is unavailable"
         )
