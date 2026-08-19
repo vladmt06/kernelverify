@@ -50,6 +50,7 @@ from serve_sub4bit import (  # noqa: E402
     MODEL_3BIT,
     MODEL_4BIT,
     MODELS_ROOT,
+    PINNED_ZONE,
     PROMPT_SEED,
     NotIdle,
     PreconditionFailed,
@@ -102,7 +103,7 @@ def _stream_prompts(tokenizer, t: int, b: int, *, stride: int):
     return mx.array(token_lists, dtype=mx.int32), token_lists
 
 
-def _run_arm(arm, model3, model4, tokenizer, prompts, *, cell):
+def _run_arm(arm, model3, model4, prompts, *, cell):
     target = model4 if arm == 3 else model3
     prompt_lists = prompts.tolist()
     b = len(prompt_lists)
@@ -216,6 +217,10 @@ def main(argv=None) -> int:
         require_pinned_zone()
         guard = ServeGuard(args.budget_gb)
         print(json.dumps(provenance(manifest)))
+        print("WINDOW: " + json.dumps({
+            f"{d_out}x{d_in}": sorted(widths)
+            for (d_out, d_in), widths in PINNED_ZONE.items()
+        }))
 
         model3, tokenizer = load_model(MODEL_3BIT)
         model4, _ = load_model(MODEL_4BIT)
@@ -247,7 +252,6 @@ def main(argv=None) -> int:
                     arm,
                     model3,
                     model4,
-                    tokenizer,
                     prompts,
                     cell=f"{cell} warm arm{arm}",
                 )
@@ -267,7 +271,6 @@ def main(argv=None) -> int:
                         arm,
                         model3,
                         model4,
-                        tokenizer,
                         prompts,
                         cell=f"{round_cell} arm{arm}",
                     )
@@ -278,19 +281,15 @@ def main(argv=None) -> int:
                 pass_counts = {
                     arm: round_runs[arm]["decode_passes"] for arm in ARMS
                 }
-                if len(set(pass_counts.values())) != 1:
-                    raise RunInvalid(
-                        f"{round_cell}: decode passes differ across arms: "
-                        f"{pass_counts}"
-                    )
                 identity = stream_identity_labels(
                     a1=round_runs[1]["tokens"],
                     a2=round_runs[2]["tokens"],
                     a4=round_runs[4]["tokens"],
                 )
-                valid = not (
-                    round_runs[1]["hard_fallbacks"]
-                    or round_runs[4]["hard_fallbacks"]
+                valid = (
+                    len(set(pass_counts.values())) == 1
+                    and not round_runs[1]["hard_fallbacks"]
+                    and not round_runs[4]["hard_fallbacks"]
                 )
                 rounds.append(
                     RoundSample(
@@ -322,9 +321,12 @@ def main(argv=None) -> int:
                     f"{cell} round {index + 1} arm 4",
                 )
 
-            routed_calls = sum(run["routed_calls"] for run in runs_by_arm[1])
+            routed_calls = sum(
+                runs_by_arm[1][index]["routed_calls"] for index in valid_indices
+            )
             expected_calls = sum(
-                run["expected_routed_calls"] for run in runs_by_arm[1]
+                runs_by_arm[1][index]["expected_routed_calls"]
+                for index in valid_indices
             )
             control_calls = sum(
                 run["routed_calls"] for run in runs_by_arm[4]

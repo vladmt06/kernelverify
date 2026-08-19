@@ -192,9 +192,13 @@ Arm 4's expected zero is unchanged and is read in every round, because no fallba
 
 The binding run is `bench/serve_batch_decode.py` under the detached runner on 2026-08-19, forty-four minutes, exit 0, with the opening idle streak and the closing idle sample both clean.
 It is the third attempt.
-The first two completed all ten cells and were discarded by the closing idle check, on `airportd at 46% CPU` and on `WindowServer at 15% CPU` against a threshold of 15.
-Their per-cell deltas agreed with the binding run to within 0.4 points everywhere, which is recorded here as evidence that the measurement reproduces and is not quoted as a result, because a run that fails its closing check is not binding.
+The first two completed all ten cells and were discarded by the closing idle check, the first on `airportd at 46% CPU` with `WiFiAgent at 18% CPU` beside it and the second on `WindowServer at 15% CPU`, against a threshold of 15.
+Their per-cell deltas agreed with the binding run to within 0.35 points at every in-zone cell and within 0.47 points across the whole grid, the largest gap being at B = 1, a null cell whose own noise floor is 5.71 points.
+That agreement is recorded here as evidence that the measurement reproduces, and it is not quoted as a result, because a run that fails its closing check is not binding.
 The asymmetry that discarded them, five clean samples required to start against one to finish, is queued in `TODOS.md` rather than changed, because the rule that judges a measurement must not move while that measurement waits to bind.
+
+The harness that produced this run is `bench/serve_batch_decode.py` as of commit a673145, and the rules it read are `bench/batch_decode_rules.py` and `bench/decode_rules.py` at that same commit.
+Later commits on this branch change the harness in ways that cannot alter a verdict, and the three of them are listed under the deviations below, so the code that made this record stays identifiable.
 
 Provenance: MLX 0.32.0, mlx-lm 0.31.3, Apple M3 Pro (Mac15,7), 12 cores, 36 GiB, Darwin 26.5.2 build 25F84, both targets pinned by sha256 over every file.
 The ten prompt digests were identical across all three attempts, so every attempt fed the engine the same token ids.
@@ -211,6 +215,12 @@ There were no hard fallbacks in any round.
 
 Divergence report: none.
 Arm 1 and arm 2 produced identical tokens in every stream of every round of every cell, and arm 4 equalled arm 2 everywhere, so no round was excluded and no cell was `identity-unstable`.
+
+Three deviations from sections 1 to 8 belong on the record, none of which touches a number above.
+Section 8 asks for the routed-window pins in the log and `provenance()` never carried them; the window was verified before the grid by `require_pinned_zone()`, which refuses on any disagreement at any of the five intercepted shapes, so the guarantee held while the values went unprinted.
+Section 5 registers per-stream throughput and the run printed only the aggregate, so section 10's per-stream numbers are the printed medians divided by B.
+Section 4 makes a round whose arms disagree on decode-call count invalid, and the harness stopped the run instead; no round disagreed, so nothing here rests on it.
+All three are corrected in the harness after this run, each pinned by a test, so the next run prints the window, prints per-stream throughput, and invalidates such a round rather than refusing.
 
 Per arm per cell, median aggregate throughput in tokens per second with `spread_pct` beside it:
 

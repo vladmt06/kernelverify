@@ -65,6 +65,7 @@ from spec_decode_rules import (  # noqa: E402
     eligible_rounds,
     expected_routed_calls,
     identity_labels,
+    result_line,
     verification_passes,
     verify_share,
 )
@@ -230,9 +231,7 @@ def _public_sample(run, round_number: int, round_sample: RoundSample):
 
 
 def _result_line(draft: str, outcome: str, result: dict) -> str:
-    return "RESULT: " + json.dumps(
-        {"draft": draft, "outcome": outcome, **result}
-    )
+    return result_line({"draft": draft}, outcome, result)
 
 
 def main(argv=None) -> int:

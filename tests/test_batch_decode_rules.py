@@ -642,3 +642,17 @@ def test_arm_summary_leaves_out_an_excluded_round():
     summary = arm_summary(6, rounds, 1)
     assert summary["median_tps"] == pytest.approx(105.0)
     assert summary["eligible_rounds"] == 2
+
+
+# A run with no prefill call at all means the counted seam moved, not that
+# the engine had nothing to prefill.
+def test_decode_passes_refuse_a_record_with_no_prefill():
+    with pytest.raises(RunInvalid, match="no prefill"):
+        decode_passes([(5, 1)] * 129, b=5, prompt_t=512)
+
+
+# Per-stream throughput is what the operator reads, and section 5 defines it
+# as the aggregate divided by B.
+def test_arm_summary_reports_per_stream_throughput():
+    summary = arm_summary(6, [_round(a1=120.0)], 1)
+    assert summary["per_stream_tps"] == pytest.approx(20.0)

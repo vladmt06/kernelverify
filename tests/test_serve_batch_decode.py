@@ -143,6 +143,7 @@ class _FakeBatchGenerator:
     instances = []
     short_stream = None
     bad_finish = None
+    extra_decode_at = None
 
     @classmethod
     def reset(cls):
@@ -150,6 +151,7 @@ class _FakeBatchGenerator:
         cls.instances = []
         cls.short_stream = None
         cls.bad_finish = None
+        cls.extra_decode_at = None
 
     def __init__(self, model, **kwargs):
         self.model = model
@@ -195,6 +197,8 @@ class _FakeBatchGenerator:
         b = len(self.uids)
         self.model(_Input((b, h.PROMPT_T - 1)))
         self.model(_Input((b, 1)))
+        if self.instance == type(self).extra_decode_at:
+            self.model(_Input((b, 1)))
         responses = []
         for position in range(h.GEN_TOKENS):
             for uid in self.uids:
@@ -687,3 +691,68 @@ def test_a_short_prompt_stream_refuses_with_the_precondition_code(
     )
     assert h.main([]) == h.EXIT_PRECONDITION
     assert "REFUSAL" in capsys.readouterr().out
+
+
+# Section 4 makes an unequal round invalid; stopping the run there would turn
+# a per-round exclusion into a run-wide refusal.
+def test_unequal_decode_counts_invalidate_the_round_rather_than_the_run(
+    monkeypatch, capsys
+):
+    _stub_the_machine(monkeypatch)
+    # Instances 0 to 3 are the first cell's warm-up arms; instance 4 is its
+    # first round's arm 1.
+    _FakeBatchGenerator.extra_decode_at = 4
+    assert h.main([]) == 0
+    rows, records = _printed(capsys)
+    first = next(row for row in rows if row["b"] == h.B_GRID[0] and row["arm"] == 1)
+    assert first["samples"][0]["decode_passes"] == 2
+    assert first["samples"][0]["valid"] is False
+    assert first["eligible_rounds"] == h.ROUNDS - 1
+    assert any(record["outcome"] == "OB1" for record in records)
+
+
+# A cell total that reads rounds the exact-count check skipped would print a
+# mismatched pair that no rule catches.
+def test_the_cell_routed_total_reads_the_rounds_the_check_read(
+    monkeypatch, capsys
+):
+    _stub_the_machine(monkeypatch)
+    _Patch.fallback_at = frozenset({2})
+    assert h.main([]) == 0
+    rows, _ = _printed(capsys)
+    first = next(row for row in rows if row["b"] == h.B_GRID[0] and row["arm"] == 1)
+    assert first["samples"][0]["routed_calls"] == 7
+    assert first["routed_calls"] == 0
+    assert first["routed_calls"] == first["expected_routed_calls"]
+
+
+# Section 5 registers per-stream throughput, and the operator claim is per
+# stream, so it belongs on the row rather than in a reader's head.
+def test_rows_carry_the_registered_per_stream_throughput(monkeypatch, capsys):
+    _stub_the_machine(monkeypatch)
+    monkeypatch.setattr(h, "ROUNDS", 1)
+    assert h.main([]) == 0
+    rows, _ = _printed(capsys)
+    for row in rows:
+        assert row["per_stream_tps"] == pytest.approx(row["median_tps"] / row["b"])
+
+
+# Section 8 asks for the routed-window pins in the log; verifying them and
+# not printing them leaves the reader unable to see which window was priced.
+def test_the_log_carries_the_routed_window_pins(monkeypatch, capsys):
+    _stub_the_machine(monkeypatch)
+    monkeypatch.setattr(h, "ROUNDS", 1)
+    assert h.main([]) == 0
+    window = [
+        json.loads(line[len("WINDOW: "):])
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("WINDOW: ")
+    ]
+    assert len(window) == 1
+    assert set(window[0]) == {
+        f"{d_out}x{d_in}" for d_out, d_in in h.PINNED_ZONE
+    }
+    assert all(
+        window[0][f"{d_out}x{d_in}"] == sorted(widths)
+        for (d_out, d_in), widths in h.PINNED_ZONE.items()
+    )

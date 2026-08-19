@@ -51,11 +51,18 @@ _MISSING_STREAM = object()
 def decode_passes(
     shapes: Sequence[Sequence[int]], *, b: int, prompt_t: int
 ) -> tuple[tuple[int, ...], ...]:
-    passes, _ = classify_passes(
+    prefill_width = b * (prompt_t - 1)
+    passes, prefill = classify_passes(
         shapes,
         is_pass=lambda width: width == b,
-        prefill_width=b * (prompt_t - 1),
+        prefill_width=prefill_width,
     )
+    if not prefill:
+        raise RunInvalid(
+            "observed no prefill call; the registered configuration makes "
+            f"exactly one, of width {prefill_width}, so the counted seam did "
+            "not see it"
+        )
     return passes
 
 
@@ -143,8 +150,10 @@ def arm_summary(
         rounds, _KERNEL_EXCLUSIONS, what=f"arm {arm} B={b}"
     )
     samples = [sample.generation_tps[arm] for sample in eligible]
+    median = statistics.median(samples)
     return {
-        "median_tps": statistics.median(samples),
+        "median_tps": median,
+        "per_stream_tps": per_stream_tps(median, b),
         "spread_pct": spread_pct(samples),
         "eligible_rounds": len(eligible),
     }
