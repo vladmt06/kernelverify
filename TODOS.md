@@ -314,3 +314,14 @@
 - Cons: any narrowing is a judgement about which bytes can move a number, and getting it wrong reintroduces exactly the silent drift the header was added to refuse, so a coarse-and-annoying guard is safer than a clever one.
 - Context: surfaced while adding the bfloat16 contract entry (ADR 0019); the artefact was regenerated and the invariance check confirmed no number moved.
 - Depends on / blocked by: nothing; deliberately not fixed on the way past, per the do-not-touch-unrelated-code rule.
+
+## mlx-lm's `run(args, training_callback=...)` silently ignores its callback
+
+- What: report upstream that `mlx_lm.lora.run` declares a `training_callback` parameter and overwrites it on its own next statement with `get_reporting_callbacks(args.report_to, ...)`, so the argument can never reach the trainer; propose that it fall back to the passed callback when `--report-to` is unset, or chain the two the way the callbacks themselves chain.
+- Why: it is a documented parameter whose only possible effect is to look correct.
+  Anything driving mlx-lm's trainer from outside and passing a callback gets no reports and no error, which is the failure shape hardest to notice.
+  metalrunner hit exactly this and now injects at `train_model` instead, which works and is strictly more invasive than the public parameter would have been.
+- Pros: the fix upstream would let metalrunner drop one seam entirely, and the mechanism reduces to passing an argument.
+- Cons: it is someone else's release schedule, so the seam has to exist either way; a fix would also change the pinned file hash and therefore the stack pin.
+- Context: reproduced against mlx-lm 0.31.3 on 2026-08-19, `mlx_lm/lora.py` `run()`; the seam that works around it is `metalrunner/lora.py` `TRAIN_MODEL`.
+- Depends on / blocked by: nothing; it is a PR to write, and the sprint does not wait on it.
