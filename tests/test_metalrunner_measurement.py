@@ -439,3 +439,144 @@ def test_no_operation_has_shipped_yet():
 
 def test_every_registered_operation_is_a_known_one():
     assert set(measurement.OPERATIONS) <= measurement.OPERATION_NAMES
+
+
+# ---------------------------------------------------------------------------
+# Meeting point: the bridge's REAL evidence objects, driven through the
+# harness's REAL judges. No kernel, no model, no Metal device.
+#
+# These are the tests that prove the two halves meet. Everything above pins
+# what the bridge does; these pin that what it does is what the measurement
+# demands, which is a different question and the one that bit last time.
+# ---------------------------------------------------------------------------
+import train_lora_e2e as harness  # noqa: E402  (conftest puts bench on the path)
+
+
+def test_live_evidence_passes_the_harness_gate_and_matches_its_hash(target, row):
+    """The harness refuses any arm whose evidence is missing a key or whose
+    wrapper hash differs from the one its preflight bound. Both are checked
+    here against the real functions rather than against a copy of them."""
+    installed = install(candidate_sha256s=[SHA_A], force_stock=False,
+                        **_tables(row))
+    target.step("x")
+
+    provenance = {"wrapper_sha256": harness._wrapper_sha256(
+        harness.ROOT / "metalrunner")}
+    evidence = harness._routing_evidence(installed, "ours", provenance)
+    assert evidence["routed_calls"] == 1
+
+
+def test_ours_and_control_evidence_satisfy_the_fairness_gate(target, row):
+    """The whole fairness contract end to end: ours routed a verified call,
+    control observed decisions and routed none, and both installed the same
+    wrapper. The stock record is the harness's own literal for that arm."""
+    ours = install(candidate_sha256s=[SHA_A], force_stock=False,
+                   **_tables(row))
+    target.step("x")
+    ours_evidence = ours.evidence()
+    ours.uninstall()
+
+    control = install(candidate_sha256s=[SHA_A], force_stock=True,
+                      **_tables(row))
+    target.step("y")
+    control_evidence = control.evidence()
+    control.uninstall()
+
+    records = {
+        "ours": {"routing": ours_evidence},
+        "control": {"routing": control_evidence},
+        "stock": {"routing": {
+            "wrapper_installed": False,
+            "forced_stock": False,
+            "wrapper_sha256": None,
+            "routed_candidates": [],
+            "routed_calls": 0,
+            "routing_decisions": 0,
+        }},
+    }
+    assert harness._routing_reasons(records) == []
+
+
+def test_a_hollow_ours_arm_is_caught_by_the_harness(target, row):
+    """Installed and never called. This is the failure the counting exists
+    to make visible: without it, an arm that routed nothing and an arm that
+    carried the whole run are the same document."""
+    # Sequentially, the way real rounds run them: the seam installer refuses
+    # to stack a second installation on a live one, which is its own job.
+    ours = install(candidate_sha256s=[SHA_A], force_stock=False,
+                   **_tables(row))
+    ours_evidence = ours.evidence()          # never called through
+    ours.uninstall()
+
+    control = install(candidate_sha256s=[SHA_A], force_stock=True,
+                      **_tables(row))
+    control_evidence = control.evidence()    # never called through
+    control.uninstall()
+
+    records = {
+        "ours": {"routing": ours_evidence},
+        "control": {"routing": control_evidence},
+        "stock": {"routing": {
+            "wrapper_installed": False, "forced_stock": False,
+            "wrapper_sha256": None, "routed_candidates": [],
+            "routed_calls": 0, "routing_decisions": 0,
+        }},
+    }
+    reasons = harness._routing_reasons(records)
+    assert any("ours routed no verified call" in reason for reason in reasons)
+    assert any("control observed no routing decision" in reason
+               for reason in reasons)
+
+
+def test_routed_candidates_is_a_list_because_the_gate_checks_the_type(target,
+                                                                     row):
+    """Load-bearing and easy to break: the harness isinstance-checks list,
+    so a tuple would fail every ours arm with a misleading reason."""
+    installed = install(candidate_sha256s=[SHA_A], force_stock=False,
+                        **_tables(row))
+    target.step("x")
+    assert isinstance(installed.evidence()["routed_candidates"], list)
+
+
+def test_the_real_backward_child_accepts_the_bridges_evidence(row, monkeypatch,
+                                                              tmp_path):
+    """Drive the harness's own backward child, which imports no mlx, over
+    the real bridge with fake tables: every type gate it applies passes."""
+    monkeypatch.setattr(routing, "CERTIFIED", (_entry(),))
+    monkeypatch.setattr(measurement, "OPERATIONS", {OPERATION_A: row})
+    monkeypatch.setattr(routing, "chip", lambda: CHIP)
+    monkeypatch.setattr(harness, "_load_measurement_module",
+                        lambda _plan: measurement)
+
+    task = {
+        "kind": "backward",
+        "cell": "backward",
+        "plan": {"measurement_module": "metalrunner.measurement",
+                 "kept_candidates": [SHA_A]},
+        "provenance": {"base_model": {"directory": str(tmp_path)}},
+    }
+    result = harness._backward_child(task, guard=None)
+    assert result["exact"] is True
+    assert result["cases"] == 2
+    assert len(result["cases_sha256"]) == 64
+
+
+def test_a_bridge_refusal_reaches_the_harness_as_a_precondition(row,
+                                                                monkeypatch,
+                                                                tmp_path):
+    """The two halves' error vocabularies meet: an unkept candidate is a
+    permanent refusal, not a crash the detached runner would retry."""
+    monkeypatch.setattr(routing, "CERTIFIED", ())
+    monkeypatch.setattr(measurement, "OPERATIONS", {})
+    monkeypatch.setattr(harness, "_load_measurement_module",
+                        lambda _plan: measurement)
+
+    task = {
+        "kind": "backward",
+        "cell": "backward",
+        "plan": {"measurement_module": "metalrunner.measurement",
+                 "kept_candidates": [SHA_A]},
+        "provenance": {"base_model": {"directory": str(tmp_path)}},
+    }
+    with pytest.raises(harness.PreconditionFailed, match="no certified entry"):
+        harness._backward_child(task, guard=None)
