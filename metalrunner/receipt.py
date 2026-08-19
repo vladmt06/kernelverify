@@ -85,7 +85,7 @@ def read_quantization(model: str) -> tuple[int | None, int | None]:
 def build(*, args, stack, decisions, chip: str, adapter_path: str | None,
           peak_bytes: int | None, started: str, finished: str,
           forced_to_stock: bool = False, progress: dict | None = None,
-          seams: dict | None = None) -> dict:
+          seams: dict | None = None, measurement: dict | None = None) -> dict:
     """The record itself, as a plain dictionary."""
     adapters = Path(adapter_path) if adapter_path else None
     adapter_file = adapters / "adapters.safetensors" if adapters else None
@@ -123,6 +123,10 @@ def build(*, args, stack, decisions, chip: str, adapter_path: str | None,
         # document without this count.
         "progress": progress,
         "seams": seams,
+        # What routing actually did, from the same installer the end-to-end
+        # measurement reads. A run that routed nothing says so here in
+        # numbers, which is a different claim from the report's prose.
+        "measurement": measurement,
         "adapter": {
             "path": str(adapters) if adapters else None,
             "sha256": _digest_file(adapter_file) if adapter_file else None,

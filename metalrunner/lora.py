@@ -22,9 +22,11 @@ The order below is the whole safety argument, and it is deliberate:
 4. Decide routing and PRINT it, before training, so what is about to happen
    to the step is known in advance rather than reported afterwards.
 5. Install the seams, refusing if any of them is not what it should be.
-6. Run mlx-lm's trainer, and remove the seams afterwards whatever happened.
-7. Write the receipt, including what the trainer reported about itself and
-   how many times each seam was actually reached.
+6. Route the certified kernels through the SAME installer the end-to-end
+   measurement uses, so what is measured is what a user runs.
+7. Run mlx-lm's trainer, and remove everything afterwards whatever happened.
+8. Write the receipt, including what the trainer reported about itself, how
+   many times each seam was reached, and what routing actually did.
 
 Today step 4 always decides to route nothing, because no training kernel has
 been kept yet. The run is then stock mlx-lm with a stack check and a
@@ -37,7 +39,7 @@ import os
 import sys
 import types
 
-from metalrunner import progress, receipt, routing, seams
+from metalrunner import measurement, progress, receipt, routing, seams
 from metalrunner.versions import UnverifiedStack, require_verified_stack
 
 EXIT_UNVERIFIED_STACK = 3
@@ -153,18 +155,33 @@ def main(argv=None) -> int:
         print(refusal, file=sys.stderr)
         return EXIT_SEAM_REFUSED
 
+    # The candidates come from the same reader the routing report used, and
+    # the installer is the one bench/train_lora_e2e.py drives: a user's run
+    # and the measurement of it cannot diverge into two code paths.
+    candidates = tuple(entry["candidate_sha256"] for entry in routing.eligible(
+        args.fine_tune_type, bits, group_size, on_chip=chip))
+    try:
+        patch = measurement.install(candidate_sha256s=candidates)
+    except measurement.MeasurementRefusal as refusal:
+        # Same condition class as a foreign seam: this process cannot be
+        # trusted to be what it says it is, so it does not train.
+        installation.remove()
+        print(refusal, file=sys.stderr)
+        return EXIT_SEAM_REFUSED
+
     try:
         run(args)
     finally:
+        patch.uninstall()
         installation.remove()
 
     print(_finish(args, stack, decisions, chip, started, recorder,
-                  installation))
+                  installation, patch))
     return 0
 
 
 def _finish(args, stack, decisions, chip, started, recorder,
-            installation) -> str:
+            installation, patch) -> str:
     import mlx.core as mx
 
     try:
@@ -180,7 +197,8 @@ def _finish(args, stack, decisions, chip, started, recorder,
                            progress=recorder.summary(),
                            seams={"calls": installation.counts,
                                   "foreign_on_removal":
-                                      installation.foreign_on_removal})
+                                      installation.foreign_on_removal},
+                           measurement=patch.evidence())
     written = receipt.write(record, getattr(args, "adapter_path", None))
     if written is None:
         return "metalrunner: no adapter path, so no receipt was written."

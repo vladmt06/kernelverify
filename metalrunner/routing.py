@@ -46,7 +46,9 @@ KNOWN_OPERATIONS = (
 
 # Kept kernels, each with the chip, quantization and operation it was
 # certified and priced for. Empty until the first kernel survives pricing;
-# the keep stage writes it from the committed recording.
+# the keep stage writes it from the committed recording, and its own tests
+# check what it writes against metalrunner.measurement.entry_problems, which
+# is the schema these entries answer to.
 CERTIFIED: tuple = ()
 
 SUPPORTED_FINE_TUNE_TYPES = ("lora",)
@@ -77,9 +79,38 @@ def forced_to_stock() -> bool:
     return os.environ.get(FORCE_STOCK_ENV, "") not in ("", "0")
 
 
+def eligible(fine_tune_type: str, bits: int | None, group_size: int | None,
+             *, on_chip: str | None = None,
+             certified: tuple | None = None) -> tuple:
+    """The certified entries this run may route, and nothing else.
+
+    Every condition is a decline rather than an assumption. An unreadable
+    quantization returns nothing, because routing a kernel verified for one
+    format onto another is the guess this package exists not to make; a
+    chip that certified nothing returns nothing, for the same reason.
+
+    This is what both callers derive their candidate list from, so the user
+    path and the measurement path can never disagree about what is routable
+    on this machine.
+    """
+    entries = CERTIFIED if certified is None else certified
+    if fine_tune_type not in SUPPORTED_FINE_TUNE_TYPES:
+        return ()
+    if bits is None or group_size is None:
+        return ()
+    if bits not in SUPPORTED_BITS or group_size != SUPPORTED_GROUP_SIZE:
+        return ()
+    if not entries:
+        return ()
+    where = chip() if on_chip is None else on_chip
+    return tuple(entry for entry in entries
+                 if entry["chip"] == where and entry["bits"] == bits
+                 and entry["group_size"] == group_size)
+
+
 def decide(fine_tune_type: str, bits: int | None, group_size: int | None,
-           *, on_chip: str | None = None,
-           force_stock: bool | None = None) -> list[Decision]:
+           *, on_chip: str | None = None, force_stock: bool | None = None,
+           certified: tuple | None = None) -> list[Decision]:
     """One decision per known operation, each carrying its own reason.
 
     `bits` and `group_size` are None when the model's quantization could not
@@ -93,17 +124,36 @@ def decide(fine_tune_type: str, bits: int | None, group_size: int | None,
     """
     where = chip() if on_chip is None else on_chip
     forced = forced_to_stock() if force_stock is None else force_stock
+    routable = {} if forced else {
+        entry["operation"]: entry
+        for entry in eligible(fine_tune_type, bits, group_size,
+                              on_chip=where, certified=certified)
+    }
     decisions = []
     for operation, _description in KNOWN_OPERATIONS:
-        reason = (f"forced to stock by {FORCE_STOCK_ENV}: this is a control run"
-                  if forced else
-                  _why_not(operation, fine_tune_type, bits, group_size, where))
-        decisions.append(Decision(operation, False, reason))
+        if forced:
+            decisions.append(Decision(
+                operation, False,
+                f"forced to stock by {FORCE_STOCK_ENV}: this is a control run"))
+        elif operation in routable:
+            decisions.append(Decision(operation, True,
+                                      "certified and priced here"))
+        else:
+            decisions.append(Decision(
+                operation, False,
+                _why_not(operation, fine_tune_type, bits, group_size, where,
+                         CERTIFIED if certified is None else certified)))
     return decisions
 
 
 def _why_not(operation: str, fine_tune_type: str, bits, group_size,
-             where: str) -> str:
+             where: str, entries: tuple) -> str:
+    """Why this operation is not routed, in the caller's own words.
+
+    The entries are passed in rather than read from the module so the reason
+    describes the table the decision was actually made against; a reason
+    that named a different table would be a decline nobody could check.
+    """
     if fine_tune_type not in SUPPORTED_FINE_TUNE_TYPES:
         return f"{fine_tune_type} fine-tuning is not supported"
     if bits is None or group_size is None:
@@ -112,10 +162,7 @@ def _why_not(operation: str, fine_tune_type: str, bits, group_size,
     if bits not in SUPPORTED_BITS or group_size != SUPPORTED_GROUP_SIZE:
         return (f"this model is {bits}-bit group-{group_size}; only "
                 f"4-bit group-64 is verified")
-    for entry in CERTIFIED:
-        if entry["operation"] == operation and entry["chip"] == where:
-            return "certified and priced here"
-    if not CERTIFIED:
+    if not entries:
         return ("no training kernel has been kept yet, so there is nothing "
                 "certified to route")
     return f"no kernel certified for this operation on {where}"

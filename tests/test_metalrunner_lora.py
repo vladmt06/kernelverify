@@ -430,3 +430,139 @@ def test_a_user_who_asked_for_reporting_still_gets_it(stub_trainer, tmp_path):
 
     recorder.on_train_loss_report({"train_loss": 1.0, "trained_tokens": 4})
     assert len(downstream) == 1
+
+
+# ---------------------------------------------------------------------------
+# The user path routes through the SAME installer the end-to-end measurement
+# drives. Two code paths would mean the measurement measures a twin of the
+# product rather than the product.
+# ---------------------------------------------------------------------------
+def test_nothing_certified_routes_nothing_and_the_receipt_says_so(
+        stub_trainer, tmp_path):
+    """Today's honest state, in numbers rather than prose: the report says
+    nothing was routed and the receipt now counts it."""
+    assert _train(tmp_path) == 0
+
+    record = json.loads((tmp_path / "metalrunner-receipt.json").read_text())
+    evidence = record["measurement"]
+    assert evidence["routed_candidates"] == []
+    assert evidence["routed_calls"] == evidence["routing_decisions"] == 0
+    assert evidence["wrapper_installed"] is False, "uninstalled before writing"
+    assert len(evidence["wrapper_sha256"]) == 64
+
+
+def test_the_kernel_installer_is_removed_even_when_training_raises(
+        monkeypatch, tmp_path):
+    """A run that dies mid-step must not leave a routed kernel behind for
+    whatever runs next in this interpreter."""
+    import mlx_lm.lora
+
+    from metalrunner import measurement
+
+    uninstalled = []
+    real_install = measurement.install
+
+    def watched(**kwargs):
+        patch = real_install(**kwargs)
+        real_uninstall = patch.uninstall
+
+        def note():
+            uninstalled.append(True)
+            real_uninstall()
+
+        patch.uninstall = note
+        return patch
+
+    monkeypatch.setattr(measurement, "install", watched)
+
+    def explode(_args, training_callback=None):
+        raise RuntimeError("training blew up")
+
+    monkeypatch.setattr(mlx_lm.lora, "run", explode)
+
+    with pytest.raises(RuntimeError, match="training blew up"):
+        _train(tmp_path)
+    assert uninstalled == [True]
+
+
+def test_a_refusing_installer_stops_the_run_and_takes_the_seam_back_out(
+        monkeypatch, never_trains, capsys):
+    """The installer refusing means this process is not what it claims, so
+    it does not train, and the recorder seam does not outlive the attempt."""
+    import mlx_lm.lora
+
+    from metalrunner import measurement
+
+    before = mlx_lm.lora.train_model
+    monkeypatch.setattr(
+        measurement, "install",
+        lambda **_k: (_ for _ in ()).throw(
+            measurement.MeasurementRefusal("candidate ab has no entry")))
+
+    code = main(["--model", "some/model", "--train"])
+    assert code == EXIT_SEAM_REFUSED
+    assert not never_trains, "a refusing installer must not reach the trainer"
+    assert "no entry" in capsys.readouterr().err
+    assert mlx_lm.lora.train_model is before
+
+
+def test_a_certified_operation_is_reported_routed(monkeypatch):
+    """The report and the installer read one table, so a certified kernel
+    cannot be routed while the report calls it declined, or the reverse."""
+    from metalrunner import routing
+
+    entry = {"candidate_sha256": "a" * 64,
+             "operation": routing.KNOWN_OPERATIONS[0][0],
+             "chip": "Apple M3 Pro", "bits": 4, "group_size": 64,
+             "pricing_recording_sha256": "c" * 64}
+
+    decisions = routing.decide("lora", 4, 64, on_chip="Apple M3 Pro",
+                               force_stock=False, certified=(entry,))
+    routed = [d for d in decisions if d.routed]
+    assert [d.operation for d in routed] == [entry["operation"]]
+    assert routed[0].reason == "certified and priced here"
+    # The others decline for the honest reason about THIS table.
+    assert all("no kernel certified for this operation" in d.reason
+               for d in decisions if not d.routed)
+
+
+def test_forced_stock_declines_even_a_certified_operation(monkeypatch):
+    from metalrunner import routing
+
+    entry = {"candidate_sha256": "a" * 64,
+             "operation": routing.KNOWN_OPERATIONS[0][0],
+             "chip": "Apple M3 Pro", "bits": 4, "group_size": 64,
+             "pricing_recording_sha256": "c" * 64}
+
+    decisions = routing.decide("lora", 4, 64, on_chip="Apple M3 Pro",
+                               force_stock=True, certified=(entry,))
+    assert not any(d.routed for d in decisions)
+    assert all(routing.FORCE_STOCK_ENV in d.reason for d in decisions)
+
+
+@pytest.mark.parametrize(("bits", "group_size", "chip"), [
+    (8, 64, "Apple M3 Pro"),        # unverified width
+    (4, 32, "Apple M3 Pro"),        # unverified group size
+    (None, None, "Apple M3 Pro"),   # unreadable quantization
+    (4, 64, "Apple M1"),            # certified somewhere else
+])
+def test_eligible_declines_rather_than_assuming(bits, group_size, chip):
+    from metalrunner import routing
+
+    entry = {"candidate_sha256": "a" * 64,
+             "operation": routing.KNOWN_OPERATIONS[0][0],
+             "chip": "Apple M3 Pro", "bits": 4, "group_size": 64,
+             "pricing_recording_sha256": "c" * 64}
+    assert routing.eligible("lora", bits, group_size, on_chip=chip,
+                            certified=(entry,)) == ()
+
+
+def test_eligible_returns_the_entry_when_everything_matches():
+    from metalrunner import routing
+
+    entry = {"candidate_sha256": "a" * 64,
+             "operation": routing.KNOWN_OPERATIONS[0][0],
+             "chip": "Apple M3 Pro", "bits": 4, "group_size": 64,
+             "pricing_recording_sha256": "c" * 64}
+    assert routing.eligible("lora", 4, 64, on_chip="Apple M3 Pro",
+                            certified=(entry,)) == (entry,)
