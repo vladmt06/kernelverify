@@ -1,0 +1,790 @@
+"""The Day 1 profile's instrument: a dial, a fitted line, and no clock inside the step.
+
+Why this module exists at all
+-----------------------------
+Section 3.3 of the pre-registration measured an operation's share by placing
+evaluation boundaries around it. Amendment 5 voids that, because a boundary
+forces pending work to finish and THEN reads the clock, so its cost lands
+inside the span forming a share's numerator and outside the plain step forming
+its denominator. The error grows with how many boundaries a region carries,
+which is exactly what separates the three candidates: measured on the 0.6B
+proxy, two boundaries read 7% high, thirty-two read 329% high, and a hundred
+and ninety-seven produced 1.401, which is not a fraction of anything.
+
+A share is now a fitted slope. Shrink the operation on a dial, time the WHOLE
+step at each setting, fit `T(phi) = a + b*phi`. Nothing times anything inside
+the step, which is why compilation goes back on and this instrument measures
+the arrangement `mlx_lm.lora` actually runs.
+
+The arithmetic, and why it is exact rather than close
+-----------------------------------------------------
+Section 4.1's formula is `gain = 1/(1 - f*(1 - 1/r))`, which rearranges to
+`T_new = T - f*T + f*T/r`. That is exactly right whenever
+
+    f := A / T        A is what the candidate's operation costs the step
+    r := A / F        F is what the replacement would cost the step
+
+because then `T_new = T - A + F`, which is what replacing an operation does.
+Amendment 5 clause 18 defines A per candidate KIND, read off the names section
+4.2 already gives them:
+
+    retune  (Q)   A = b            F = d
+    rewrite (A,L) A = b + c        F = d + c_floor
+
+`b` is the fitted slope, `c` the non-scaling residue a rewrite also deletes.
+Pairing `A = b + c` with `r = b/d`, as an earlier draft did, silently assumes
+`c_floor = c*d/b`; on T=100, b=20, c=10, d=5 that returns 77.5 where deleting
+the residue returns 75 and preserving it returns 85.
+
+What the dial actually moves, stated because it is not what it looks like
+-------------------------------------------------------------------------
+Shrinking a matmul's input width cuts its arithmetic AND the weight bytes it
+reads, and a retuned kernel can improve how it reads those bytes but cannot
+decide not to read them. So `f` is the fraction of the step that scales with
+the operation's SIZE, not the fraction that is arithmetic. That is consistent
+rather than loose, because the floor is measured with the same dial and
+whatever traffic is irreducible sits in both slopes and divides out of `r`.
+
+The compile-cache trap, which is the reason arms are built the way they are
+---------------------------------------------------------------------------
+MLX keys its compilation cache on the underlying callable and the input
+signature, NOT on the wrapper `mx.compile` returns. Wrapping one shared step
+function twice therefore serves one arm's traced graph to another, and a dial
+that silently does nothing produces a clean fit through a horizontal line,
+which is worse than a bad fit because it looks fine.
+
+Three requirements follow, and clause 25 registers them:
+
+    every arm at every width owns a freshly built closure, retained for the run
+    the optimizer's state is initialised and evaluated BEFORE any arm is built
+    a trace counter refuses the run if any trace occurs during a timed round
+
+The second is not paranoia: Adam allocates its `m` and `v` on the first update,
+which grows the captured state tree and forces a second trace. If that trace
+lands after the seam has been removed, the arm silently becomes stock.
+
+The third is the general guard, and it is why the first two do not have to be
+exhaustive. A trace during timing is always a fault, whatever caused it. The
+counter works because a compiled function's Python body executes only while
+tracing, so a counter incremented in the body counts traces exactly.
+
+    python bench/profile_knobs.py --self-check
+"""
+
+from __future__ import annotations
+
+import statistics
+import time
+from dataclasses import dataclass, field
+from typing import Callable, Mapping, Sequence
+
+from decode_rules import RunInvalid
+
+# Amendment 5 clause 1. The dial's settings, dimensionless: the ratio of the
+# dialled size to the full size, so 1.0 is stock's own size.
+PHIS = (1.00, 0.75, 0.50, 0.25)
+
+# Clause 1. Five rounds, and EXACTLY three warm-ups rather than at least
+# three: at one warm-up the uniqueness probe returned two mutually
+# contradictory answers on consecutive runs, and a count left free is a knob
+# an implementer can turn.
+ROUNDS = 5
+WARMUPS = 3
+
+# Clause 21. Three of the four limits are pure ratios and need no measured
+# scale, so they are fixed here. The fourth needs the resolution floor R and
+# is supplied by the addendum.
+SCAFFOLD_SLOPE_LIMIT = 0.10       # |scaffold slope| <= this * |knob slope|
+R_SQUARED_FLOOR = 0.99
+RESIDUAL_LIMIT = 0.05             # |largest residual| <= this * |slope|
+SCAFFOLD_OFFSET_R_MULTIPLE = 3.0  # |offset| <= this * R
+
+# Clause 15. Two attention dials whose scaffold prices differ by less than
+# this are a tie, and a tie goes to the more complete dial. The statistic is
+# dimensionless, so its threshold is too; comparing it against the
+# time-valued R would be a units error.
+DIAL_TIE = 0.01
+
+RETUNE = "retune"
+REWRITE = "rewrite"
+KINDS = (RETUNE, REWRITE)
+
+
+@dataclass(frozen=True)
+class Fit:
+    """A least-squares line through one dial's arm times."""
+
+    slope: float
+    intercept: float
+    r_squared: float
+    max_residual: float
+
+    @property
+    def is_a_dial(self) -> bool:
+        """Does this line describe a dial, or something that does not move?
+
+        A non-positive slope is refused explicitly rather than left to fail a
+        numeric gate by accident: a dial that does not shrink the step is not
+        measuring the operation it claims to.
+        """
+        return self.slope > 0.0
+
+
+def fit(phis: Sequence[float], times: Sequence[float]) -> Fit:
+    """Least squares over the dial, with the residual reported beside it.
+
+    `r_squared` is 1.0 for a perfect line and is defined as 1.0 when every
+    time is identical, which is the degenerate case a horizontal line
+    produces; the slope test above is what catches that, not this one.
+    """
+    if len(phis) != len(times):
+        raise RunInvalid(
+            f"the dial has {len(phis)} settings and {len(times)} times, so "
+            f"there is no line to fit")
+    if len(phis) < 3:
+        raise RunInvalid(
+            f"a dial needs at least three settings to be shown linear, and "
+            f"this one has {len(phis)}")
+
+    n = len(phis)
+    mean_x = sum(phis) / n
+    mean_y = sum(times) / n
+    sxx = sum((x - mean_x) ** 2 for x in phis)
+    if sxx == 0.0:
+        raise RunInvalid("every dial setting is the same value")
+    sxy = sum((x - mean_x) * (y - mean_y) for x, y in zip(phis, times))
+    slope = sxy / sxx
+    intercept = mean_y - slope * mean_x
+
+    residuals = [y - (intercept + slope * x) for x, y in zip(phis, times)]
+    ss_res = sum(r * r for r in residuals)
+    ss_tot = sum((y - mean_y) ** 2 for y in times)
+    r_squared = 1.0 if ss_tot == 0.0 else 1.0 - ss_res / ss_tot
+    return Fit(slope=slope, intercept=intercept, r_squared=r_squared,
+               max_residual=max(residuals, key=abs))
+
+
+@dataclass(frozen=True)
+class KnobReading:
+    """One candidate's measured inputs, and everything they were derived from.
+
+    Held as raw samples plus derived properties rather than as numbers alone,
+    because a share that cannot say which reduction produced it is a share
+    nobody can check.
+    """
+
+    candidate: str
+    kind: str
+    stock_median: float                    # T, stock with NO seam installed
+    per_round: tuple[Fit, ...]             # one fit per round
+    pooled: Fit                            # one fit over the arm medians
+    scaffold: Fit                          # the scaffold-only arm's own line
+    scaffold_offset: float                 # phi=1 arm minus stock
+    ablated_median: float | None = None    # rewrite candidates only
+    resolution_floor: float | None = None  # R, from the instrument-only stage
+
+    def __post_init__(self):
+        if self.kind not in KINDS:
+            raise RunInvalid(
+                f"candidate {self.candidate} is a {self.kind!r}, which is "
+                f"neither of the two kinds section 4.2's names allow: "
+                f"{KINDS}")
+        if self.kind == REWRITE and self.ablated_median is None:
+            raise RunInvalid(
+                f"candidate {self.candidate} is a rewrite, so its credit is "
+                f"its slope PLUS its residue, and no ablated arm was "
+                f"measured to give the residue")
+        if self.kind == RETUNE and self.ablated_median is not None:
+            raise RunInvalid(
+                f"candidate {self.candidate} is a retune, so its credit is "
+                f"its slope alone, and an ablated arm was measured that "
+                f"nothing may use")
+
+    @property
+    def slope(self) -> float:
+        """`b`, the median of the per-round slopes."""
+        return statistics.median(f.slope for f in self.per_round)
+
+    @property
+    def residue(self) -> float:
+        """`c`, the non-scaling cost a rewrite also deletes.
+
+        Zero for a retune by clause 18, and zero for a rewrite whose measured
+        residue is smaller than the machine can resolve, because a number
+        below the resolution floor is not a measurement.
+        """
+        if self.kind == RETUNE:
+            return 0.0
+        raw = self.pooled.intercept - self.ablated_median
+        if self.resolution_floor is not None and abs(raw) < self.resolution_floor:
+            return 0.0
+        return raw
+
+    @property
+    def attributed(self) -> float:
+        """`A`, what this candidate's operation costs the step."""
+        return self.slope + self.residue
+
+    @property
+    def share(self) -> float:
+        """`f`, the median reduction, per clause 18's statistics table."""
+        return self.attributed / self.stock_median
+
+    def blockers(self) -> list[str]:
+        """Every reason this reading cannot be credited, in plain words.
+
+        Gathered rather than raised: a knob that measured everything and then
+        failed one gate is evidence, and the reason is worth naming.
+        """
+        problems = []
+        if not self.pooled.is_a_dial:
+            problems.append(
+                f"candidate {self.candidate}: the fitted slope is "
+                f"{self.pooled.slope:.6f}, which is not positive, so the "
+                f"dial does not shrink the step and is not measuring the "
+                f"operation it names")
+        if self.pooled.r_squared < R_SQUARED_FLOOR:
+            problems.append(
+                f"candidate {self.candidate}: the fit's R-squared is "
+                f"{self.pooled.r_squared:.4f}, below the registered "
+                f"{R_SQUARED_FLOOR}, so the dial is not a dial")
+        residual_limit = RESIDUAL_LIMIT * abs(self.pooled.slope)
+        if abs(self.pooled.max_residual) > residual_limit:
+            problems.append(
+                f"candidate {self.candidate}: the largest residual is "
+                f"{abs(self.pooled.max_residual):.6f} against a limit of "
+                f"{residual_limit:.6f}, one twentieth of the slope")
+        scaffold_limit = SCAFFOLD_SLOPE_LIMIT * abs(self.pooled.slope)
+        if abs(self.scaffold.slope) > scaffold_limit:
+            problems.append(
+                f"candidate {self.candidate}: the scaffold's own slope is "
+                f"{abs(self.scaffold.slope):.6f} against a limit of "
+                f"{scaffold_limit:.6f}, one tenth of the knob's slope, so "
+                f"the scaffold's cost is inside the number the knob reports")
+        if self.resolution_floor is None:
+            problems.append(
+                f"candidate {self.candidate}: no resolution floor is "
+                f"registered, so the scaffold offset of "
+                f"{self.scaffold_offset:.6f} cannot be judged and the "
+                f"residue cannot be tested against anything")
+        else:
+            offset_limit = SCAFFOLD_OFFSET_R_MULTIPLE * self.resolution_floor
+            if abs(self.scaffold_offset) > offset_limit:
+                problems.append(
+                    f"candidate {self.candidate}: the scaffold offset is "
+                    f"{abs(self.scaffold_offset):.6f} against a limit of "
+                    f"{offset_limit:.6f}, three times the resolution floor")
+        if not 0.0 < self.share < 1.0:
+            problems.append(
+                f"candidate {self.candidate}: the share is "
+                f"{self.share:.4f}, which is not a fraction of a step")
+        return problems
+
+
+def ratio_lo(numerator: "KnobReading", denominator: "KnobReading") -> float:
+    """`r`, the worst pairing the per-round samples permit.
+
+    Section 4.2 credits the lower endpoint of a measured interval, so the
+    smallest attributed cost divides the largest floor cost. That is
+    deliberately the opposite reduction from the one `share` uses: a median
+    share against a worst-case ratio gives the smaller gain, which is the
+    conservative direction for a rule that decides what to build. The
+    credited result is therefore a bound and not a predicted measurement.
+    """
+    if numerator.kind != denominator.kind:
+        raise RunInvalid(
+            f"the share is measured on a {numerator.kind} and the floor on a "
+            f"{denominator.kind}, so `A` and `F` are not the same kind of "
+            f"quantity and the formula they feed is not the registered one")
+    smallest = min(f.slope for f in numerator.per_round) + numerator.residue
+    largest = max(f.slope for f in denominator.per_round) + denominator.residue
+    if largest <= 0.0:
+        raise RunInvalid(
+            "the floor's cost reduces to zero or less, so the ratio it would "
+            "credit is not a number the gain formula accepts")
+    return smallest / largest
+
+
+def shape_ratio(stock_by_direction: Mapping[str, float],
+                floor_by_direction: Mapping[str, float],
+                counts: Mapping[str, int]) -> float:
+    """One shape's ratio, as a ratio of SUMMED costs (Amendment 5 clause 8).
+
+    Not an average of per-direction ratios, which is a different quantity.
+    On equal counts with stock costs 100 and 20 against floor costs 100 and
+    10, the average of ratios is 1.50 and the ratio of sums is 1.09, so the
+    two land on opposite sides of the kill rule's 1.10 threshold and only the
+    second answers "is stock close to the ceiling in the time it actually
+    spends".
+    """
+    directions = sorted(counts)
+    missing = [d for d in directions
+               if d not in stock_by_direction or d not in floor_by_direction]
+    if missing:
+        raise RunInvalid(
+            f"no cost measured for {missing} although the counts name them; "
+            f"a direction that never ran is written as a count of zero, and "
+            f"one that was never measured cannot be summed at all")
+    stock = sum(counts[d] * stock_by_direction[d] for d in directions)
+    floor = sum(counts[d] * floor_by_direction[d] for d in directions)
+    if floor <= 0.0:
+        raise RunInvalid("the floor's summed cost is zero or less")
+    return stock / floor
+
+
+def choose_dial(prices: Mapping[str, float],
+                completeness: Sequence[str]) -> dict[str, object]:
+    """Amendment 5 clause 15: the attention dial, chosen by a registered rule.
+
+    `prices` are dimensionless, |scaffold slope| over |knob slope|, so the
+    tie threshold is dimensionless too. The smallest price wins; prices
+    within DIAL_TIE of each other are a tie, and a tie goes to the earlier
+    entry in `completeness`, most complete first.
+    """
+    unknown = sorted(set(prices) - set(completeness))
+    if unknown:
+        raise RunInvalid(
+            f"{unknown} have a price but no registered completeness rank, so "
+            f"a tie among them could not be broken by the registered rule")
+    if not prices:
+        raise RunInvalid("no dial was priced, so none can be chosen")
+
+    best = min(prices.values())
+    tied = [name for name, price in prices.items() if price - best < DIAL_TIE]
+    chosen = min(tied, key=completeness.index)
+    return {
+        "chosen": chosen,
+        "tied": sorted(tied, key=completeness.index),
+        "prices": dict(prices),
+        "by_completeness": chosen != min(prices, key=lambda n: prices[n]),
+    }
+
+
+# ---------------------------------------------------------------------------
+# The live half. Everything below touches MLX and a device; everything above
+# is arithmetic and is tested without one.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Arm:
+    """One setting of one dial, as the seams it installs while it traces."""
+
+    label: str
+    phi: float
+    seams: Mapping[object, Callable] = field(default_factory=dict)
+
+
+@dataclass
+class CompiledArm:
+    """A compiled step that has already traced, with its own trace counter.
+
+    `traces` is a list the compiled body appends to. A compiled function's
+    Python body runs only while tracing, so its length IS the trace count.
+    `traced_by_warmup` is that length after the warm-ups, and any growth
+    after it is the fault clause 25 exists to catch.
+    """
+
+    label: str
+    phi: float
+    step: Callable
+    state: list
+    traces: list
+    traced_by_warmup: int
+
+    def retraced(self) -> bool:
+        return len(self.traces) > self.traced_by_warmup
+
+
+def build_step(model, optimizer, state) -> tuple[Callable, list]:
+    """A FRESH closure every call, which is what keeps arms apart.
+
+    MLX keys its compile cache on the underlying callable, so two arms that
+    share one raw function share one traced graph and the second arm's dial
+    does nothing. Returning a new closure per call is the whole mechanism.
+
+    Mirrors the step mlx-lm's own trainer compiles, including the branches
+    this profile never takes, because a mirror with the unused half removed
+    is a different function that happens to agree today.
+    """
+    from functools import partial
+
+    import mlx.core as mx
+    import mlx.nn as nn
+    from mlx.nn.utils import average_gradients
+    from mlx.utils import tree_map
+    from mlx_lm.tuner.trainer import default_loss
+
+    loss_value_and_grad = nn.value_and_grad(model, default_loss)
+    traces: list[int] = []
+
+    @partial(mx.compile, inputs=state, outputs=state)
+    def step(batch, prev_grad, do_update):
+        traces.append(1)
+        (lvalue, toks), grad = loss_value_and_grad(model, *batch)
+        if prev_grad is not None:
+            grad = tree_map(lambda x, y: x + y, grad, prev_grad)
+        if do_update:
+            grad = average_gradients(grad)
+            optimizer.update(model, grad)
+            grad = None
+        return lvalue, toks, grad
+
+    return step, traces
+
+
+def settle_optimizer(model, optimizer) -> None:
+    """Clause 25: give the optimizer its state before any arm is built.
+
+    Adam allocates `m` and `v` on its first update, which grows the tree
+    `mx.compile` captured and forces a second trace. If that trace lands
+    after an arm's seam has been removed, the arm silently becomes stock.
+    """
+    import mlx.core as mx
+
+    optimizer.init(model.trainable_parameters())
+    mx.eval(optimizer.state)
+
+
+def one_step(compiled: CompiledArm, batch, clear_cache_threshold: int = 0) -> float:
+    """One step, timed exactly where mlx-lm's own loop times it.
+
+    The cache clear is inside the timed region because it is inside
+    mlx-lm's, and at the default threshold it runs every step. It is stock's
+    real cost and the denominator has to carry it.
+    """
+    import mlx.core as mx
+    from mlx_lm.tuner.trainer import _clear_cache
+
+    start = time.perf_counter()
+    lvalue, toks, grad = compiled.step(batch, None, True)
+    mx.eval(compiled.state, lvalue, toks, grad)
+    _clear_cache(clear_cache_threshold)
+    return time.perf_counter() - start
+
+
+def prepare_arm(model, optimizer, state, batch, arm: Arm,
+                warmups: int = WARMUPS) -> CompiledArm:
+    """Build one arm's compiled step, trace it UNDER its seams, then unhook.
+
+    The ordering is the whole point and it is not an implementation detail:
+    the trace happens at the first CALL, not at construction, so the seams
+    have to be live across that first call. Once traced, the graph is fixed
+    and the seams are irrelevant, which is why the timed rounds run with no
+    installer active at all and pay none of its cost.
+    """
+    from metalrunner import seams
+
+    installation = seams.Installation()
+    try:
+        for seam, wrap in arm.seams.items():
+            installation.install(seam, wrap)
+        step, traces = build_step(model, optimizer, state)
+        compiled = CompiledArm(label=arm.label, phi=arm.phi, step=step,
+                               state=state, traces=traces, traced_by_warmup=0)
+        for _ in range(warmups):
+            one_step(compiled, batch)
+    finally:
+        installation.remove()
+    compiled.traced_by_warmup = len(traces)
+    if installation.foreign_on_removal:
+        raise RunInvalid(
+            f"arm {arm.label}: something replaced "
+            f"{installation.foreign_on_removal} while it was building, so "
+            f"what traced is not what this arm describes")
+    return compiled
+
+
+def timed_rounds(arms: Sequence[CompiledArm], batch, *,
+                 rounds: int = ROUNDS) -> dict[str, list[float]]:
+    """Every arm timed inside every round, in rotation, with no seam active.
+
+    Interleaving is load-bearing and NOT sufficient: it spreads a clock
+    excursion across the arms but cannot detect one, so the caller still
+    gates on the spread. Rotating the order stops any arm always running
+    first, which is where allocation and cache effects land.
+    """
+    samples: dict[str, list[float]] = {arm.label: [] for arm in arms}
+    for index in range(rounds):
+        order = list(arms[index % len(arms):]) + list(arms[:index % len(arms)])
+        for arm in order:
+            samples[arm.label].append(one_step(arm, batch))
+    retraced = [arm.label for arm in arms if arm.retraced()]
+    if retraced:
+        raise RunInvalid(
+            f"arms {retraced} were re-traced during timed rounds; a trace "
+            f"during timing is always a fault, and this one means the timed "
+            f"graph is not the graph the seams produced")
+    return samples
+
+
+def per_round_fits(samples: Mapping[str, Sequence[float]],
+                   phis: Mapping[str, float],
+                   rounds: int = ROUNDS) -> list[Fit]:
+    """One line per round, across that round's settings of one dial."""
+    labels = sorted(phis, key=lambda label: -phis[label])
+    fits = []
+    for index in range(rounds):
+        fits.append(fit([phis[label] for label in labels],
+                        [samples[label][index] for label in labels]))
+    return fits
+
+
+def pooled_fit(samples: Mapping[str, Sequence[float]],
+               phis: Mapping[str, float]) -> Fit:
+    """One line over the arm medians, which is what the gates read."""
+    labels = sorted(phis, key=lambda label: -phis[label])
+    return fit([phis[label] for label in labels],
+               [statistics.median(samples[label]) for label in labels])
+
+
+# ---------------------------------------------------------------------------
+# The dials themselves. Each one shrinks its operation's SIZE while holding
+# the call count, the output shape and the graph structure fixed.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Knob:
+    """One candidate's dial, and everything needed to drive it.
+
+    `regions` names entries in `profile_instrument.REGIONS` rather than
+    repeating their seams, so where a region lives is written once. `prepare`
+    materialises every setting's operands OUTSIDE any timed region, so the
+    arms differ in the work they do and not in when they paid for it.
+    """
+
+    candidate: str
+    kind: str
+    regions: tuple[str, ...]
+    prepare: Callable
+    arm: Callable
+    scaffold: Callable
+    ablate: Callable | None = None
+
+    def __post_init__(self):
+        if self.kind == REWRITE and self.ablate is None:
+            raise RunInvalid(
+                f"candidate {self.candidate} is a rewrite, so its credit "
+                f"needs a residue, and no ablated arm is defined for it")
+
+
+def _group_aligned(phi: float, dims: int, group: int) -> int:
+    """A dialled input width that is still a valid quantized operand.
+
+    Rounded to a whole number of quantization groups, because a partial group
+    has no scale of its own.
+    """
+    return max(group, int(round(phi * dims / group)) * group)
+
+
+def _projection_ladder(model, phis=PHIS) -> dict:
+    """Every quantized projection, cut to a prefix of its input dimension."""
+    import mlx.core as mx
+    import mlx.nn as nn
+
+    ladder = {phi: {} for phi in phis}
+    for _name, module in model.named_modules():
+        if not isinstance(module, nn.QuantizedLinear):
+            continue
+        weight = module["weight"]
+        _out_dims, packed = weight.shape
+        in_dims = packed * 32 // module.bits
+        for phi in phis:
+            in_k = _group_aligned(phi, in_dims, module.group_size)
+            packed_k = in_k * module.bits // 32
+            biases = module.get("biases")
+            entry = (
+                in_k,
+                mx.contiguous(weight[:, :packed_k]),
+                mx.contiguous(module["scales"][:, :in_k // module.group_size]),
+                (mx.contiguous(biases[:, :in_k // module.group_size])
+                 if biases is not None else None),
+            )
+            mx.eval(*[part for part in entry[1:] if part is not None])
+            ladder[phi][id(module)] = entry
+    return ladder
+
+
+def _head_ladder(model, axis: str, phis=PHIS) -> dict:
+    """The tied head, cut along one axis.
+
+    `axis` is "input" for candidate Q, which dials the hidden dimension the
+    head contracts over, and "vocabulary" for candidate L, which dials the
+    rows the loss then reduces across. They are different axes of the same
+    weight and the two candidates are never composed, per clause 13.
+    """
+    import mlx.core as mx
+
+    embedding = model.model.embed_tokens
+    weight = embedding["weight"]
+    scales = embedding["scales"]
+    biases = embedding.get("biases")
+    rows, packed = weight.shape
+    in_dims = packed * 32 // embedding.bits
+
+    ladder = {}
+    for phi in phis:
+        if axis == "vocabulary":
+            kept = max(1, int(round(phi * rows)))
+            cut = (mx.contiguous(weight[:kept]), mx.contiguous(scales[:kept]),
+                   mx.contiguous(biases[:kept]) if biases is not None else None)
+        else:
+            kept = _group_aligned(phi, in_dims, embedding.group_size)
+            packed_k = kept * embedding.bits // 32
+            groups = kept // embedding.group_size
+            cut = (mx.contiguous(weight[:, :packed_k]),
+                   mx.contiguous(scales[:, :groups]),
+                   mx.contiguous(biases[:, :groups]) if biases is not None
+                   else None)
+        mx.eval(*[part for part in cut if part is not None])
+        ladder[phi] = (kept, *cut)
+    return ladder
+
+
+def _projection_call(ladder_at_phi, *, slice_operand: bool):
+    """Candidate Q's and P3's per-call replacement.
+
+    With `slice_operand` false this is the scaffold-only arm of clause 5: the
+    dial's index arithmetic runs and is discarded, and the operation runs at
+    full size, so what the arm costs is the scaffold and nothing else.
+    """
+    import mlx.core as mx
+
+    def wrap(original):
+        def call(self, x):
+            in_k, weight, scales, biases = ladder_at_phi[id(self)]
+            cut = x[..., :in_k]
+            if not slice_operand:
+                return original(self, x)
+            y = mx.quantized_matmul(
+                cut, weight, scales=scales, biases=biases, transpose=True,
+                group_size=self.group_size, bits=self.bits, mode=self.mode)
+            return y + self["bias"] if "bias" in self else y
+        return call
+    return wrap
+
+
+def _head_call(entry, axis: str, *, slice_operand: bool):
+    """The head's per-call replacement, on whichever axis the candidate dials."""
+    import mlx.core as mx
+
+    kept, weight, scales, biases = entry
+
+    def wrap(original):
+        def call(self, x):
+            cut = x[..., :kept] if axis == "input" else x
+            if not slice_operand:
+                return original(self, x)
+            return mx.quantized_matmul(
+                cut, weight, scales=scales, biases=biases, transpose=True,
+                group_size=self.group_size, bits=self.bits, mode=self.mode)
+        return call
+    return wrap
+
+
+def _loss_call(kept: int, *, apply: bool):
+    """Cross-entropy over a dialled vocabulary.
+
+    The targets are taken modulo the kept width because the loss indexes them
+    into the logits and a target beyond the slice would be out of range. Its
+    cost depends on the width of the logits and not on which column a target
+    names, so this keeps the work honest while keeping the indices valid. The
+    loss VALUE changes, which is why no arm here is compared against stock's
+    loss and only times are compared.
+    """
+    def wrap(original):
+        def call(logits, targets, *args, **kwargs):
+            reduced = targets % kept
+            if not apply:
+                return original(logits, targets, *args, **kwargs)
+            return original(logits, reduced, *args, **kwargs)
+        return call
+    return wrap
+
+
+def _seam(region: str):
+    import profile_instrument as pi
+
+    return pi.REGIONS[region].seam
+
+
+def _projection_knob(candidate: str, regions: tuple[str, ...],
+                     with_head: bool) -> Knob:
+    """Candidate Q, and the projections-only region P3 clause 22 needs.
+
+    They differ only in whether the tied head moves with the projections.
+    Section 3.3 puts the head inside candidate Q, so Q dials it; the
+    partition region excludes it so that P1, P2 and P3 are disjoint and their
+    sum means something.
+    """
+    def prepare(model):
+        prepared = {"projections": _projection_ladder(model)}
+        if with_head:
+            prepared["head"] = _head_ladder(model, "input")
+        return prepared
+
+    def arm(prepared, phi, *, slice_operand=True):
+        seams_map = {
+            _seam("qmm"): _projection_call(prepared["projections"][phi],
+                                           slice_operand=slice_operand),
+        }
+        if with_head:
+            seams_map[_seam("head-matmul")] = _head_call(
+                prepared["head"][phi], "input", slice_operand=slice_operand)
+        return seams_map
+
+    return Knob(
+        candidate=candidate,
+        kind=RETUNE,
+        regions=regions,
+        prepare=prepare,
+        arm=arm,
+        scaffold=lambda prepared, phi: arm(prepared, phi, slice_operand=False),
+    )
+
+
+def _loss_knob() -> Knob:
+    """Candidate L: the output head and the loss, on one vocabulary dial.
+
+    One dial moves both of L's registered regions, because slicing the head's
+    rows shrinks its matmul AND the logits the loss reduces over. It is a
+    REWRITE: a streamed kernel never builds the full logits tensor at all, so
+    its credit is its slope plus the residue that deletion also removes.
+    """
+    def prepare(model):
+        return {"head": _head_ladder(model, "vocabulary")}
+
+    def arm(prepared, phi, *, slice_operand=True):
+        kept = prepared["head"][phi][0]
+        return {
+            _seam("head-matmul"): _head_call(prepared["head"][phi],
+                                             "vocabulary",
+                                             slice_operand=slice_operand),
+            _seam("cross-entropy"): _loss_call(kept, apply=slice_operand),
+        }
+
+    def ablate(prepared):
+        return arm(prepared, min(PHIS))
+
+    return Knob(
+        candidate="L",
+        kind=REWRITE,
+        regions=("head-matmul", "cross-entropy"),
+        prepare=prepare,
+        arm=arm,
+        scaffold=lambda prepared, phi: arm(prepared, phi, slice_operand=False),
+        ablate=ablate,
+    )
+
+
+# Candidate A is absent on purpose. Attention admits no single obvious dial,
+# so Amendment 5 clause 15 registers three candidate dials and a criterion
+# that picks among them by measurement; that step builds them and adds the
+# winner here. Until then a caller asking for "A" gets a KeyError rather than
+# a dial somebody guessed at.
+KNOBS = {
+    "Q": _projection_knob("Q", ("qmm", "head-matmul"), with_head=True),
+    "P3": _projection_knob("P3", ("qmm",), with_head=False),
+    "L": _loss_knob(),
+}
