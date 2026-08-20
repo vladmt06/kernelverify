@@ -1,5 +1,16 @@
 # TODOS
 
+## The selection rule ignores half of clause 12's fall-through condition
+
+- What: `select_first_operation` implements only "any tied candidate has no measured delta" and not the other half of Amendment 5 clause 12, "or where candidate L is in contention against another candidate at all, the whole band falls through to table order".
+- Why: the two halves choose different winners on the same input.
+  Reproduced by execution on 2026-08-20: an L/Q band at equal gain with measured deltas 900 and 100 returns Q on the smaller delta, where the registered rule falls through to table order and returns L.
+  Candidate L's delta is measured on the bench while the others are measured in the step, which is why the registered rule refuses to rank them against each other, and the code ranks them anyway.
+- Pros: the registered text is committed and unambiguous, and the fix is one condition in the branch that already exists.
+- Cons: under Amendment 6 the scored set is exactly L and Q, so every two-member band contains L and the footprint tie-break is UNREACHABLE; fixing the condition standalone adds a branch that the step 8 rewrite then deletes as dead.
+- Context: `bench/profile_rules.py` `select_first_operation`, the `measured = all(...)` branch; prereg clause 12; found by a design workflow reading the clause against the code, then reproduced.
+- Depends on / blocked by: nothing, but it is folded into step 8 of the current increment rather than fixed twice.
+
 ## The attention dial's registered criterion names no width, and the width picks the dial
 
 - What: register the width at which Amendment 5 clause 15's dial selection is made, or replace the price statistic with one that does not invert across the width range the profile already registers.
