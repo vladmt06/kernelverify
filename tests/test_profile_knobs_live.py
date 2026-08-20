@@ -685,3 +685,70 @@ def test_the_fused_entry_point_cannot_be_reached_from_inside_the_real_step(rig):
         "floor arm installed at this seam would measure the fused kernel and "
         "clause 19 can be applied to candidate A as written")
     assert traced.count("Softmax") == 1
+
+
+@requires_metal
+def test_only_the_length_dial_can_drive_the_fused_floor_on_the_registered_ladder():
+    """Which dial candidate A's floor can even use, on clause 1's own ladder.
+
+    A floor arm has to run the fused kernel, and Amendment 6 clause 28 records
+    how many settings each of the three dials can place on it. Each dial is
+    driven here in its own shape, because the two head-dimension dials differ
+    in exactly the way that decides the answer: one cuts the values with the
+    queries and keys and the other leaves them at full width, and MLX requires
+    the value head dimension to equal the query and key head dimension.
+
+    That constraint decides whether candidate A can have a credited ratio at
+    all, and it comes from the floor rather than from the price statistic
+    clause 15 selects on.
+    """
+    import mlx.core as mx
+
+    head_dim, queries, kv_heads, heads = 128, 96, 8, 16
+    scale = head_dim ** -0.5
+
+    def fused_settings(build):
+        placed = []
+        for phi in pk.PHIS:
+            operands = build(phi)
+            mx.eval(*[part for part in operands if part is not None])
+            if FUSED in _primitives(mx.fast.scaled_dot_product_attention(
+                    operands[0], operands[1], operands[2], scale=scale,
+                    mask=operands[3])):
+                placed.append(phi)
+        return placed
+
+    def head_dim_qkv(phi):
+        kept = int(round(phi * head_dim))
+        return (mx.random.normal((1, heads, queries, kept)),
+                mx.random.normal((1, kv_heads, queries, kept)),
+                mx.random.normal((1, kv_heads, queries, kept)), "causal")
+
+    def head_dim_qk(phi):
+        kept = int(round(phi * head_dim))
+        return (mx.random.normal((1, heads, queries, kept)),
+                mx.random.normal((1, kv_heads, queries, kept)),
+                mx.random.normal((1, kv_heads, queries, head_dim)), "causal")
+
+    def kv_length(phi):
+        kept = int(round(phi * queries))
+        return (mx.random.normal((1, heads, queries, head_dim)),
+                mx.random.normal((1, kv_heads, kept, head_dim)),
+                mx.random.normal((1, kv_heads, kept, head_dim)),
+                mx.arange(kept)[None, :] <= mx.arange(queries)[:, None])
+
+    placed = {"kv-length": fused_settings(kv_length),
+              "head-dim-qkv": fused_settings(head_dim_qkv),
+              "head-dim-qk": fused_settings(head_dim_qk)}
+    counts = {dial: len(settings) for dial, settings in placed.items()}
+
+    assert counts == {"kv-length": 4, "head-dim-qkv": 2, "head-dim-qk": 1}, (
+        f"clause 28's table records 4, 2 and 1 fused settings and this "
+        f"machine placed {counts} at {placed}")
+    assert set(placed) == set(pk.ATTENTION_DIALS), (
+        "a dial was renamed without clause 28's table moving with it")
+    assert counts["kv-length"] >= pk.MIN_DIAL_SETTINGS
+    assert all(counts[dial] < pk.MIN_DIAL_SETTINGS
+               for dial in ("head-dim-qkv", "head-dim-qk")), (
+        "a head-dimension dial can place three fused settings after all, so "
+        "clause 15's escape hatch is not live and clause 28 is wrong")
