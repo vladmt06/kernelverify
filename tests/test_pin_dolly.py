@@ -200,3 +200,103 @@ def test_the_declared_digest_matches_the_corpus_that_was_measured():
     the corpus that would be sliced."""
     assert len(pin_dolly.SOURCE_SHA256) == 64
     assert set(pin_dolly.SOURCE_SHA256) <= set("0123456789abcdef")
+
+
+# ---------------------------------------------------------------------------
+# UltraChat: clause 20's adapter, derived bands, and independent selection
+# ---------------------------------------------------------------------------
+def _chat(*turns):
+    return {"messages": [{"role": role, "content": content}
+                         for role, content in turns]}
+
+
+def test_the_adapter_takes_the_first_exchange_and_discards_the_thread():
+    row = _chat(("user", "q1"), ("assistant", "a1"),
+                ("user", "q2"), ("assistant", "a2"))
+    assert pin_dolly.ultrachat_pair(row) == {"prompt": "q1",
+                                             "completion": "a1"}
+
+
+def test_the_completion_is_the_first_assistant_after_the_first_user():
+    row = _chat(("assistant", "orphan"), ("user", "q"), ("assistant", "a"))
+    assert pin_dolly.ultrachat_pair(row) == {"prompt": "q", "completion": "a"}
+
+
+def test_a_row_without_an_exchange_is_dropped_not_guessed():
+    assert pin_dolly.ultrachat_pair(_chat(("user", "q"))) is None
+    assert pin_dolly.ultrachat_pair(_chat(("assistant", "a"))) is None
+    assert pin_dolly.ultrachat_pair({"messages": []}) is None
+
+
+def test_measure_counts_a_dropped_row_by_returning_fewer():
+    class Tok:
+        def apply_chat_template(self, messages, return_dict=False,
+                                add_generation_prompt=False):
+            return list(range(sum(len(m["content"]) for m in messages)))
+
+    rows = [_chat(("user", "q"), ("assistant", "aa")), _chat(("user", "q"))]
+    got = pin_dolly.measure(rows, Tok(), adapter=pin_dolly.ultrachat_pair)
+    assert len(got) == 1 and got[0]["pair"]["completion"] == "aa"
+
+
+def test_the_short_band_is_the_shortest_that_fills_both_splits():
+    train = {64: 2000, 96: 2000, 1056: 2000, 1088: 2000}
+    valid = {64: 10, 96: 200, 1056: 200, 1088: 200}
+    got = pin_dolly.derive_bands(train, valid)
+    assert got["short"] == 96, "band 64 fills train but not valid"
+
+
+def test_the_long_band_starts_where_the_lower_edge_reaches_1024():
+    train = {96: 2000, 1024: 2000, 1056: 2000, 1088: 2000}
+    valid = {96: 200, 1024: 200, 1056: 200, 1088: 200}
+    got = pin_dolly.derive_bands(train, valid)
+    assert got["long"] == 1056, \
+        "band 1024 spans (992, 1024], and its LOWER edge is below 1024"
+
+
+def test_an_unfillable_corpus_refuses_and_names_the_missing_band():
+    with pytest.raises(SystemExit, match="long band"):
+        pin_dolly.derive_bands({96: 2000}, {96: 200})
+
+
+def test_two_identical_derived_bands_refuse():
+    with pytest.raises(SystemExit, match="must differ"):
+        pin_dolly.derive_bands({1056: 2000}, {1056: 200})
+
+
+def test_selection_from_one_split_ignores_the_other_split_entirely():
+    """Clause 20 shuffles the splits independently with one seed, so a changed
+    validation split can never move a training row."""
+    train_pool = [measured(90, prompt=f"t{i}") for i in range(300)]
+    first = pin_dolly.select_one(train_pool, 96, 5)
+    second = pin_dolly.select_one(list(train_pool), 96, 5)
+    assert [r["pair"] for r in first] == [r["pair"] for r in second]
+
+
+def test_select_one_refuses_a_thin_band():
+    with pytest.raises(SystemExit, match="holds 2 rows"):
+        pin_dolly.select_one([measured(90), measured(91)], 96, 3)
+
+
+def test_the_tokenizer_hash_moves_with_the_tokenizer(tmp_path):
+    (tmp_path / "tokenizer.json").write_text("A", encoding="utf-8")
+    (tmp_path / "tokenizer_config.json").write_text("B", encoding="utf-8")
+    before = pin_dolly.tokenizer_hash(tmp_path)
+    (tmp_path / "tokenizer.json").write_text("C", encoding="utf-8")
+    assert pin_dolly.tokenizer_hash(tmp_path) != before
+
+
+def test_a_directory_without_tokenizer_files_refuses(tmp_path):
+    with pytest.raises(SystemExit, match="no tokenizer files"):
+        pin_dolly.tokenizer_hash(tmp_path)
+
+
+def test_a_changed_upstream_revision_refuses_rather_than_repinning(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(pin_dolly, "DATA_DIR", tmp_path)
+    out = tmp_path / "ultrachat-96"
+    out.mkdir()
+    (out / "manifest.json").write_text(
+        json.dumps({"revision": "aaa"}), encoding="utf-8")
+    with pytest.raises(SystemExit, match="invalidated"):
+        pin_dolly._refuse_stale_manifest(96, "bbb")

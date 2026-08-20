@@ -116,11 +116,20 @@ def batch_width(longest: int, max_seq_length: int = MAX_SEQ_LENGTH) -> int:
     return min(1 + PAD_TO * ((longest + PAD_TO - 1) // PAD_TO), max_seq_length)
 
 
-def measure(rows, tokenizer) -> list[dict]:
-    """Token length and supervised fraction for every row, once."""
+def measure(rows, tokenizer, adapter=None) -> list[dict]:
+    """Token length and supervised fraction for every row, once.
+
+    `adapter` maps a raw corpus row to a prompt/completion pair and defaults
+    to Dolly's; rows the adapter returns None for are dropped and counted by
+    the caller. One measurement rule for every corpus, per the plan's
+    one-band-arithmetic requirement.
+    """
+    adapter = as_prompt_completion if adapter is None else adapter
     measured = []
     for row in rows:
-        pair = as_prompt_completion(row)
+        pair = adapter(row)
+        if pair is None:
+            continue
         messages = [{"role": "user", "content": pair["prompt"]},
                     {"role": "assistant", "content": pair["completion"]}]
         tokens = tokenizer.apply_chat_template(messages, return_dict=False)
@@ -194,16 +203,294 @@ def write_split(path: Path, rows) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
+# ---------------------------------------------------------------------------
+# UltraChat 200k, the corpus of Amendment 5 clause 20. The module name is
+# historical: this file is the repository's one corpus pinner, and the band
+# arithmetic above is shared by every corpus it pins.
+# ---------------------------------------------------------------------------
+ULTRACHAT_REPO = "HuggingFaceH4/ultrachat_200k"
+ULTRACHAT_SPLITS = {"train": "train_sft", "valid": "test_sft"}
+TRAIN_ROWS = 1024
+VALID_ROWS = 128
+LONG_EDGE = 1024
+HF_CACHE = ROOT / "bench" / ".cache" / "hf"
+DATA_DIR = ROOT / "bench" / ".data"
+
+
+def ultrachat_pair(row: dict) -> dict | None:
+    """Clause 20's chat adapter: the first user turn becomes the prompt, the
+    first assistant turn after it becomes the completion, and the rest of the
+    thread is discarded. A row without that shape is dropped, and the caller
+    counts the drops so the distribution report can name them.
+    """
+    messages = row.get("messages") or []
+    prompt = None
+    for message in messages:
+        if prompt is None:
+            if message.get("role") == "user" and message.get("content"):
+                prompt = message["content"]
+        elif message.get("role") == "assistant" and message.get("content"):
+            return {"prompt": prompt, "completion": message["content"]}
+    return None
+
+
+def resolve_revision(repo: str = ULTRACHAT_REPO) -> str:
+    """The upstream commit hash, resolved once at pin time (clause 20).
+
+    The hash is committed in the manifest beside the slices; a consumer that
+    finds a different upstream refuses rather than re-pinning silently.
+    """
+    from huggingface_hub import HfApi
+
+    sha = HfApi().dataset_info(repo).sha
+    if not sha:
+        raise SystemExit(f"{repo} resolved to no commit hash; nothing to pin")
+    return sha
+
+
+def fetch_ultrachat(revision: str, repo: str = ULTRACHAT_REPO,
+                    cache_dir: Path = HF_CACHE) -> dict[str, list[Path]]:
+    """Every parquet shard of both registered splits, at the pinned revision."""
+    from huggingface_hub import HfApi, hf_hub_download
+
+    names = HfApi().list_repo_files(repo, repo_type="dataset",
+                                    revision=revision)
+    shards: dict[str, list[Path]] = {}
+    for split, upstream in ULTRACHAT_SPLITS.items():
+        matching = sorted(n for n in names
+                          if n.startswith(f"data/{upstream}-")
+                          and n.endswith(".parquet"))
+        if not matching:
+            raise SystemExit(f"{repo}@{revision} holds no parquet shards for "
+                             f"split {upstream}")
+        shards[split] = [Path(hf_hub_download(
+            repo, name, repo_type="dataset", revision=revision,
+            cache_dir=str(cache_dir))) for name in matching]
+    return shards
+
+
+def read_parquet_rows(paths) -> list[dict]:
+    import pyarrow.parquet as pq
+
+    rows: list[dict] = []
+    for path in paths:
+        table = pq.read_table(path, columns=["messages"])
+        rows.extend(table.to_pylist())
+    return rows
+
+
+def band_counts(measured) -> dict[int, int]:
+    counts: dict[int, int] = {}
+    for row in measured:
+        counts[row["band"]] = counts.get(row["band"], 0) + 1
+    return counts
+
+
+def derive_bands(train_counts: dict[int, int], valid_counts: dict[int, int],
+                 *, train: int = TRAIN_ROWS, valid: int = VALID_ROWS,
+                 long_edge: int = LONG_EDGE) -> dict[str, int]:
+    """Clause 20's two bands, DERIVED rather than chosen.
+
+    The short band is the shortest 32-token band holding `train` training
+    rows AND `valid` validation rows; the long band is the shortest such band
+    whose LOWER edge, the upper edge minus 32, is at or above `long_edge`.
+    Registering the rule registers the answer, so nothing here is a choice.
+    """
+    def fills(band: int) -> bool:
+        return (train_counts.get(band, 0) >= train
+                and valid_counts.get(band, 0) >= valid)
+
+    candidates = sorted(set(train_counts) | set(valid_counts))
+    short = next((band for band in candidates if fills(band)), None)
+    long = next((band for band in candidates
+                 if band - PAD_TO >= long_edge and fills(band)), None)
+    if short is None or long is None:
+        which = [name for name, band in (("short", short), ("long", long))
+                 if band is None]
+        raise SystemExit(
+            f"no {' or '.join(which)} band can fill {train} training and "
+            f"{valid} validation rows; the profile does not run on a relaxed "
+            f"rule. Busiest training bands: "
+            f"{_busiest(_counts_as_measured(train_counts))}")
+    if short == long:
+        raise SystemExit(
+            f"both derived bands are {short}: the two registered widths must "
+            f"differ, and this corpus cannot supply two")
+    return {"short": short, "long": long}
+
+
+def _counts_as_measured(counts: dict[int, int]) -> list[dict]:
+    return [{"band": band} for band, n in counts.items() for _ in range(n)]
+
+
+def select_one(measured, band: int, count: int, seed: int = SEED):
+    """A deterministic slice of one band from ONE split.
+
+    Clause 20 shuffles the two splits independently, each with the same seed,
+    because they are separate upstream populations and a pooled shuffle would
+    not be reproducible from either alone.
+    """
+    pool = [row for row in measured if row["band"] == band]
+    if len(pool) < count:
+        raise SystemExit(f"band {band} holds {len(pool)} rows of this split, "
+                         f"and {count} were asked for")
+    random.Random(seed).shuffle(pool)
+    return pool[:count]
+
+
+def tokenizer_hash(model_dir: Path = MODEL_DIR) -> str:
+    """One digest over the tokenizer files, committed with the band edges,
+    because the bands are token counts and a different tokenizer makes them
+    different numbers."""
+    digest = hashlib.sha256()
+    names = sorted(name for name in
+                   ("tokenizer.json", "tokenizer_config.json",
+                    "special_tokens_map.json")
+                   if (model_dir / name).exists())
+    if not names:
+        raise SystemExit(f"{model_dir} holds no tokenizer files to hash")
+    for name in names:
+        digest.update(name.encode("utf-8"))
+        digest.update((model_dir / name).read_bytes())
+    return digest.hexdigest()
+
+
+def _supervised_median(rows) -> float:
+    fractions = sorted(r["supervised"] / r["length"] for r in rows)
+    return fractions[len(fractions) // 2]
+
+
+def pin_ultrachat_band(name: str, band: int, measured_train, measured_valid,
+                       revision: str, tok_hash: str, dropped: dict,
+                       out_root: Path = DATA_DIR) -> dict:
+    train = select_one(measured_train, band, TRAIN_ROWS)
+    valid = select_one(measured_valid, band, VALID_ROWS)
+    out = out_root / f"ultrachat-{band}"
+    manifest = {
+        "dataset": ULTRACHAT_REPO,
+        "config": "default",
+        "splits": ULTRACHAT_SPLITS,
+        "revision": revision,
+        "chat_adapter": ("the first user turn is the prompt, the first "
+                         "assistant turn after it is the completion, and the "
+                         "rest of the thread is discarded"),
+        "seed": SEED,
+        "cell": name,
+        "band": band,
+        "band_lower_edge": band - PAD_TO,
+        "batch_width": batch_width(band),
+        "tokenizer_sha256": tok_hash,
+        "dropped_rows": dropped,
+        "supervised_fraction": {
+            "train_median": _supervised_median(train),
+            "valid_median": _supervised_median(valid),
+        },
+        "train": {"rows": len(train),
+                  "sha256": write_split(out / "train.jsonl", train)},
+        "valid": {"rows": len(valid),
+                  "sha256": write_split(out / "valid.jsonl", valid)},
+    }
+    (out / "manifest.json").write_text(
+        json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return manifest
+
+
+def _measured_cached(split: str, revision: str, tok_hash: str,
+                     shards, tokenizer) -> tuple[list[dict], int]:
+    """Measure one UltraChat split once and cache the result, because the two
+    splits hold 231k rows and the tokenizer is the slow part. The cache is
+    keyed by revision and tokenizer hash, so a changed upstream or tokenizer
+    measures fresh rather than serving stale numbers.
+    """
+    cache = (ROOT / "bench" / ".cache" /
+             f"ultrachat-{split}-{revision[:12]}-{tok_hash[:12]}.jsonl")
+    if cache.exists():
+        lines = cache.read_text(encoding="utf-8").splitlines()
+        dropped = json.loads(lines[0])["dropped"]
+        return [json.loads(line) for line in lines[1:]], dropped
+    rows = read_parquet_rows(shards)
+    measured = measure(rows, tokenizer, adapter=ultrachat_pair)
+    dropped = len(rows) - len(measured)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    body = json.dumps({"dropped": dropped}) + "\n" + "".join(
+        json.dumps(row, ensure_ascii=False) + "\n" for row in measured)
+    cache.write_text(body, encoding="utf-8")
+    return measured, dropped
+
+
+def _refuse_stale_manifest(band: int, revision: str) -> None:
+    existing = DATA_DIR / f"ultrachat-{band}" / "manifest.json"
+    if existing.exists():
+        pinned = json.loads(existing.read_text(encoding="utf-8"))["revision"]
+        if pinned != revision:
+            raise SystemExit(
+                f"{existing} pins revision {pinned} and upstream now "
+                f"resolves {revision}: the slice is invalidated, not "
+                f"re-pinned silently. Delete the slice deliberately to "
+                f"re-pin.")
+
+
+def pin_ultrachat(report_only: bool = False) -> int:
+    from mlx_lm.tokenizer_utils import load as load_tokenizer
+
+    tokenizer = load_tokenizer(MODEL_DIR)
+    tok_hash = tokenizer_hash()
+    revision = resolve_revision()
+    shards = fetch_ultrachat(revision)
+    measured, dropped = {}, {}
+    for split in ULTRACHAT_SPLITS:
+        measured[split], dropped[split] = _measured_cached(
+            split, revision, tok_hash, shards[split], tokenizer)
+
+    bands = derive_bands(band_counts(measured["train"]),
+                         band_counts(measured["valid"]))
+    report = {
+        "dataset": ULTRACHAT_REPO,
+        "revision": revision,
+        "tokenizer_sha256": tok_hash,
+        "derived_bands": bands,
+        "dropped_rows": dropped,
+        "train": distribution(measured["train"]),
+        "valid": distribution(measured["valid"]),
+    }
+    if report_only:
+        print(json.dumps(report, indent=2))
+        return 0
+
+    for name, band in bands.items():
+        _refuse_stale_manifest(band, revision)
+    manifests = [pin_ultrachat_band(name, band, measured["train"],
+                                    measured["valid"], revision, tok_hash,
+                                    dropped)
+                 for name, band in bands.items()]
+    (DATA_DIR / "ultrachat-report.json").write_text(
+        json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(manifests, indent=2))
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--corpus", choices=("dolly", "ultrachat"),
+                        default="dolly",
+                        help="ultrachat DERIVES both registered bands per "
+                             "Amendment 5 clause 20 and pins both; dolly "
+                             "keeps the original --band interface")
     parser.add_argument("--band", type=int, default=None,
-                        help="upper edge of the 32-token band to draw from")
+                        help="upper edge of the 32-token band to draw from "
+                             "(dolly only; ultrachat derives its bands)")
     parser.add_argument("--train", type=int, default=1024)
     parser.add_argument("--valid", type=int, default=128)
     parser.add_argument("--report", action="store_true",
                         help="print the corpus distribution and write nothing")
     parser.add_argument("--out", type=Path, default=OUT_DIR)
     args = parser.parse_args(argv)
+
+    if args.corpus == "ultrachat":
+        if args.band is not None:
+            raise SystemExit("ultrachat's bands are derived by clause 20's "
+                             "rule, not chosen; --band applies to dolly only")
+        return pin_ultrachat(report_only=args.report)
 
     from mlx_lm.tokenizer_utils import load as load_tokenizer
 

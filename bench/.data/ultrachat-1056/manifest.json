@@ -1,0 +1,32 @@
+{
+  "dataset": "HuggingFaceH4/ultrachat_200k",
+  "config": "default",
+  "splits": {
+    "train": "train_sft",
+    "valid": "test_sft"
+  },
+  "revision": "8049631c405ae6576f93f445c6b8166f76f5505a",
+  "chat_adapter": "the first user turn is the prompt, the first assistant turn after it is the completion, and the rest of the thread is discarded",
+  "seed": 20260820,
+  "cell": "long",
+  "band": 1056,
+  "band_lower_edge": 1024,
+  "batch_width": 1057,
+  "tokenizer_sha256": "55dd95f9b97ec64303d75f852f0a7680ea56959ede77b7229dcbb3952e773491",
+  "dropped_rows": {
+    "train": 0,
+    "valid": 0
+  },
+  "supervised_fraction": {
+    "train_median": 0.8700290979631425,
+    "valid_median": 0.8697718631178707
+  },
+  "train": {
+    "rows": 1024,
+    "sha256": "964b8a8f617dd651bf96955631321fabd7933b4e2d5d562150d8cd23cb71f8d3"
+  },
+  "valid": {
+    "rows": 128,
+    "sha256": "c3e6949e6a650ad89ebad7017cc456d9d94c583cef22fa78f6f8255d5e8d1650"
+  }
+}
