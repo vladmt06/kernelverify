@@ -200,3 +200,72 @@ def test_the_names_are_left_exactly_as_they_were_found(trained_step):
     assert qwen3.scaled_dot_product_attention.__module__ == "mlx_lm.models.base"
     assert mlx.nn.QuantizedLinear.__call__.__module__ == "mlx.nn.layers.quantized"
     assert mlx.nn.losses.cross_entropy.__module__ == "mlx.nn.losses"
+
+
+@requires_metal
+def test_gradient_checkpointing_replays_the_forward_and_inflates_its_count():
+    """Why the profile must refuse `--grad-checkpoint` rather than tolerate it.
+
+    Checkpointing trades memory for time by discarding activations and running
+    a block's forward AGAIN during the backward. The marks survive it - loss
+    and gradients are unchanged - but the replayed forward fires forward marks,
+    so a region's forward count and forward span quietly absorb work that
+    belongs to the backward. Measured here: attention fires 30 times forward
+    on a 28-block model, and the projections 210 times where an unchecked step
+    fires 196.
+
+    Nothing built on those counts would notice. The share would look the same
+    shape and mean something different, and the collapse rule weights a
+    credited ratio by exactly these counts. So the harness refuses the flag,
+    and this is the measurement that says why.
+    """
+    import mlx.core as mx
+    import mlx.nn as nn
+    from mlx.utils import tree_flatten
+    from mlx_lm.tuner.trainer import default_loss, grad_checkpoint
+    from mlx_lm.tuner.utils import linear_to_lora_layers
+    from mlx_lm.utils import load
+
+    mx.disable_compile()
+    try:
+        model, _ = load(str(MODEL))
+        model.freeze()
+        linear_to_lora_layers(model, 2, {"rank": 8, "scale": 20.0,
+                                         "dropout": 0.0})
+        model.train()
+        depth = len(model.model.layers)
+        grad_checkpoint(model.model.layers[0])
+
+        mx.random.seed(0)
+        tokens = mx.random.randint(0, 1000, (2, 65))
+        lengths = mx.repeat(mx.array([[32, 64]], dtype=mx.int32), 2, axis=0)
+        mx.eval(tokens, lengths)
+        value_and_grad = nn.value_and_grad(
+            model, lambda m: default_loss(m, tokens, lengths)[0])
+
+        def step():
+            loss, grad = value_and_grad(model)
+            mx.eval(loss, grad)
+            return loss, dict(tree_flatten(grad))
+
+        plain_loss, plain_grad = step()
+        recorder = pi.Recorder(context=dict(CTX))
+        installation = pi.install(list(pi.REGIONS), recorder)
+        try:
+            step()
+            recorder.clear()
+            marked_loss, marked_grad = step()
+        finally:
+            installation.remove()
+    finally:
+        mx.enable_compile()
+
+    # The marks are still identity, so this is not a correctness failure.
+    assert bool(mx.array_equal(plain_loss, marked_loss))
+    assert all(bool(mx.array_equal(plain_grad[k], marked_grad[k]))
+               for k in plain_grad)
+
+    # It is a counting failure, which is worse, because it is silent.
+    counts = pi.counts(recorder.entries)
+    assert counts["attn-core"][pi.FORWARD] > depth
+    assert counts["qmm"][pi.FORWARD] > 7 * depth
