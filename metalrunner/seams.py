@@ -60,6 +60,27 @@ import importlib
 from dataclasses import dataclass
 
 
+def _own(owner, name):
+    """What `owner` itself binds to `name`, or None if it does not bind it.
+
+    A class is read through its own `__dict__` rather than through `getattr`,
+    for two reasons that both end in a process left different from how it was
+    found. `getattr` walks the base classes, so a name a base defines looks
+    present on the subclass; replacing it would write a NEW entry on the
+    subclass and removing it would leave that entry behind, permanently
+    shadowing the base. And `getattr` runs the descriptor protocol, so a
+    classmethod or a property comes back already bound and what went back on
+    removal would not be the object that was taken.
+    """
+    if isinstance(owner, type):
+        return vars(owner).get(name)
+    return getattr(owner, name, None)
+
+
+def _bind(owner, name, value) -> None:
+    setattr(owner, name, value)
+
+
 class SeamRefusal(RuntimeError):
     """The seam was not what metalrunner expected, so nothing was changed."""
 
@@ -137,12 +158,19 @@ class Installation:
             raise SeamRefusal(f"{seam} is already installed by this run")
 
         owner, name = seam.resolve()
-        try:
-            original = getattr(owner, name)
-        except AttributeError:
+        original = _own(owner, name)
+        if original is None:
+            if isinstance(owner, type) and hasattr(owner, name):
+                holder = next((base.__name__ for base in owner.__mro__
+                               if name in vars(base)), "a base class")
+                raise SeamRefusal(
+                    f"{seam} is inherited from {holder}, not defined on "
+                    f"{owner.__name__}: replacing it here would write a new "
+                    f"entry on the subclass and removing it would leave that "
+                    f"entry shadowing the original forever. Name the class "
+                    f"that defines it.")
             raise SeamRefusal(
-                f"{seam} does not exist, so metalrunner cannot replace it"
-            ) from None
+                f"{seam} does not exist, so metalrunner cannot replace it")
 
         defined_in = getattr(original, "__module__", None)
         if defined_in != seam.origin:
@@ -155,7 +183,7 @@ class Installation:
         replacement = wrap(original)
         self._counts[seam] = 0
         counted = self._counting(seam, replacement)
-        setattr(owner, name, counted)
+        _bind(owner, name, counted)
         self._originals[seam] = original
         self._installed[seam] = counted
         self._order.append(seam)
@@ -164,9 +192,9 @@ class Installation:
         """Put every original back, newest first, and report any surprise."""
         for seam in reversed(self._order):
             owner, name = seam.resolve()
-            if getattr(owner, name, None) is not self._installed[seam]:
+            if _own(owner, name) is not self._installed[seam]:
                 self.foreign_on_removal.append(str(seam))
-            setattr(owner, name, self._originals[seam])
+            _bind(owner, name, self._originals[seam])
         self._order.clear()
         self._originals.clear()
         self._installed.clear()

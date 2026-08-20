@@ -1,5 +1,17 @@
 # TODOS
 
+## The committed end-to-end harness registers a sequence length its corpus cannot produce
+
+- What: decide what sequence length the end-to-end measurement actually runs at, and reconcile section 8's registered 2048 with whatever a real instruction corpus yields.
+- Why: `bench/train_lora_e2e.py` registers `max_seq_length=2048` and pins a masked instruction dataset, but mlx-lm never trains at a fixed length.
+  Its iterator sorts examples by length and pads each batch only to one plus the next multiple of 32 above that batch's own longest row (`mlx_lm/tuner/trainer.py:157`), so 2048 is a cap rather than a target.
+  Measured on 2026-08-20 against the pinned Qwen3-4B tokenizer, databricks-dolly-15k has a median row of 116 tokens, p95 of 569, and 33 rows of 15011 above 2048.
+  The harness would therefore compare arms on batches roughly a tenth of the width its own pre-registration names, and the ratio it reports would be honest about the arms while silently describing a different workload from the one section 8 describes.
+- Pros: it is the same decision the Day 1 profile is blocked on, so ruling once settles both, and the evidence is already committed at `bench/.data/dolly/corpus-distribution.json`.
+- Cons: section 8 is committed pre-registration, so any change is an amendment rather than an edit; and the honest repairs all cost something, since a longer corpus changes the dataset, packing changes the mask structure, and registering tokens-per-step instead moves batch size far from the registered 1 and 4.
+- Context: found while pinning the corpus for the Day 1 profile; the profile's own blocker is written up in the sprint plan under "the registered sequence length does not exist in this corpus"; `bench/pin_dolly.py --report` reproduces the distribution on CPU in about a minute.
+- Depends on / blocked by: nothing technical, but it should be ruled together with the profile's band rather than separately, because two different widths would make the profile's chosen operation and the end-to-end number describe different workloads.
+
 ## Four test modules build their own Metal device instead of sharing conftest's probe
 
 - What: convert `tests/test_device_buffer_pool.py`, `tests/test_serving_adequacy.py`, `tests/test_serving_survival.py` and `tests/test_quant_device_members.py` from their local `try: _DEVICE = MetalDevice() / except RuntimeError` blocks and local `needs_metal` skipif markers to `conftest.METAL_DEVICE` and `conftest.requires_metal`, which is what AGENTS.md now tells a new test to use.

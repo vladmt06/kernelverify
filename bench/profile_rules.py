@@ -57,6 +57,10 @@ TIE_GAIN = 0.02
 # Section 4.2, in the order the table lists them, which is the last tie-break.
 CANDIDATES = ("L", "A", "Q")
 
+# A credited ratio is weighted per direction, because a region's forward and
+# backward call counts genuinely differ under LoRA.
+DIRECTIONS = ("forward", "backward")
+
 # Section 5. Q dies if stock is already this close to the dense ceiling at
 # this many of the five shapes.
 KILL_RATIO = 1.10
@@ -121,55 +125,84 @@ def ratio_lo(numerator: Sequence[float], denominator: Sequence[float]) -> float:
 
 
 def collapse_ratio_lo(per_shape: Mapping[str, Mapping[str, object]]) -> dict:
-    """One credited ratio out of many shapes, weighted by how often each runs.
+    """One credited ratio out of many shapes, weighted per direction.
 
     A candidate's floor is measured shape by shape, but the operation it would
     replace is the whole set of them, and the shapes do not appear equally
     often: the quantized matmul runs seven times per layer across six distinct
     shapes and the output head runs once per step. A ratio taken over shapes
     without weighting would credit a shape that runs once as heavily as one
-    that runs 252 times, so the collapse weights each shape by its measured
-    occurrence count.
+    that runs 252 times.
+
+    Forward and backward are weighted SEPARATELY, and that is not a
+    refinement. Measured on 2026-08-20 inside a real LoRA step, the quantized
+    projections ran 196 times forward and 25 times backward, because the
+    blocks below the first adapted one have no backward at all. One count
+    cannot describe both, and a single count applied to samples that already
+    combine the two directions produces a number that is not a bound on
+    anything.
 
     The worst pairing is preserved at the aggregate, exactly as `ratio_lo`
     preserves it per shape: the weighted sum of the SMALLEST numerator each
-    shape produced, over the weighted sum of the LARGEST denominator each
-    shape produced. A candidate is therefore credited with the least its
+    shape and direction produced, over the weighted sum of the LARGEST
+    denominator. A candidate is therefore credited with the least its
     measurements support, and no shape's optimistic sample can be paired with
     another shape's pessimistic one to manufacture headroom.
 
-    Counts come from the instrument's own per-shape call counts, not from the
-    model's declared geometry, because a share and a ratio that disagree about
-    how often an operation ran are two readings of different workloads.
+    Counts come from the instrument's own per-shape, per-direction call counts
+    rather than from the model's declared geometry, because a share and a
+    ratio that disagree about how often an operation ran are two readings of
+    different workloads. A direction with no calls contributes nothing and is
+    not an error: that is what a region absent from the backward looks like.
+
+    Each shape carries `{"forward": {...}, "backward": {...}}`, and each of
+    those carries `count`, `numerator` and `denominator`.
     """
     if not per_shape:
         raise RunInvalid("a collapsed ratio needs at least one shape")
     numerator_total = 0.0
     denominator_total = 0.0
-    contributions = {}
+    contributions: dict[str, dict] = {}
     for shape, entry in sorted(per_shape.items()):
-        count = entry.get("count")
-        if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        unknown = set(entry) - set(DIRECTIONS)
+        if unknown:
             raise RunInvalid(
-                f"shape {shape} ran {count!r} times, which is not a count; a "
-                f"shape the instrument never saw is not weighted at zero, it "
-                f"is a disagreement between the share and the floor")
-        numerator = entry.get("numerator") or ()
-        denominator = entry.get("denominator") or ()
-        if not numerator or not denominator:
-            raise RunInvalid(
-                f"shape {shape} has samples on only one side, so it cannot "
-                f"contribute a ratio")
-        smallest, largest = min(numerator), max(denominator)
-        if largest <= 0.0:
-            raise RunInvalid(
-                f"shape {shape} has a measured floor of zero, which cannot "
-                f"bound a ratio")
-        numerator_total += count * smallest
-        denominator_total += count * largest
-        contributions[shape] = {
-            "count": count, "numerator": count * smallest,
-            "denominator": count * largest}
+                f"shape {shape} carries {sorted(unknown)}, and a ratio is "
+                f"weighted per direction: expected {list(DIRECTIONS)}")
+        per_direction = {}
+        for direction in DIRECTIONS:
+            side = entry.get(direction)
+            if side is None:
+                continue
+            count = side.get("count")
+            if (not isinstance(count, int) or isinstance(count, bool)
+                    or count < 0):
+                raise RunInvalid(
+                    f"shape {shape} ran {count!r} times in {direction}, which "
+                    f"is not a count")
+            if count == 0:
+                per_direction[direction] = {"count": 0, "numerator": 0.0,
+                                            "denominator": 0.0}
+                continue
+            numerator = side.get("numerator") or ()
+            denominator = side.get("denominator") or ()
+            if not numerator or not denominator:
+                raise RunInvalid(
+                    f"shape {shape} in {direction} has samples on only one "
+                    f"side, so it cannot contribute a ratio")
+            smallest, largest = min(numerator), max(denominator)
+            if largest <= 0.0:
+                raise RunInvalid(
+                    f"shape {shape} in {direction} has a measured floor of "
+                    f"zero, which cannot bound a ratio")
+            numerator_total += count * smallest
+            denominator_total += count * largest
+            per_direction[direction] = {"count": count,
+                                        "numerator": count * smallest,
+                                        "denominator": count * largest}
+        if not per_direction:
+            raise RunInvalid(f"shape {shape} names no direction at all")
+        contributions[shape] = per_direction
     if denominator_total <= 0.0:
         raise RunInvalid("the weighted floor is zero, so no ratio is bounded")
     return {"ratio_lo": numerator_total / denominator_total,
@@ -232,8 +265,17 @@ def kill_q(ceiling_ratios: Mapping[str, float]) -> dict[str, object]:
     """
     missing = set(SHAPES) - set(ceiling_ratios)
     if missing:
-        raise RunInvalid(f"the kill rule reads all five shapes; missing "
-                         f"{sorted(missing)}")
+        raise RunInvalid(f"the kill rule reads all {len(SHAPES)} registered "
+                         f"shapes; missing {sorted(missing)}")
+    # Extra keys are refused, not ignored. Counting them would let shapes
+    # nobody registered reach the kill threshold, and the verdict would then
+    # say "4 of 5 shapes" about a set that was never five.
+    extra = set(ceiling_ratios) - set(SHAPES)
+    if extra:
+        raise RunInvalid(
+            f"the kill rule counts only registered shapes, and these are not "
+            f"registered: {sorted(extra)}; add them to SHAPES by amendment "
+            f"before they can decide anything")
     at_ceiling = sorted(name for name, r in ceiling_ratios.items()
                         if r <= KILL_RATIO)
     killed = len(at_ceiling) >= KILL_SHAPES

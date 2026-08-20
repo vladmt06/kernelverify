@@ -227,73 +227,131 @@ def test_the_rule_refuses_an_empty_field():
 # ---------------------------------------------------------------------------
 # Collapsing many shapes into one credited ratio (Amendment 5)
 # ---------------------------------------------------------------------------
-def _shape(count, numerator, denominator):
+def _side(count, numerator, denominator):
     return {"count": count, "numerator": numerator, "denominator": denominator}
+
+
+def _shape(forward=None, backward=None):
+    entry = {}
+    if forward is not None:
+        entry["forward"] = forward
+    if backward is not None:
+        entry["backward"] = backward
+    return entry
 
 
 def test_the_collapse_weights_each_shape_by_how_often_it_runs():
     """A shape that runs 252 times per step and one that runs once are not
     equal evidence about the operation as a whole."""
     collapsed = collapse_ratio_lo({
-        "S1": _shape(252, [2.0], [1.0]),   # fast floor, runs constantly
-        "S5": _shape(1, [10.0], [10.0]),   # no headroom, runs once
+        "S1": _shape(forward=_side(252, [2.0], [1.0])),
+        "S5": _shape(forward=_side(1, [10.0], [10.0])),
     })
     assert collapsed["ratio_lo"] == pytest.approx((252 * 2.0 + 10.0)
                                                   / (252 * 1.0 + 10.0))
     assert collapsed["ratio_lo"] > 1.9
 
 
+def test_forward_and_backward_are_weighted_by_their_own_counts():
+    """Measured inside a real LoRA step: the quantized projections ran 196
+    times forward and 25 times backward, because the blocks below the first
+    adapted one have no backward. One count cannot describe both, and using
+    the forward count for backward work is what stops the result being a
+    bound on anything."""
+    collapsed = collapse_ratio_lo({
+        "S1": _shape(forward=_side(196, [2.0], [1.0]),
+                     backward=_side(25, [4.0], [1.0])),
+    })
+    expected = (196 * 2.0 + 25 * 4.0) / (196 * 1.0 + 25 * 1.0)
+    assert collapsed["ratio_lo"] == pytest.approx(expected)
+
+
+def test_a_direction_with_no_calls_contributes_nothing():
+    """A region absent from the backward is the normal case under LoRA, not
+    an error, and it must not drag the ratio toward anything."""
+    collapsed = collapse_ratio_lo({
+        "S1": _shape(forward=_side(10, [2.0], [1.0]),
+                     backward=_side(0, [], [])),
+    })
+    assert collapsed["ratio_lo"] == pytest.approx(2.0)
+
+
 def test_the_collapse_keeps_the_worst_pairing_at_the_aggregate():
     """Smallest numerator over largest denominator, shape by shape, so no
     shape's optimistic sample can be paired with another's pessimistic one."""
     collapsed = collapse_ratio_lo({
-        "S1": _shape(1, [3.0, 4.0, 5.0], [1.0, 2.0]),
-        "S2": _shape(1, [9.0, 10.0], [4.0, 5.0]),
+        "S1": _shape(forward=_side(1, [3.0, 4.0, 5.0], [1.0, 2.0])),
+        "S2": _shape(forward=_side(1, [9.0, 10.0], [4.0, 5.0])),
     })
     assert collapsed["ratio_lo"] == pytest.approx((3.0 + 9.0) / (2.0 + 5.0))
 
 
-def test_a_single_shape_collapses_to_the_plain_ratio():
+def test_a_single_shape_and_direction_collapses_to_the_plain_ratio():
     """The collapse must not disagree with `ratio_lo` where both apply."""
     numerator, denominator = [3.0, 4.0], [1.0, 2.0]
-    collapsed = collapse_ratio_lo({"S1": _shape(1, numerator, denominator)})
+    collapsed = collapse_ratio_lo(
+        {"S1": _shape(forward=_side(1, numerator, denominator))})
     assert collapsed["ratio_lo"] == pytest.approx(ratio_lo(numerator,
                                                            denominator))
 
 
-def test_the_collapse_reports_what_each_shape_contributed():
+def test_the_collapse_reports_what_each_shape_and_direction_contributed():
     """Which shape carries the ratio is the first thing a reader asks, and
     the answer decides where a kernel would actually be aimed."""
-    collapsed = collapse_ratio_lo({"S1": _shape(2, [3.0], [1.0]),
-                                   "S2": _shape(5, [1.0], [1.0])})
-    assert collapsed["shapes"]["S1"] == {"count": 2, "numerator": 6.0,
-                                         "denominator": 2.0}
-    assert collapsed["shapes"]["S2"]["count"] == 5
+    collapsed = collapse_ratio_lo({
+        "S1": _shape(forward=_side(2, [3.0], [1.0]),
+                     backward=_side(1, [5.0], [1.0])),
+    })
+    assert collapsed["shapes"]["S1"]["forward"] == {
+        "count": 2, "numerator": 6.0, "denominator": 2.0}
+    assert collapsed["shapes"]["S1"]["backward"]["count"] == 1
 
 
-@pytest.mark.parametrize("count", [0, -1, 1.5, True, None])
-def test_a_shape_the_instrument_never_saw_refuses_rather_than_weighing_zero(
-        count):
-    """Zero occurrences is not a weight, it is the share and the floor
-    disagreeing about which workload they measured."""
+@pytest.mark.parametrize("count", [-1, 1.5, True, None])
+def test_a_count_that_is_not_a_count_refuses(count):
     with pytest.raises(RunInvalid, match="not a count"):
-        collapse_ratio_lo({"S1": _shape(count, [1.0], [1.0])})
+        collapse_ratio_lo({"S1": _shape(forward=_side(count, [1.0], [1.0]))})
 
 
 @pytest.mark.parametrize("numerator,denominator", [([], [1.0]), ([1.0], [])])
-def test_a_shape_measured_on_one_side_only_refuses(numerator, denominator):
+def test_a_direction_measured_on_one_side_only_refuses(numerator, denominator):
     with pytest.raises(RunInvalid, match="one side"):
-        collapse_ratio_lo({"S1": _shape(1, numerator, denominator)})
+        collapse_ratio_lo(
+            {"S1": _shape(forward=_side(1, numerator, denominator))})
 
 
-def test_a_shape_with_a_zero_floor_refuses():
-    with pytest.raises(RunInvalid, match="floor of zero"):
-        collapse_ratio_lo({"S1": _shape(1, [1.0], [0.0])})
+def test_a_direction_with_a_zero_floor_refuses():
+    with pytest.raises(RunInvalid, match="floor of"):
+        collapse_ratio_lo({"S1": _shape(forward=_side(1, [1.0], [0.0]))})
+
+
+def test_a_shape_naming_no_direction_refuses():
+    """Silence about both directions is not a shape that took no time."""
+    with pytest.raises(RunInvalid, match="no direction"):
+        collapse_ratio_lo({"S1": {}})
+
+
+def test_a_shape_carrying_an_unknown_key_refuses():
+    """A caller passing the old single-count shape must fail loudly rather
+    than have one direction silently read as the whole operation."""
+    with pytest.raises(RunInvalid, match="weighted per direction"):
+        collapse_ratio_lo({"S1": {"count": 5, "numerator": [1.0],
+                                  "denominator": [1.0]}})
 
 
 def test_the_collapse_refuses_an_empty_field():
     with pytest.raises(RunInvalid, match="at least one shape"):
         collapse_ratio_lo({})
+
+
+def test_the_kill_rule_counts_only_registered_shapes():
+    """Counting an unregistered key would let shapes nobody registered reach
+    the kill threshold, and the verdict would report "4 of 5" about a set that
+    was never five."""
+    ratios = {name: 5.0 for name in SHAPES}
+    ratios.update({f"invented{i}": 1.0 for i in range(4)})
+    with pytest.raises(RunInvalid, match="not registered"):
+        kill_q(ratios)
 
 
 # ---------------------------------------------------------------------------

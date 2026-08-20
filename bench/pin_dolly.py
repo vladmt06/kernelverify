@@ -48,19 +48,46 @@ SOURCE_URL = ("https://huggingface.co/datasets/databricks/databricks-dolly-15k"
               "/resolve/main/databricks-dolly-15k.jsonl")
 CACHE = ROOT / "bench" / ".cache" / "databricks-dolly-15k.jsonl"
 
+# The exact upstream bytes this slice was drawn from, declared before the
+# fetch rather than recorded after it. Both the URL and a local cache are
+# mutable, and the selection walks the file in its own order, so a reordered
+# or edited upstream would silently produce a different slice under the same
+# seed. Verified 2026-08-20.
+SOURCE_SHA256 = "2df9083338b4abd6bceb5635764dab5d833b393b55759dffb0959b6fcbf794ec"
+
 # The iterator's own padding arithmetic, mlx_lm/tuner/trainer.py: a batch is
 # padded to 1 + PAD_TO * ceil(longest / PAD_TO). Carried here so the band and
 # the width it produces are computed by the same rule the trainer applies.
 PAD_TO = 32
+
+# mlx-lm caps a padded batch here, so it is half of the width rule rather
+# than a separate setting. `bench/train_lora_e2e.py` registers 2048.
+MAX_SEQ_LENGTH = 2048
 SEED = 20260820
 
 
-def fetch(url: str = SOURCE_URL, cache: Path = CACHE) -> Path:
-    """The upstream file, downloaded once and reused."""
+def fetch(url: str = SOURCE_URL, cache: Path = CACHE,
+          expected: str | None = SOURCE_SHA256) -> Path:
+    """The upstream file, downloaded once, reused, and checked against a
+    digest declared before the fetch.
+
+    Checking after the fact would only record which bytes arrived. The point
+    of declaring it first is that a changed upstream, or a cache someone
+    edited, stops the run instead of quietly producing a different slice from
+    the same seed.
+    """
     if not cache.exists():
         cache.parent.mkdir(parents=True, exist_ok=True)
         with urllib.request.urlopen(url) as response:
             cache.write_bytes(response.read())
+    if expected is not None:
+        digest = hashlib.sha256(cache.read_bytes()).hexdigest()
+        if digest != expected:
+            raise SystemExit(
+                f"{cache} hashes {digest}, not the declared {expected}: the "
+                f"upstream corpus or the local cache has changed, and the "
+                f"same seed would now select different rows. Re-declare "
+                f"SOURCE_SHA256 deliberately, or restore the pinned file.")
     return cache
 
 
@@ -77,9 +104,16 @@ def as_prompt_completion(row: dict) -> dict:
     return {"prompt": prompt, "completion": row["response"]}
 
 
-def batch_width(longest: int) -> int:
-    """What the trainer pads a batch of this longest row to."""
-    return 1 + PAD_TO * ((longest + PAD_TO - 1) // PAD_TO)
+def batch_width(longest: int, max_seq_length: int = MAX_SEQ_LENGTH) -> int:
+    """What the trainer pads a batch of this longest row to.
+
+    Both halves of mlx-lm's rule, not just the first: the batch is padded to
+    one plus the next multiple of 32, and then capped at `max_seq_length`. The
+    cap is why a corpus whose rows reach the cap produces a width one token
+    BELOW the round number, and a floor registered at the round number would
+    be measured at a shape the step never produces.
+    """
+    return min(1 + PAD_TO * ((longest + PAD_TO - 1) // PAD_TO), max_seq_length)
 
 
 def measure(rows, tokenizer) -> list[dict]:
@@ -190,7 +224,7 @@ def main(argv=None) -> int:
     train, valid = select(measured, args.band, args.train, args.valid)
     manifest = {
         "source": SOURCE_URL,
-        "source_sha256": hashlib.sha256(fetch().read_bytes()).hexdigest(),
+        "source_sha256": SOURCE_SHA256,
         "seed": SEED,
         "band": args.band,
         "batch_width": batch_width(args.band),

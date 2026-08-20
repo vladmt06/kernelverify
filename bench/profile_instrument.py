@@ -95,6 +95,7 @@ class Recorder:
 
     entries: list[tuple[str, str, str, float]] = field(default_factory=list)
     shapes: dict[str, dict[str, int]] = field(default_factory=dict)
+    context: dict = field(default_factory=dict)
 
     def note_shape(self, region: str, shape: tuple[int, int]) -> None:
         by_shape = self.shapes.setdefault(region, {})
@@ -102,6 +103,12 @@ class Recorder:
         by_shape[key] = by_shape.get(key, 0) + 1
 
     def clear(self) -> None:
+        """Drop what a warm-up recorded, keeping what identifies the run.
+
+        The context is not timing and must survive: it is what says two passes
+        measured the same batch, and clearing it would let a numerator from
+        one workload be divided by a denominator from another.
+        """
         self.entries.clear()
         self.shapes.clear()
 
@@ -275,8 +282,15 @@ def counts(entries) -> dict[str, dict[str, int]]:
     return tally
 
 
-def decompose(entries, step_start: float, step_end: float) -> dict:
+def decompose(entries, step_start: float, step_end: float, *,
+              context) -> dict:
     """Per-region spans, the unattributed remainder, and what they rest on.
+
+    `context` identifies the workload this pass ran - the cell, the batch, the
+    width. It is carried rather than checked here, and `candidate_share`
+    refuses to divide across two contexts that differ, which is the only thing
+    standing between a split-pass profile and a share whose numerator and
+    denominator describe different steps.
 
     Refuses rather than reporting a plausible number: an unopened close, an
     unclosed open, spans that overlap, or a span reaching outside the step all
@@ -328,22 +342,41 @@ def decompose(entries, step_start: float, step_end: float) -> dict:
         "remainder": elapsed - covered,
         "elapsed": elapsed,
         "counts": counts(entries),
+        "context": context,
     }
 
 
-def candidate_share(decomposed, candidate: str, denominator: float) -> float:
+def candidate_share(decomposed, candidate: str, denominator) -> float:
     """One candidate's share f, over a denominator taken from another pass.
 
     The denominator is the plain step's total rather than this pass's own, so
     a share carries only the cost of its own marks. Marking every region at
     once and dividing by that pass's inflated total would deflate the lightly
-    marked regions and inflate the heavily marked one, which is the comparison
-    the selection rule makes.
+    marked regions and inflate the heavily marked one, which is exactly the
+    comparison the selection rule makes.
+
+    Because the two numbers come from different passes, `denominator` carries
+    the context it was measured in and this refuses unless the two agree. A
+    numerator measured on one batch over a denominator measured on another is
+    a ratio of two workloads, and nothing downstream could tell.
     """
     if candidate not in CANDIDATE_REGIONS:
         raise RunInvalid(f"not a candidate of this pre-registration: "
                          f"{candidate!r}")
-    if denominator <= 0.0:
+    try:
+        total = denominator["total"]
+        other = denominator["context"]
+    except (TypeError, KeyError):
+        raise RunInvalid(
+            "a denominator must carry the context it was measured in, as "
+            "{'total': seconds, 'context': ...}; a bare number cannot be "
+            "checked against the pass it is dividing") from None
+    if other != decomposed["context"]:
+        raise RunInvalid(
+            f"the denominator was measured in {other!r} and this pass ran in "
+            f"{decomposed['context']!r}: dividing one by the other would be a "
+            f"ratio of two workloads")
+    if total <= 0.0:
         raise RunInvalid("a share needs a positive step total to divide by")
     totals = decomposed["totals"]
     missing = [name for name in CANDIDATE_REGIONS[candidate]
@@ -353,4 +386,4 @@ def candidate_share(decomposed, candidate: str, denominator: float) -> float:
             f"candidate {candidate} needs {missing} and this pass did not "
             f"measure them; a region absent from the log is not a region "
             f"that took no time")
-    return sum(totals[name] for name in CANDIDATE_REGIONS[candidate]) / denominator
+    return sum(totals[name] for name in CANDIDATE_REGIONS[candidate]) / total

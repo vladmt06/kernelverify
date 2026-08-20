@@ -32,6 +32,10 @@ MODEL = (Path(__file__).resolve().parents[1] / "bench" / ".models"
 ADAPTED_LAYERS = 4
 BATCH, TOKENS = 2, 128
 
+# What identifies the workload these passes ran. Both the plain and the marked
+# step here use the same batch, so they share one context.
+CTX = {"model": "qwen3-0.6b-4bit-g64", "batch": BATCH, "tokens": TOKENS}
+
 
 @pytest.fixture(scope="module")
 def trained_step():
@@ -161,7 +165,8 @@ def test_the_log_decomposes_into_spans_inside_the_step(trained_step):
     produced, read by the function the harness will use."""
     entries = trained_step["recorder"].entries
     stamps = [stamp for _, _, _, stamp in entries]
-    read = pi.decompose(entries, min(stamps) - 1e-6, max(stamps) + 1e-6)
+    read = pi.decompose(entries, min(stamps) - 1e-6, max(stamps) + 1e-6,
+                        context=CTX)
     for region in pi.REGIONS:
         assert read["totals"][region] > 0.0
     assert read["remainder"] >= 0.0
@@ -175,9 +180,12 @@ def test_every_candidate_can_be_scored_from_one_combined_pass(trained_step):
     regions must all be present in it."""
     entries = trained_step["recorder"].entries
     stamps = [stamp for _, _, _, stamp in entries]
-    read = pi.decompose(entries, min(stamps) - 1e-6, max(stamps) + 1e-6)
+    read = pi.decompose(entries, min(stamps) - 1e-6, max(stamps) + 1e-6,
+                        context=CTX)
     for candidate in pi.CANDIDATE_REGIONS:
-        share = pi.candidate_share(read, candidate, denominator=read["elapsed"])
+        share = pi.candidate_share(
+            read, candidate,
+            denominator={"total": read["elapsed"], "context": CTX})
         assert 0.0 < share < 1.0
 
 

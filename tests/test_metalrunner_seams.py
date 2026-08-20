@@ -505,3 +505,46 @@ def test_the_real_profile_patch_points_are_reachable():
         installation.remove()
         assert getattr(*seam.resolve()).__module__ == origin
         assert installation.foreign_on_removal == []
+
+
+def test_an_inherited_name_refuses_rather_than_shadowing_the_base(classy):
+    """Replacing a name a base class defines would write a NEW entry on the
+    subclass, and removal would leave that entry behind, permanently shadowing
+    the base for the rest of the process. The refusal names the class that
+    actually defines it."""
+    class Child(classy.Widget):
+        pass
+
+    Child.__module__ = classy.__name__
+    classy.Child = Child
+
+    installation = seams.Installation()
+    with pytest.raises(seams.SeamRefusal, match="inherited from Widget"):
+        installation.install(seams.Seam(classy.__name__, "Child.__call__"),
+                             lambda _o: lambda self, value: "ours")
+    assert "__call__" not in vars(Child)
+    assert Child()("x") == "stock call x"
+
+
+def test_a_descriptor_goes_back_as_the_descriptor_it_was(classy):
+    """Reading a classmethod through getattr returns it already bound, so
+    what went back on removal would be a bound method rather than the
+    descriptor that was taken."""
+    class Holder:
+        @classmethod
+        def build(cls, value):
+            return f"stock {value}"
+
+    classy.Holder = Holder
+    before = vars(Holder)["build"]
+
+    # The descriptor reports the module its function was written in, which
+    # here is this test file, so the seam declares that rather than pretending.
+    seam = seams.Seam(classy.__name__, "Holder.build", defined_in=__name__)
+    installation = seams.Installation()
+    installation.install(seam, lambda original: original)
+    installation.remove()
+
+    assert vars(Holder)["build"] is before
+    assert type(vars(Holder)["build"]) is classmethod
+    assert installation.foreign_on_removal == []

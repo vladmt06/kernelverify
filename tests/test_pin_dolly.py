@@ -30,14 +30,22 @@ def measured(length, supervised=None, prompt="p", completion="c"):
 # The trainer's own padding arithmetic
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("longest,width", [
-    (1, 33), (31, 33), (32, 33), (33, 65), (64, 65), (65, 97),
-    (160, 161), (2048, 2049),
+    (1, 33), (31, 33), (32, 33), (33, 65), (64, 65), (65, 97), (160, 161),
 ])
 def test_a_band_pads_to_the_width_the_trainer_uses(longest, width):
     """One plus the next multiple of 32, which is mlx-lm's rule rather than
     ours; a floor registered at any other number would be measured at a shape
     the step never produces."""
     assert pin_dolly.batch_width(longest) == width
+
+
+@pytest.mark.parametrize("longest", [2017, 2048, 4096])
+def test_the_width_is_capped_and_the_cap_is_not_a_round_number(longest):
+    """mlx-lm caps the padded width at max_seq_length AFTER rounding up, so a
+    corpus reaching the cap trains on 2047 tokens rather than 2048. Reading
+    only the rounding half of the rule puts every floor one token wide of the
+    shape the step actually produces."""
+    assert pin_dolly.batch_width(longest, max_seq_length=2048) == 2048
 
 
 def test_the_padded_width_is_one_more_than_the_input_length():
@@ -163,3 +171,32 @@ def test_the_committed_corpus_report_matches_the_pinned_corpus():
     assert max(fillable) == 160, (
         "the widest band that can fill a 1024+128 slice; if this moves, the "
         "shape the profile can register moves with it")
+
+
+# ---------------------------------------------------------------------------
+# The source bytes, declared before the fetch rather than recorded after it
+# ---------------------------------------------------------------------------
+def test_a_changed_source_refuses_rather_than_reselecting(tmp_path):
+    """The selection walks the file in its own order before shuffling, so a
+    reordered or edited upstream produces a different slice under the same
+    seed. Recording the hash afterwards would only say which bytes arrived."""
+    cache = tmp_path / "corpus.jsonl"
+    cache.write_text('{"instruction": "a", "response": "b"}\n')
+    with pytest.raises(SystemExit, match="has changed"):
+        pin_dolly.fetch(cache=cache, expected="0" * 64)
+
+
+def test_a_matching_source_passes(tmp_path):
+    import hashlib
+    cache = tmp_path / "corpus.jsonl"
+    cache.write_bytes(b"pinned bytes\n")
+    digest = hashlib.sha256(b"pinned bytes\n").hexdigest()
+    assert pin_dolly.fetch(cache=cache, expected=digest) == cache
+
+
+def test_the_declared_digest_matches_the_corpus_that_was_measured():
+    """The committed distribution and the declared digest have to describe the
+    same file, or the evidence a band is chosen against is not evidence about
+    the corpus that would be sliced."""
+    assert len(pin_dolly.SOURCE_SHA256) == 64
+    assert set(pin_dolly.SOURCE_SHA256) <= set("0123456789abcdef")
