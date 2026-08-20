@@ -1,76 +1,35 @@
 # TODOS
 
-## Candidate A's registered floor assumes a backward for every forward
+## The selection rule can return a candidate below the shipping floor
 
-- What: restate section 4.2's floor for candidate A, which multiplies MLX's fused attention forward by 3 "to stand for forward plus backward".
-- Why: that multiplier assumes every forward has a backward.
-  Under LoRA it does not: measured on 2026-08-20, attention fires once per layer forward and only once per ADAPTED layer backward, so on the pinned 4B arrangement the step runs 36 attention forwards and 16 attention backwards.
-  At section 4.2's own stated assumption that a fused backward costs twice its forward, the floor workload is 36 + 2*16 = 68 fused-forward-equivalents, and the registered arithmetic gives 3*36 = 108.
-  The floor is therefore about 1.6x too large, the credited ratio about 1.6x too small, and candidate A's gain is understated against the two candidates whose floors do not have this error.
-- Pros: it is arithmetic on numbers already measured, so no new run is needed to settle it, and the count the corrected version needs is one the instrument already reports.
-- Cons: section 4.2 is committed pre-registration and the correction moves a candidate's credited ratio in its own favour, which is the direction that most needs to be written down before the number exists rather than after.
-- Context: found by an independent Codex audit on 2026-08-20; `tests/test_profile_instrument_live.py` carries the count measurement; `bench/profile_stock.py` `expected_counts` carries the same asymmetry for the profile side.
-- Depends on / blocked by: nothing; it belongs in Amendment 5 with the other nine clauses.
+- What: fix `select_first_operation` so section 4.3's 1.10 floor filters the candidate set BEFORE the tie band and the tie-breaks run, per Amendment 5 clause 24.
+- Why: the floor is currently tested only against the largest gain, and the winner is then chosen from inside the tie band by peak footprint, so a candidate whose own arithmetic says it cannot reach R10's shipping floor can still be returned as SELECTED.
+  Reproduced by execution on 2026-08-20, not by reading: a leader at gain 1.1012 with a tie-band member at 1.0812 returns the member, verdict SELECTED, at 1.0812 against a floor of 1.10.
+- Pros: the fix is a reordering inside one function and the registered text for it is already committed in Amendment 5.
+- Cons: it changes the outcome of a rule that is pre-registered, so the amendment had to land first, which it now has.
+- Context: `bench/profile_rules.py` `select_first_operation`, the `if largest < GAIN_FLOOR` branch and the tie band below it; found by an independent Codex audit of the knob plan.
+- Depends on / blocked by: nothing; it is step 7 of the current increment and is worth doing even if that increment stalls.
 
-## The profile's share carries its own marks, and the two honest attributions disagree
+## The shared interleaver takes exactly two arms and the profile needs n
 
-- What: rule how the Day 1 profile attributes wall time to a region, because section 3.3's definition as written produces shares that are not comparable between the three candidates.
-- Why: a mark evals and then timestamps, so the marks bracketing a region sit inside the spans that form the share's numerator and outside the plain step that forms its denominator.
-  Every share is therefore an upper bound, and the overstatement grows with how many marks a candidate carries - which is exactly what separates the candidates, at 197 marked calls for Q against 32 for A and 2 for L.
-  Measured on the 0.6B model on 2026-08-20: marking the loss pair cost 1.08x the plain step, attention 1.54x, the projections 2.86x, and Q's share came out at 1.40, which is not a fraction of anything.
-  Two corrections were tried and both failed: subtracting the whole excess gave negative shares for A and Q, so the marks' cost is not all inside the spans, and doubling a mark's fences measured nothing because a second eval of an already-materialised tensor is free.
-  The deeper problem is that wall-clock attribution inside a pipelined lazy graph is not uniquely defined.
-  Marking every block gave attention a share of 0.208; marking one block and scaling by the block count gave 0.296, a 45% disagreement, while the blocks themselves proved interchangeable to within 2.3%.
-  Sparse marking also costs far less: 1.15x the plain step against 1.62x.
-- Options, none taken.
-  Keep section 3.3 as written and accept a bias aligned with the decision.
-  Mark one block and scale, which cuts the perturbation and rests on an interchangeability assumption that measured true, but changes the registered attribution.
-  Measure both at the deciding cell and register one, which doubles that cell's window and still requires the choice.
-  Replace the wall-time share with a counted one, which is exact and unperturbed but applies Amdahl's relation to a modelled share rather than a measured one.
-- Pros: the evidence is cheap to extend, since every number above came from seconds of 0.6B GPU time and the probes are reproducible.
-- Cons: section 3.3 is committed pre-registration, so every option except the first is an amendment; and the selection rule calls a two-point gain difference a tie, which is far smaller than the disagreement between the two attributions.
-- Measured after the above, and it settles which of the two is wrong: both are.
-  `bench/mlx_probes/probe_attention_ablation.py` measures the same quantity with no instrument inside the step, by replacing attention with a stand-in of the same output shape and reading the whole step's time.
-  At width 97 it puts attention at 0.042 to 0.047 of the step against 0.208 for dense marking and 0.296 for sparse, so both marked figures are four to six times the truth.
-  The gap matches the fence count at roughly half a millisecond per fence.
-  The ablation is believed because it reproduces a scaling law it cannot know: doubling the width multiplies attention by 2.42, then 3.45, then 4.08, which is linear at the short end and quadratic at the long end with the crossover where the geometry puts it.
-- Two checks that could have killed the ablation, and it survived both.
-  `bench/mlx_probes/probe_step_resolution.py` runs two IDENTICAL arms against each other and finds them 0.155 ms apart, which is 0.115% of the step, against the roughly 1 ms that section 4.3's two-point tie band demands; installing a seam that changes nothing costs nothing measurable.
-  `bench/mlx_probes/probe_attention_uniqueness.py` runs attention TWICE with a real data dependency and bit-identical output, and finds that the second serial copy adds one attention's worth of time: kappa is 1.11, 1.10, 0.93 and 1.07 across two runs and two widths.
-  So attention was already alone on the critical path, its share is a unique quantity at these widths, and removing it and doubling it agree to within a few percent while both disagree with the marked instrument by four to six times.
-- The registered f is not a preference either.
-  `gain = 1/(1 - f*(1 - 1/r))` is algebraically `T(s) = T*[(1 - f) + f*s]` with `s = 1/r`, so at `s = 0` it says `T(0) = T*(1 - f)`.
-  That is a plain uninstrumented step with the operation's cost driven to zero, which makes `f := (T_stock - T_ablated)/T_stock` the unique f under which the registered formula's own extreme case is a measured fact rather than a modelling assumption.
-- Context: `bench/profile_stock.py` records the excess beside every share and blocks a recording whose share is not a fraction; `tests/test_profile_stock_live.py` pins the measurement; `bench/mlx_probes/probe_attention_ablation.py` is the unmarked check and reproduces in about four minutes on the 0.6B; the sprint plan carries the same finding.
-- Depends on / blocked by: nothing technical; it must be ruled before the calibration run, because the calibration prices an instrument whose attribution rule is not yet settled.
-  What the ablation does not settle is which method should REPLACE marking, since ablating candidate L and candidate Q are separate designs and neither exists.
+- What: generalise `interleave.interleaved_samples` from two arms to n, keeping the drift canary and the per-round structure, so a four-point dial ladder against a four-point floor ladder can be interleaved within a round.
+- Why: Amendment 5 credits `ratio_lo` from a distribution of per-round slopes, and a slope needs every setting of the dial measured inside the same round.
+  With a two-arm sampler the settings would be measured in separate passes and any drift between them would enter both fitted slopes.
+- Pros: the sampler is already the single shared one, so the generalisation lands in one place.
+- Cons: it touches a function every existing pricing harness calls, so the two-arm callers must be proven behaviour-neutral rather than assumed to be.
+- Context: `bench/interleave.py`, the `interleaved_samples(build_a, build_b, rounds, guard)` signature; ADR 0004's two-halves mistake is why this is generalised rather than copied.
+- Depends on / blocked by: nothing; step 8 of the current increment.
 
-## Amendment 4's compile band may reject the profile it was written for
+## The end-to-end harness and the profile now measure different widths
 
-- What: check the compiled-to-uncompiled step ratio at the real cell before the binding run, and re-register the band if the real ratio sits outside it.
-- Why: Amendment 4 registers [0.90, 1.10] and says in writing that it was set as an uncalibrated judgement.
-  Measured on the 0.6B model at a 97-token batch on 2026-08-20, the ratio is 1.194, outside the band, so a profile run under that arrangement would REJECT rather than report.
-  The 4B at a real width may sit anywhere; the point is that nothing has measured it and the band can refuse the whole run.
-- Pros: the calibration run already planned would measure it for free, since it runs the same cell with both modes.
-- Cons: re-registering a band after seeing the number it rejects is the exact move the pre-registration exists to prevent, so if the band is to move it has to move on a stated argument rather than on the observed value.
-- Context: `bench/profile_rules.py` `compile_transfer` and `COMPILE_RATIO_BAND`; the plan's NOT-in-scope table deliberately declined to re-register it before the first run.
-- Depends on / blocked by: the calibration run, which needs Vlad's explicit go.
-
-## The committed end-to-end harness registers a sequence length its corpus cannot produce
-
-- What: decide what sequence length the end-to-end measurement actually runs at, and reconcile section 8's registered 2048 with whatever a real instruction corpus yields.
-- Why: `bench/train_lora_e2e.py` registers `max_seq_length=2048` and pins a masked instruction dataset, but mlx-lm never trains at a fixed length.
-  Its iterator sorts examples by length and pads each batch only to one plus the next multiple of 32 above that batch's own longest row (`mlx_lm/tuner/trainer.py:157`), so 2048 is a cap rather than a target.
-  Measured on 2026-08-20 against the pinned Qwen3-4B tokenizer, databricks-dolly-15k has a median row of 116 tokens, p95 of 569, and 33 rows of 15011 above 2048.
-  The harness would therefore compare arms on batches roughly a tenth of the width its own pre-registration names, and the ratio it reports would be honest about the arms while silently describing a different workload from the one section 8 describes.
-- The width dependence is now measured rather than argued.
-  `bench/mlx_probes/probe_attention_ablation.py` puts attention at 0.042 of the step at width 97 and 0.161 at width 769, a four-fold change in one candidate's share across a width range narrower than the one in dispute.
-  The mechanism is geometric and applies to all three candidates: attention's score matrix is quadratic in the sequence length while the output head, the projections and the loss are all linear in it, so as the width rises attention's share rises and every other candidate's falls.
-  Choosing the band therefore chooses which candidate the rule selects, which is the outcome a pre-registered rule exists to prevent.
-- Pros: it is the same decision the Day 1 profile is blocked on, so ruling once settles both, and the evidence is already committed at `bench/.data/dolly/corpus-distribution.json`.
-- Cons: section 8 is committed pre-registration, so any change is an amendment rather than an edit; and the honest repairs all cost something, since a longer corpus changes the dataset, packing changes the mask structure, and registering tokens-per-step instead moves batch size far from the registered 1 and 4.
-- Context: found while pinning the corpus for the Day 1 profile; the profile's own blocker is written up in the sprint plan under "the registered sequence length does not exist in this corpus"; `bench/pin_dolly.py --report` reproduces the distribution on CPU in about a minute.
-- Depends on / blocked by: nothing technical, but it should be ruled together with the profile's band rather than separately, because two different widths would make the profile's chosen operation and the end-to-end number describe different workloads.
+- What: amend section 8 so the end-to-end measurement runs at the same widths Amendment 5 registered for the profile, or state in writing why it should not.
+- Why: `bench/train_lora_e2e.py` registers `max_seq_length=2048` and mlx-lm never trains at a fixed length, because its iterator pads each batch only to one plus the next multiple of 32 above that batch's own longest row.
+  Amendment 5 resolved this for the PROFILE by registering two derived UltraChat bands and retiring the Dolly slice from it, and it explicitly did not reach section 8.
+  So the operation the rule selects would be chosen at one width and the shipping number measured at another, and the width dependence is measured rather than argued: attention is 0.042 of the step at width 97 and 0.161 at width 769, because its score matrix is quadratic in the sequence length while the head, the projections and the loss are linear in it.
+- Pros: the corpus tooling, the band arithmetic and the two pinned bands will already exist once the profile's increment lands, so this is a re-registration rather than new machinery.
+- Cons: section 8 is committed pre-registration and its fairness conditions reference the dataset directly, so the amendment has to restate them rather than point at the profile's.
+- Context: `bench/train_lora_e2e.py`; Amendment 5 clause 14 names this gap in writing and clause 20 registers what the profile uses instead; `bench/pin_dolly.py --report` reproduces the distribution on CPU in about a minute.
+- Depends on / blocked by: the profile's corpus step, which produces the two bands this would adopt.
 
 ## Four test modules build their own Metal device instead of sharing conftest's probe
 
