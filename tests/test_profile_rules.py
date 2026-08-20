@@ -214,6 +214,33 @@ def test_the_floor_boundary_selects_rather_than_refuses():
     assert got["selected"] == "L"
 
 
+def test_the_footprint_tie_break_cannot_select_below_the_floor():
+    """Amendment 5 clause 24: the shipping floor applies to the SELECTED
+    candidate, not to the largest gain. Reproduced before the fix: a leader at
+    gain 1.105 pulls a 1.095 candidate into the tie band, and the smaller
+    footprint then hands SELECTED to a candidate below 1.10."""
+    got = select_first_operation([
+        _reading("L", share=2 * (1 - 1 / 1.105), ratio=2.0, footprint=900),
+        _reading("A", share=2 * (1 - 1 / 1.095), ratio=2.0, footprint=100),
+    ])
+    assert got["selected"] == "L", "a below-floor candidate must never ship"
+    assert got["tied_with"] == [], "below the floor is not tied, it is out"
+    assert [row["candidate"] for row in got["ranked"]] == ["L", "A"], \
+        "the below-floor candidate stays in the ranked evidence"
+
+
+def test_table_order_cannot_select_below_the_floor_either():
+    """The same hole through the other tie-break: an unmeasured footprint
+    sends the band to table order, and table order reads L before Q."""
+    got = select_first_operation([
+        _reading("Q", share=2 * (1 - 1 / 1.105), ratio=2.0, footprint=100),
+        _reading("L", share=2 * (1 - 1 / 1.095), ratio=2.0, footprint=None),
+    ])
+    assert got["selected"] == "Q", "a below-floor candidate must never ship"
+    assert got["tied_with"] == []
+    assert [row["candidate"] for row in got["ranked"]] == ["Q", "L"]
+
+
 def test_the_rule_refuses_a_candidate_it_never_registered():
     with pytest.raises(RunInvalid):
         select_first_operation([_reading("Z", share=0.3, ratio=2.0)])

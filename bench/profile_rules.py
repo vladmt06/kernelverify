@@ -409,7 +409,14 @@ def select_first_operation(readings: Sequence[Reading]) -> dict[str, object]:
     # differ by two points or more; inside that band the reading is not
     # precise enough to order them, so the registered tie-breaks do it and a
     # hair more gain wins nothing.
-    band = [row for row in scored if largest - row["gain"] < TIE_GAIN]
+    #
+    # Amendment 5 clause 24: the shipping floor applies to the SELECTED
+    # candidate, not to the largest gain. The band is therefore drawn only
+    # from candidates at or above the floor, because a tie-break must never
+    # hand SELECTED to a candidate the floor already ruled out. Below-floor
+    # candidates stay in the ranked evidence.
+    band = [row for row in scored
+            if row["gain"] >= GAIN_FLOOR and largest - row["gain"] < TIE_GAIN]
 
     # The footprint tie-break needs every tied candidate measured. Ranking a
     # measured delta against an unmeasured one would decide the sprint on

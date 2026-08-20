@@ -1,15 +1,5 @@
 # TODOS
 
-## The selection rule can return a candidate below the shipping floor
-
-- What: fix `select_first_operation` so section 4.3's 1.10 floor filters the candidate set BEFORE the tie band and the tie-breaks run, per Amendment 5 clause 24.
-- Why: the floor is currently tested only against the largest gain, and the winner is then chosen from inside the tie band by peak footprint, so a candidate whose own arithmetic says it cannot reach R10's shipping floor can still be returned as SELECTED.
-  Reproduced by execution on 2026-08-20, not by reading: a leader at gain 1.1012 with a tie-band member at 1.0812 returns the member, verdict SELECTED, at 1.0812 against a floor of 1.10.
-- Pros: the fix is a reordering inside one function and the registered text for it is already committed in Amendment 5.
-- Cons: it changes the outcome of a rule that is pre-registered, so the amendment had to land first, which it now has.
-- Context: `bench/profile_rules.py` `select_first_operation`, the `if largest < GAIN_FLOOR` branch and the tie band below it; found by an independent Codex audit of the knob plan.
-- Depends on / blocked by: nothing; it is step 7 of the current increment and is worth doing even if that increment stalls.
-
 ## The attention dial's registered criterion names no width, and the width picks the dial
 
 - What: register the width at which Amendment 5 clause 15's dial selection is made, or replace the price statistic with one that does not invert across the width range the profile already registers.
