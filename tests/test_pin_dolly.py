@@ -1,0 +1,165 @@
+"""Pinning a training corpus: the parts that decide a shape, checked offline.
+
+Nothing here fetches anything or loads a tokenizer. What is pinned is the
+arithmetic that turns a corpus into a registered shape - which band a row
+falls in, what width the trainer will pad that band to, and whether a slice is
+reproducible from its seed - because those are what a recording's hash means
+and what a floor is measured against.
+"""
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bench"))
+
+import pin_dolly  # noqa: E402
+
+
+def measured(length, supervised=None, prompt="p", completion="c"):
+    band = pin_dolly.PAD_TO * ((length + pin_dolly.PAD_TO - 1)
+                               // pin_dolly.PAD_TO)
+    return {"pair": {"prompt": prompt, "completion": completion},
+            "length": length, "band": band,
+            "supervised": length // 2 if supervised is None else supervised}
+
+
+# ---------------------------------------------------------------------------
+# The trainer's own padding arithmetic
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("longest,width", [
+    (1, 33), (31, 33), (32, 33), (33, 65), (64, 65), (65, 97),
+    (160, 161), (2048, 2049),
+])
+def test_a_band_pads_to_the_width_the_trainer_uses(longest, width):
+    """One plus the next multiple of 32, which is mlx-lm's rule rather than
+    ours; a floor registered at any other number would be measured at a shape
+    the step never produces."""
+    assert pin_dolly.batch_width(longest) == width
+
+
+def test_the_padded_width_is_one_more_than_the_input_length():
+    """The trainer drops the last column to make the targets, so a batch
+    padded to 161 trains on 160 tokens."""
+    assert pin_dolly.batch_width(160) - 1 == 160
+
+
+# ---------------------------------------------------------------------------
+# Dolly's fields in the shape that carries a prompt boundary
+# ---------------------------------------------------------------------------
+def test_a_row_without_context_is_prompt_and_completion():
+    pair = pin_dolly.as_prompt_completion(
+        {"instruction": "Why?", "context": "", "response": "Because."})
+    assert pair == {"prompt": "Why?", "completion": "Because."}
+
+
+def test_context_joins_the_instruction_rather_than_the_answer():
+    """Context is part of what the model reads, not part of what it is scored
+    on; putting it in the completion would move it across the mask and change
+    the supervised fraction candidate L is judged by."""
+    pair = pin_dolly.as_prompt_completion(
+        {"instruction": "Why?", "context": "Some background.",
+         "response": "Because."})
+    assert pair["prompt"] == "Why?\n\nSome background."
+    assert pair["completion"] == "Because."
+
+
+def test_a_missing_context_key_is_not_an_error():
+    pair = pin_dolly.as_prompt_completion(
+        {"instruction": "Why?", "response": "Because."})
+    assert pair["prompt"] == "Why?"
+
+
+# ---------------------------------------------------------------------------
+# The slice
+# ---------------------------------------------------------------------------
+def test_the_slice_takes_only_rows_from_the_named_band():
+    rows = [measured(50) for _ in range(10)] + [measured(100) for _ in range(10)]
+    train, valid = pin_dolly.select(rows, band=64, train=6, valid=2)
+    assert all(row["band"] == 64 for row in train + valid)
+
+
+def test_the_slice_is_the_same_every_time_for_the_same_seed():
+    rows = [measured(50, prompt=f"p{i}") for i in range(40)]
+    first = pin_dolly.select(rows, band=64, train=8, valid=4)
+    second = pin_dolly.select(rows, band=64, train=8, valid=4)
+    assert [r["pair"] for r in first[0]] == [r["pair"] for r in second[0]]
+    assert [r["pair"] for r in first[1]] == [r["pair"] for r in second[1]]
+
+
+def test_train_and_valid_do_not_share_a_row():
+    rows = [measured(50, prompt=f"p{i}") for i in range(40)]
+    train, valid = pin_dolly.select(rows, band=64, train=8, valid=4)
+    assert not ({r["pair"]["prompt"] for r in train}
+                & {r["pair"]["prompt"] for r in valid})
+
+
+def test_a_band_too_thin_to_fill_the_slice_refuses_and_names_the_alternatives():
+    """Silently returning fewer rows would change the shape of every batch
+    after the short one."""
+    rows = [measured(50) for _ in range(5)] + [measured(100) for _ in range(40)]
+    with pytest.raises(SystemExit, match="busiest bands"):
+        pin_dolly.select(rows, band=64, train=8, valid=4)
+
+
+# ---------------------------------------------------------------------------
+# The distribution, which is the evidence a band is chosen against
+# ---------------------------------------------------------------------------
+def test_the_distribution_reports_the_bands_a_slice_could_come_from():
+    rows = ([measured(50) for _ in range(3)]
+            + [measured(100) for _ in range(5)])
+    stats = pin_dolly.distribution(rows)
+    assert stats["rows"] == 8
+    assert stats["bands"] == {"64": 3, "128": 5}
+
+
+def test_the_distribution_reports_the_supervised_fraction():
+    """Candidate L's whole premise is that supervised rows are fewer than
+    total rows, so a corpus where they are not is evidence against it."""
+    rows = [measured(100, supervised=40) for _ in range(4)]
+    stats = pin_dolly.distribution(rows)
+    assert stats["supervised_fraction"]["median"] == pytest.approx(0.4)
+
+
+def test_the_distribution_carries_the_padding_rule_it_was_computed_with():
+    stats = pin_dolly.distribution([measured(50)])
+    assert stats["pad_to"] == pin_dolly.PAD_TO
+
+
+# ---------------------------------------------------------------------------
+# Writing, and the hash a recording carries
+# ---------------------------------------------------------------------------
+def test_a_written_split_is_jsonl_of_prompt_and_completion(tmp_path):
+    rows = [measured(50, prompt="a", completion="b"),
+            measured(50, prompt="c", completion="d")]
+    path = tmp_path / "train.jsonl"
+    pin_dolly.write_split(path, rows)
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    assert lines == [{"prompt": "a", "completion": "b"},
+                     {"prompt": "c", "completion": "d"}]
+
+
+def test_the_hash_moves_when_a_single_row_moves(tmp_path):
+    """The hash is what a recording binds, so it has to be a hash of the
+    bytes rather than of the row count."""
+    one = pin_dolly.write_split(tmp_path / "a.jsonl", [measured(50, prompt="a")])
+    two = pin_dolly.write_split(tmp_path / "b.jsonl", [measured(50, prompt="z")])
+    assert one != two
+
+
+def test_the_committed_corpus_report_matches_the_pinned_corpus():
+    """The evidence the band is chosen against travels with the repository,
+    so a later reader can see what was known when the choice was made."""
+    report = (Path(__file__).resolve().parents[1] / "bench" / ".data"
+              / "dolly" / "corpus-distribution.json")
+    stats = json.loads(report.read_text())
+    assert stats["rows"] == 15011
+    assert stats["length"]["median"] == 116
+    assert stats["pad_to"] == pin_dolly.PAD_TO
+    fillable = [int(band) for band, count in stats["bands"].items()
+                if count >= 1024 + 128]
+    assert max(fillable) == 160, (
+        "the widest band that can fill a 1024+128 slice; if this moves, the "
+        "shape the profile can register moves with it")
