@@ -34,26 +34,43 @@ denominator from the plain pass in the same child. Cells A, C and D decide
 nothing, keep one combined pass, and their shares are labelled as carrying
 cross-region bias rather than quietly presented as clean.
 
-What is checked, and what turned out not to be a check
-------------------------------------------------------
+What is checked, and against what
+---------------------------------
 Section 3.3 registered "named regions plus one remainder must equal the step
-within 2%". That cannot fail: the remainder is defined as whatever the spans
-leave on the same timeline, so the sum is the step by construction. It is
-computed and reported because the section registers it, and it is superseded
-as a check by three things that can fail:
+within 2%", and which step that is decides whether the check exists at all.
+Against the marked pass's own elapsed it cannot fail, because the remainder is
+defined as whatever the spans leave on the same timeline. Amendment 4 does not
+say that: it compares against the step "taken without the interior
+boundaries", which is the plain pass. Read as written the check is therefore
+the instrument's own cost measured against a 2% limit, so section 3.3's
+reconciliation and Amendment 5's instrument-cost band are one quantity at two
+limits rather than two checks. The 2% is what is registered today, and no
+instrument that can put a clock inside an MLX backward meets it, so a
+recording says so and does not bind.
 
-  exact counts      - a region fires once per place it appears, in each
-                      direction; a seam that was installed and never reached
-                      reads as a zero share and lands silently in the
-                      remainder, and only a count catches that.
+Three other things are checked and each can fail:
+
+  exact counts      - forward, a region fires once per place it appears.
+                      Backward it does NOT: mlx-lm adapts only the last
+                      `num_layers` blocks, so attention has a backward once
+                      per ADAPTED block and the projections
+                      `7 * adapted - 3` times, the three being those that
+                      consume the lowest adapted block's input, whose gradient
+                      nothing below asks for. A seam installed and never
+                      reached leaves its region absent from the log, so its
+                      share reads as zero and its time lands silently in the
+                      remainder, and only a count tells that apart from an
+                      operation that really costs nothing.
   identity          - the marked pass and the plain pass must agree on the
                       loss and on every gradient array, or the custom gradient
                       rule changed the computation and the two modes describe
                       different work.
-  instrument cost   - the marked step over the plain step, against a band
-                      Amendment 5 registers from the calibration run. While no
-                      band is registered a binding profile refuses, because a
-                      cost accepted after it was seen is not a limit.
+  a share is a fraction - a candidate whose share does not land in (0, 1) has
+                      not measured a fraction of a step. That happens: the
+                      marks sit inside the spans that form the numerator and
+                      outside the plain step that forms the denominator, so
+                      every share is an upper bound and the overstatement
+                      grows with how many marks the candidate carries.
 
 And the process must be stock. Before anything is timed, every seam is checked
 to hold the object mlx-lm itself defines and metalrunner is checked to certify

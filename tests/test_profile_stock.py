@@ -797,6 +797,35 @@ def test_an_unmeasured_footprint_sends_a_tie_to_table_order(monkeypatch):
     assert artifact["ruling"].get("footprint_measured") in (False, None)
 
 
+def test_the_ruling_survives_the_round_trip_through_disk(monkeypatch, tmp_path):
+    """`decide` reads two recordings that were written, closed and hashed, not
+    two dicts that never left memory. JSON has no tuples and no integer keys,
+    so a context that compared equal in memory can stop comparing equal on the
+    way back, and the check that stops a share dividing a ratio from another
+    workload would then refuse every honest ruling."""
+    runtime = ps.SystemRuntime()
+    profile_path, sweep_path = tmp_path / "p.json", tmp_path / "s.json"
+    runtime.write_record(profile_path, _profile(monkeypatch))
+    runtime.write_record(sweep_path, _sweep())
+    assert ps.run_decide(profile_path, sweep_path, tmp_path / "d.json") == 0
+    artifact = json.loads((tmp_path / "d.json").read_text())
+    assert artifact["ruling"]["verdict"] in {
+        "SELECTED", "NO SINGLE OPERATION REACHES THE FLOOR"}
+    assert artifact["rested_on"]["profile_rules_sha256"]
+
+
+def test_a_ruling_is_written_once(monkeypatch, tmp_path):
+    runtime = ps.SystemRuntime()
+    profile_path, sweep_path = tmp_path / "p.json", tmp_path / "s.json"
+    runtime.write_record(profile_path, _profile(monkeypatch))
+    runtime.write_record(sweep_path, _sweep())
+    out = tmp_path / "d.json"
+    assert ps.run_decide(profile_path, sweep_path, out) == 0
+    before = out.read_text()
+    assert ps.run_decide(profile_path, sweep_path, out) == EXIT_PRECONDITION
+    assert out.read_text() == before
+
+
 def test_the_other_cells_are_reported_and_decide_nothing(monkeypatch):
     artifact = ps.decide(_profile(monkeypatch), _sweep())
     assert set(artifact["reported_only"]) == {"C"}
@@ -805,6 +834,37 @@ def test_the_other_cells_are_reported_and_decide_nothing(monkeypatch):
 # ---------------------------------------------------------------------------
 # The child's refusals, which are all a caller ever sees of it
 # ---------------------------------------------------------------------------
+def test_the_parent_really_can_spawn_this_file_as_its_child(tmp_path,
+                                                            monkeypatch):
+    """A real subprocess, end to end, with the device switched off.
+
+    Everything else about the child is tested by calling `child_main`
+    directly, which proves nothing about the wiring around it: whether the
+    entrypoint resolves, whether the argv is the one the child's parser
+    accepts, whether the task file survives the round trip, and whether the
+    exit code comes back as the numbered refusal the detached runner reads.
+    Those are exactly the faults that only appear on the machine, minutes into
+    a run that already holds the lock.
+
+    KV_FORCE_NO_METAL makes the child refuse at its first line, so this costs
+    one interpreter start and touches no GPU.
+    """
+    from harness_runner import ChildRefusal, spawn_child
+
+    monkeypatch.setenv("KV_FORCE_NO_METAL", "1")
+    with pytest.raises(ChildRefusal) as raised:
+        spawn_child(
+            {"kind": "profile", "cell": "cell B", "cell_name": "B",
+             "plan": ps.validate_plan(_plan()), "provenance": {},
+             "budget_gb": 8.0},
+            tmp_path, wall_cap_s=120.0,
+            child_entrypoint=Path(ps.__file__).resolve())
+    assert raised.value.returncode == EXIT_NO_DEVICE
+    assert ps.child_exit_for_parent(raised.value.returncode) == EXIT_NO_DEVICE
+    # And nothing was left behind in the workspace.
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_the_child_refuses_when_the_device_is_switched_off(tmp_path,
                                                            monkeypatch):
     monkeypatch.setenv("KV_FORCE_NO_METAL", "1")
