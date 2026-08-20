@@ -31,6 +31,13 @@ SECONDARY_CELL = "C"
 SEQ_LEN = 2048
 LORA_RANK = 8
 
+# Section 3.2, "the adapter layer count mlx-lm defaults to". It decides how
+# much of the step has a backward at all: mlx-lm adapts the LAST this-many
+# blocks, and every block below the first adapted one has no trainable
+# parameter beneath it and no backward. A profile that assumed a backward per
+# layer would overstate every share built on one.
+LORA_LAYERS = 16
+
 # Section 3.2. The five distinct projection shapes the model contains,
 # as (d_out, d_in), with the token count M the cell produces.
 SHAPES = {
@@ -247,6 +254,66 @@ def compile_transfer(uncompiled_total: float,
                        "same batch in the same run; a ratio far from 1 means "
                        "the decomposition describes a workload the product "
                        "does not run"}
+
+
+# Amendment 5. What the marks are allowed to cost, as a multiple of the same
+# step measured without them.
+#
+# Deliberately unregistered until the calibration run fills it. Section 3.3
+# registered a 2% reconciliation limit, and every instrument that can actually
+# put a clock inside an MLX backward costs far more than that: marking a
+# synthetic six-region chain cost +40.5% and marking a real 0.6B training step
+# cost +110.8%, both measured 2026-08-20. A limit no working instrument can
+# meet rejects the instrument rather than the run, so the cost is measured
+# first at the real cell and the band is written here by amendment.
+#
+# While this is None a binding profile refuses. That is the point: a cost with
+# no registered limit is a number nobody agreed to accept, and accepting it
+# after seeing it is the one thing the pre-registration exists to prevent.
+INSTRUMENT_COST_BAND: tuple[float, float] | None = None
+
+
+def instrument_cost(instrumented_total: float, plain_total: float, *,
+                    band: Sequence[float] | None = None) -> dict[str, object]:
+    """Amendment 5: what the marks cost, against the limit registered for them.
+
+    The numerator and the denominator are the same step on the same batch in
+    the same child, one pass with the marks installed and one without, so the
+    ratio is the instrument and nothing else.
+
+    Nothing is scaled by it. A share already takes its denominator from the
+    plain pass, so the marks' cost does not enter the share arithmetic; this
+    ratio is the check that the marked pass still describes the workload the
+    plain one ran, which is the claim a share silently makes.
+
+    `band` overrides the registered limit so the rule is testable before the
+    amendment exists. Passing nothing reads `INSTRUMENT_COST_BAND`, and while
+    that is None the verdict is None rather than True: unregistered is not the
+    same as passed, and a caller that treats it as passed is refusing to see
+    the difference.
+    """
+    if plain_total <= 0.0:
+        raise RunInvalid("a plain step with no measured time cannot price the "
+                         "instrument")
+    if instrumented_total <= 0.0:
+        raise RunInvalid("an instrumented step with no measured time is not a "
+                         "measurement of anything")
+    ratio = instrumented_total / plain_total
+    limits = INSTRUMENT_COST_BAND if band is None else band
+    if limits is None:
+        return {"ratio": ratio, "band": None, "ok": None,
+                "meaning": "instrumented step total over plain step total, on "
+                           "the same batch in the same child",
+                "reason": "no band is registered: the calibration run measures "
+                          "this cost and Amendment 5 writes the limit before "
+                          "any binding profile may read it"}
+    low, high = limits
+    return {"ratio": ratio, "band": (float(low), float(high)),
+            "ok": low <= ratio <= high,
+            "meaning": "instrumented step total over plain step total, on the "
+                       "same batch in the same child",
+            "reason": "a ratio outside the band means the marked pass and the "
+                      "plain pass are not describing the same step"}
 
 
 def round_is_eligible(samples: Sequence[float], limit_pct: float) -> bool:

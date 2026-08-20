@@ -137,6 +137,19 @@ class Seam:
         return f"{self.module}.{self.attribute}"
 
 
+def current(seam: Seam):
+    """What this seam's name holds right now, read the way `install` reads it.
+
+    Exists so a caller can ask "is this name still what mlx-lm defined" without
+    installing anything, and get the same answer `install` would get. Reading
+    it with a plain `getattr` is not the same question: on a class that walks
+    the base classes and runs the descriptor protocol, so an inherited name
+    looks present and a classmethod comes back bound.
+    """
+    owner, name = seam.resolve()
+    return _own(owner, name)
+
+
 class Installation:
     """The set of replacements active in this process, and their counts."""
 
