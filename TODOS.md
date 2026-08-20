@@ -34,6 +34,13 @@
   At width 97 it puts attention at 0.042 to 0.047 of the step against 0.208 for dense marking and 0.296 for sparse, so both marked figures are four to six times the truth.
   The gap matches the fence count at roughly half a millisecond per fence.
   The ablation is believed because it reproduces a scaling law it cannot know: doubling the width multiplies attention by 2.42, then 3.45, then 4.08, which is linear at the short end and quadratic at the long end with the crossover where the geometry puts it.
+- Two checks that could have killed the ablation, and it survived both.
+  `bench/mlx_probes/probe_step_resolution.py` runs two IDENTICAL arms against each other and finds them 0.155 ms apart, which is 0.115% of the step, against the roughly 1 ms that section 4.3's two-point tie band demands; installing a seam that changes nothing costs nothing measurable.
+  `bench/mlx_probes/probe_attention_uniqueness.py` runs attention TWICE with a real data dependency and bit-identical output, and finds that the second serial copy adds one attention's worth of time: kappa is 1.11, 1.10, 0.93 and 1.07 across two runs and two widths.
+  So attention was already alone on the critical path, its share is a unique quantity at these widths, and removing it and doubling it agree to within a few percent while both disagree with the marked instrument by four to six times.
+- The registered f is not a preference either.
+  `gain = 1/(1 - f*(1 - 1/r))` is algebraically `T(s) = T*[(1 - f) + f*s]` with `s = 1/r`, so at `s = 0` it says `T(0) = T*(1 - f)`.
+  That is a plain uninstrumented step with the operation's cost driven to zero, which makes `f := (T_stock - T_ablated)/T_stock` the unique f under which the registered formula's own extreme case is a measured fact rather than a modelling assumption.
 - Context: `bench/profile_stock.py` records the excess beside every share and blocks a recording whose share is not a fraction; `tests/test_profile_stock_live.py` pins the measurement; `bench/mlx_probes/probe_attention_ablation.py` is the unmarked check and reproduces in about four minutes on the 0.6B; the sprint plan carries the same finding.
 - Depends on / blocked by: nothing technical; it must be ruled before the calibration run, because the calibration prices an instrument whose attribution rule is not yet settled.
   What the ablation does not settle is which method should REPLACE marking, since ablating candidate L and candidate Q are separate designs and neither exists.
