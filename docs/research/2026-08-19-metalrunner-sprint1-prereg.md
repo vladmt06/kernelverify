@@ -404,3 +404,49 @@ It is not tightened here because nothing has yet measured what round-to-round va
 Two limits of this rule are recorded so nobody reads more from a passing canary than it says.
 It cannot see a contamination that lands evenly on every reference round, because such a contamination leaves the spread small while still moving the ratio; the opening and closing idle gates remain the only defence there.
 And it is a per-comparison rule, so a cell may be rejected on one comparison and readable on another; a cell is non-binding if any of its comparisons is rejected, because the arms it is reading came from the same rounds.
+
+## Amendment 4, 2026-08-20: the registered instrument cannot run on the registered target, so the profile turns compile off and measures what that costs
+
+### What section 3.3 asked for, and why it cannot happen
+
+Section 3.3 registered the instrument as "MLX's own evaluation boundaries around named regions of the step".
+mlx-lm 0.31.3 wraps the whole training step in `mx.compile`, at `mlx_lm/tuner/trainer.py:248`, and exposes no flag to turn it off: the decorator is unconditional and `mlx_lm.lora` never reaches it.
+MLX refuses an evaluation inside any such transformation, in as many words:
+
+    [eval] Attempting to eval an array during function transformations
+    like compile or vmap is not allowed.
+
+Reproduced 2026-08-20 against mlx 0.32.0 and mlx-lm 0.31.3.
+So the instrument and the target as registered cannot both be had, and no code was written against section 3.3 as it stood.
+
+### The ruling
+
+The profile runs with compile disabled, through `mx.disable_compile()`, and the named regions are timed by evaluation boundaries inside the uncompiled step.
+
+Two facts about the switch were measured before it was adopted, because the whole ruling rests on them.
+It is read at CALL time, not at decoration time: a function already decorated with `mx.compile` runs uncompiled while the switch is off, and refuses an interior `eval` again the moment it is re-enabled.
+That means mlx-lm's own `step`, which is decorated inside `train()` and is not ours to redefine, becomes uncompiled without touching mlx-lm at all, and the same process can run the step both ways.
+
+### What this costs, and the guard that prices it
+
+An uncompiled step is not the shipped step.
+`mx.compile` fuses elementwise chains, so the composition of the step's time can move even when its total does not, and a share f taken from the uncompiled step is a claim about the compiled one only to the extent the two agree.
+
+The profile therefore measures the step total BOTH ways, in the same run, on the same batch, and reports the ratio `uncompiled_total / compiled_total` beside every share it publishes.
+The ratio is not a correction and nothing is scaled by it.
+It is the stated bound on the transfer: a ratio near 1 says the two steps cost the same in total and the shares are worth reading; a ratio far from 1 says the decomposition describes a workload the product does not run, and the profile says so rather than reporting shares that look like the shipped step's.
+
+A ratio outside [0.90, 1.10] REJECTS the profile.
+The number is declared here, before the run, and it is declared uncalibrated: it is a judgement about how much redistribution makes a share meaningless, not a measured limit, and the first run's observed ratio is reported whatever it is so a later amendment can replace the guess with evidence.
+
+### What section 3.3's reconciliation check now means
+
+The 2% reconciliation stands and now has something to bite on.
+The named regions plus one explicit unattributed remainder are measured inside the uncompiled step, and their sum is compared against that same uncompiled step's own end-to-end time, taken without the interior boundaries.
+A gap past 2% means the boundaries themselves moved the workload they were inserted to describe, and the profile is rejected.
+This is a different check from the compile ratio above and both must pass: one prices the instrument, the other prices turning compile off.
+
+### What this amendment does not change
+
+The cells, the shapes, the selection rule, the gain formula, the credited ratios and their named assumptions, the kill rule and the run discipline are all untouched.
+The candidate ratios r are floors measured on their own, not shares, so they do not pass through the uncompiled step and this amendment does not reach them.
