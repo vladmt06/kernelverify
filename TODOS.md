@@ -56,6 +56,10 @@
   Its iterator sorts examples by length and pads each batch only to one plus the next multiple of 32 above that batch's own longest row (`mlx_lm/tuner/trainer.py:157`), so 2048 is a cap rather than a target.
   Measured on 2026-08-20 against the pinned Qwen3-4B tokenizer, databricks-dolly-15k has a median row of 116 tokens, p95 of 569, and 33 rows of 15011 above 2048.
   The harness would therefore compare arms on batches roughly a tenth of the width its own pre-registration names, and the ratio it reports would be honest about the arms while silently describing a different workload from the one section 8 describes.
+- The width dependence is now measured rather than argued.
+  `bench/mlx_probes/probe_attention_ablation.py` puts attention at 0.042 of the step at width 97 and 0.161 at width 769, a four-fold change in one candidate's share across a width range narrower than the one in dispute.
+  The mechanism is geometric and applies to all three candidates: attention's score matrix is quadratic in the sequence length while the output head, the projections and the loss are all linear in it, so as the width rises attention's share rises and every other candidate's falls.
+  Choosing the band therefore chooses which candidate the rule selects, which is the outcome a pre-registered rule exists to prevent.
 - Pros: it is the same decision the Day 1 profile is blocked on, so ruling once settles both, and the evidence is already committed at `bench/.data/dolly/corpus-distribution.json`.
 - Cons: section 8 is committed pre-registration, so any change is an amendment rather than an edit; and the honest repairs all cost something, since a longer corpus changes the dataset, packing changes the mask structure, and registering tokens-per-step instead moves batch size far from the registered 1 and 4.
 - Context: found while pinning the corpus for the Day 1 profile; the profile's own blocker is written up in the sprint plan under "the registered sequence length does not exist in this corpus"; `bench/pin_dolly.py --report` reproduces the distribution on CPU in about a minute.
