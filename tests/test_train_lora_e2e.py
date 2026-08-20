@@ -11,6 +11,7 @@ from datetime import date
 
 import pytest
 
+import harness_runner as runner
 import train_lora_e2e as harness
 from memory_guard import (
     EXIT_BUDGET_REFUSAL,
@@ -1444,7 +1445,7 @@ def test_child_guard_refusals_keep_the_shared_code(
         def check(self, cell):
             raise error
 
-    monkeypatch.setattr(harness, "BudgetGuard", RefusingGuard)
+    monkeypatch.setattr(runner, "BudgetGuard", RefusingGuard)
     assert harness.child_main(task, out) == exit_code
     assert not out.exists()
 
@@ -1463,8 +1464,8 @@ def test_child_low_memory_refusal_keeps_the_shared_code(tmp_path, monkeypatch):
     def refuse(needed, cell):
         raise harness.LowMemoryRefusal(cell, 2.0, needed)
 
-    monkeypatch.setattr(harness, "BudgetGuard", Guard)
-    monkeypatch.setattr(harness, "require_available_memory", refuse)
+    monkeypatch.setattr(runner, "BudgetGuard", Guard)
+    monkeypatch.setattr(runner, "require_available_memory", refuse)
     assert harness.child_main(task, out) == EXIT_LOW_MEMORY
     assert not out.exists()
 
@@ -1480,8 +1481,8 @@ def test_child_precondition_refusal_happens_before_training(tmp_path, monkeypatc
         def check(self, cell):
             return 1.0
 
-    monkeypatch.setattr(harness, "BudgetGuard", Guard)
-    monkeypatch.setattr(harness, "require_available_memory", lambda *args: 1.0)
+    monkeypatch.setattr(runner, "BudgetGuard", Guard)
+    monkeypatch.setattr(runner, "require_available_memory", lambda *args: 1.0)
     monkeypatch.setattr(
         harness,
         "stack_record",
