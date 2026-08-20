@@ -10,6 +10,28 @@
 - Context: `bench/profile_rules.py` `select_first_operation`, the `if largest < GAIN_FLOOR` branch and the tie band below it; found by an independent Codex audit of the knob plan.
 - Depends on / blocked by: nothing; it is step 7 of the current increment and is worth doing even if that increment stalls.
 
+## The attention dial's registered criterion names no width, and the width picks the dial
+
+- What: register the width at which Amendment 5 clause 15's dial selection is made, or replace the price statistic with one that does not invert across the width range the profile already registers.
+- Why: clause 15 picks candidate A's dial by the smallest scaffold slope as a fraction of the knob slope, and measured on 2026-08-20 at the 0.6B proxy that statistic returns a different dial at each width.
+  At 96 queries the prices are 0.101, 0.937 and 0.440 and the length dial wins; at 384 queries they are 0.221, 0.027 and 0.029 and the head-dimension dial wins, tied with the third and broken by completeness rank.
+  Choosing the width therefore chooses the dial, and the dial sets candidate A's share: at 384 queries the length dial reads 0.060 and both head-dimension dials read 0.023, against an unmarked ablation of 0.068 in the same rounds.
+- Pros: the profile already registers two widths for other reasons, so naming one of them for the selection is a sentence rather than new machinery, and the long width is where attention is large enough to fit.
+- Cons: clause 15 is committed pre-registration and the numbers that expose the gap now exist, so any new text is written after the measurement rather than before it and has to say so.
+- Context: `bench/mlx_probes/probe_attention_dials.py`, `bench/profile_knobs.py` `ATTENTION_KNOBS` and `choose_dial`; `KNOBS` deliberately still has no entry for candidate A until this is ruled.
+- Depends on / blocked by: Vlad's ruling; a confirming run at the long width needs a GPU window because 28 arms at 768 queries is minutes rather than seconds.
+
+## Candidate A's floor cannot be measured where clause 19 puts it
+
+- What: rule whether candidate A takes a written bench exception like the loss candidate's, or no credited ratio at all.
+- Why: clause 19 requires a floor installed at the same seam as the knob and dialled inside the same step, and candidate A's floor is MLX's fused attention.
+  Reproduced on 2026-08-20 inside mlx-lm's own step: the fused entry point fuses with no gradient tracing and is composed into matmuls and a softmax inside `nn.value_and_grad`, so a floor arm built to clause 19's letter runs stock's own computation and reports a ratio of 1.0.
+  The decomposition is a property of the trace and not of the operands, checked on a call whose operands nothing differentiates, so it reaches every block rather than only the adapted ones.
+- Pros: it settles the plan's open investigation in the useful direction, because stock is composed in both directions and the fused entry point is a genuine floor rather than a description of stock.
+- Cons: measuring it outside the step is the assumption clause 19 was written to remove, and MLX fuses only at head dimensions 64, 80 and 128, so a bench ladder has exactly three points and no spare.
+- Context: `tests/test_profile_knobs_live.py`, the four tests under "which attention path MLX actually takes"; clause 15 already registers what happens when the floor cannot place three settings.
+- Depends on / blocked by: Vlad's ruling; it gates step 9, the ceiling sweep.
+
 ## The shared interleaver takes exactly two arms and the profile needs n
 
 - What: generalise `interleave.interleaved_samples` from two arms to n, keeping the drift canary and the per-round structure, so a four-point dial ladder against a four-point floor ladder can be interleaved within a round.

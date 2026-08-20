@@ -105,6 +105,16 @@ SCAFFOLD_OFFSET_R_MULTIPLE = 3.0  # |offset| <= this * R
 # time-valued R would be a units error.
 DIAL_TIE = 0.01
 
+# Clause 15's three attention dials, in registered completeness order, MOST
+# COMPLETE FIRST, which is the order a tie is broken in.
+ATTENTION_DIALS = ("kv-length", "head-dim-qkv", "head-dim-qk")
+
+# Clause 15. A dial that cannot place three distinct realisable settings on
+# the ladder is not eligible whatever its price. Two points fit a line with no
+# residual and an R-squared of exactly 1, so the linearity gate could never
+# refuse such a dial and would report a slope nothing had checked.
+MIN_DIAL_SETTINGS = 3
+
 RETUNE = "retune"
 REWRITE = "rewrite"
 KINDS = (RETUNE, REWRITE)
@@ -333,30 +343,52 @@ def shape_ratio(stock_by_direction: Mapping[str, float],
 
 
 def choose_dial(prices: Mapping[str, float],
-                completeness: Sequence[str]) -> dict[str, object]:
+                completeness: Sequence[str],
+                settings: Mapping[str, int]) -> dict[str, object]:
     """Amendment 5 clause 15: the attention dial, chosen by a registered rule.
 
     `prices` are dimensionless, |scaffold slope| over |knob slope|, so the
     tie threshold is dimensionless too. The smallest price wins; prices
     within DIAL_TIE of each other are a tie, and a tie goes to the earlier
     entry in `completeness`, most complete first.
+
+    `settings` is how many DISTINCT realisable settings each dial placed on
+    the ladder. It is an argument rather than something the caller filters on
+    beforehand because the eligibility rule is registered text, and a rule the
+    harness can forget to apply is a rule that decides nothing.
     """
     unknown = sorted(set(prices) - set(completeness))
     if unknown:
         raise RunInvalid(
             f"{unknown} have a price but no registered completeness rank, so "
             f"a tie among them could not be broken by the registered rule")
+    unmeasured = sorted(set(prices) - set(settings))
+    if unmeasured:
+        raise RunInvalid(
+            f"{unmeasured} have a price but no count of realisable settings, "
+            f"so clause 15's eligibility test cannot be applied to them")
     if not prices:
         raise RunInvalid("no dial was priced, so none can be chosen")
 
-    best = min(prices.values())
-    tied = [name for name, price in prices.items() if price - best < DIAL_TIE]
+    refused = {name: settings[name] for name in prices
+               if settings[name] < MIN_DIAL_SETTINGS}
+    eligible = {name: price for name, price in prices.items()
+                if name not in refused}
+    if not eligible:
+        raise RunInvalid(
+            f"every priced dial placed fewer than {MIN_DIAL_SETTINGS} distinct "
+            f"settings on the ladder ({refused}), so none is eligible and "
+            f"candidate A has no dial")
+
+    best = min(eligible.values())
+    tied = [name for name, price in eligible.items() if price - best < DIAL_TIE]
     chosen = min(tied, key=completeness.index)
     return {
         "chosen": chosen,
         "tied": sorted(tied, key=completeness.index),
         "prices": dict(prices),
-        "by_completeness": chosen != min(prices, key=lambda n: prices[n]),
+        "refused": refused,
+        "by_completeness": chosen != min(eligible, key=lambda n: eligible[n]),
     }
 
 
@@ -549,9 +581,13 @@ class Knob:
     """One candidate's dial, and everything needed to drive it.
 
     `regions` names entries in `profile_instrument.REGIONS` rather than
-    repeating their seams, so where a region lives is written once. `prepare`
-    materialises every setting's operands OUTSIDE any timed region, so the
-    arms differ in the work they do and not in when they paid for it.
+    repeating their seams, so where a region lives is written once.
+    `prepare(model, width)` materialises every setting's operands OUTSIDE any
+    timed region, so the arms differ in the work they do and not in when they
+    paid for it. It takes the batch width because one dial's ladder is a
+    property of the batch rather than of the model: shortening the keys
+    changes the mask, and a mask built inside the step is graph every round
+    pays for whose size moves with the dial.
     """
 
     candidate: str
@@ -718,7 +754,7 @@ def _projection_knob(candidate: str, regions: tuple[str, ...],
     partition region excludes it so that P1, P2 and P3 are disjoint and their
     sum means something.
     """
-    def prepare(model):
+    def prepare(model, _width):
         prepared = {"projections": _projection_ladder(model)}
         if with_head:
             prepared["head"] = _head_ladder(model, "input")
@@ -752,7 +788,7 @@ def _loss_knob() -> Knob:
     REWRITE: a streamed kernel never builds the full logits tensor at all, so
     its credit is its slope plus the residue that deletion also removes.
     """
-    def prepare(model):
+    def prepare(model, _width):
         return {"head": _head_ladder(model, "vocabulary")}
 
     def arm(prepared, phi, *, slice_operand=True):
@@ -778,10 +814,189 @@ def _loss_knob() -> Knob:
     )
 
 
-# Candidate A is absent on purpose. Attention admits no single obvious dial,
-# so Amendment 5 clause 15 registers three candidate dials and a criterion
-# that picks among them by measurement; that step builds them and adds the
-# winner here. Until then a caller asking for "A" gets a KeyError rather than
+def _causal_mask(queries: int, keys: int):
+    """The mask stock builds for itself, as an array, over a shortened key set.
+
+    The training path passes the STRING "causal", which MLX reads as "query i
+    attends key j when j <= i". That reading is only stock's own mask while
+    the two lengths agree: cut the keys and the diagonal runs off the end of
+    the array, leaving early rows with nothing to attend to and a softmax over
+    an empty row. So every arm of the length dial hands over an array it built
+    itself, in which query i attends keys 0 through the smaller of i and the
+    last key kept, and no row is ever empty.
+
+    At the full setting the array IS what the string means, checked by a test
+    against stock's own value and gradients rather than by reading MLX.
+    """
+    import mlx.core as mx
+
+    mask = mx.arange(keys)[None, :] <= mx.arange(queries)[:, None]
+    mx.eval(mask)
+    return mask
+
+
+def attention_width(batch_width: int) -> int:
+    """The query length attention sees, which is NOT the batch's token count.
+
+    mlx-lm's `default_loss` trains on `batch[:, :-1]` and predicts
+    `batch[:, 1:]`, so a batch 97 tokens wide runs a 96-token step. The length
+    dial builds its masks against this number, and the rule lives here rather
+    than at each call site because a caller who forgets it produces a mask one
+    token too wide, which is a broadcast failure at best.
+    """
+    return batch_width - 1
+
+
+def _attention_ladder(model, dial: str, batch_width: int, phis=PHIS) -> dict:
+    """One attention dial's settings, with everything each arm needs ready.
+
+    Masks are built here and not inside the step. An array built in the traced
+    body is graph the arm pays for on every round, and its size moves with the
+    dial, so its cost would sit inside the fitted slope where clause 5's
+    scaffold gate could not see it.
+    """
+    if dial not in ATTENTION_DIALS:
+        raise RunInvalid(
+            f"{dial!r} is not one of the three dials clause 15 registers: "
+            f"{ATTENTION_DIALS}")
+
+    head_dim = model.args.head_dim
+    width = attention_width(batch_width)
+    ladder = {}
+    for phi in phis:
+        if dial == "kv-length":
+            kept = max(1, int(round(phi * width)))
+            ladder[phi] = {"kept": kept, "mask": _causal_mask(width, kept),
+                           "full": width,
+                           "full_mask": _causal_mask(width, width)}
+        else:
+            kept = max(1, int(round(phi * head_dim)))
+            ladder[phi] = {"kept": kept, "full": head_dim}
+    return ladder
+
+
+def realisable_settings(ladder: Mapping[float, Mapping]) -> tuple[float, ...]:
+    """The settings of a ladder that are distinct computations.
+
+    Two dial positions that round to one kept size are ONE setting, not two.
+    Their arms compute the same thing, so the fit would carry a repeated point
+    that adds no evidence about linearity while raising R-squared, and clause
+    15's three-setting eligibility test would pass on a ladder with two.
+    """
+    first_at_size: dict[int, float] = {}
+    for phi, entry in ladder.items():
+        first_at_size.setdefault(entry["kept"], phi)
+    return tuple(sorted(first_at_size.values(), reverse=True))
+
+
+def _attention_call(dial: str, entry: Mapping, *, apply: bool):
+    """One attention dial's per-call replacement.
+
+    With `apply` false this is clause 5's scaffold-only arm: the dial's own
+    machinery runs, the operation runs at full size, and the value returned is
+    stock's. The three dials carry different machinery, so each says here what
+    its scaffold arm reproduces and what it cannot.
+    """
+    import mlx.core as mx
+
+    kept, full = entry["kept"], entry["full"]
+
+    def wrap(original):
+        if dial == "kv-length":
+            def call(queries, keys, values, *args, **kwargs):
+                if queries.shape[2] != full:
+                    raise RunInvalid(
+                        f"this dial's masks were built for {full} queries and "
+                        f"the step is running {queries.shape[2]}, so every arm "
+                        f"would mask the wrong score matrix")
+                cut_k, cut_v = keys[:, :, :kept], values[:, :, :kept]
+                if not apply:
+                    # This dial's machinery is the array mask, and its cost is
+                    # proportional to the score matrix it covers. The scaffold
+                    # arm applies it at FULL size, which puts it in the
+                    # scaffold offset; the part of it that moves with the dial
+                    # is inside the knob slope and clause 5's slope statistic
+                    # cannot separate it. Reported, not corrected.
+                    kwargs["mask"] = entry["full_mask"]
+                    return original(queries, keys, values, *args, **kwargs)
+                kwargs["mask"] = entry["mask"]
+                return original(queries, cut_k, cut_v, *args, **kwargs)
+        elif dial == "head-dim-qkv":
+            def call(queries, keys, values, *args, **kwargs):
+                cut = (queries[..., :kept], keys[..., :kept],
+                       values[..., :kept])
+                if not apply:
+                    # The pad grows as the dial shrinks, so the scaffold arm
+                    # writes exactly as many padded columns as the real arm
+                    # does and then throws them away. At the full setting it
+                    # writes none, which is the one arm of this dial that is
+                    # structurally unlike the rest.
+                    padded = mx.pad(original(queries, keys, values,
+                                             *args, **kwargs),
+                                    [(0, 0)] * 3 + [(0, full - kept)])
+                    return padded[..., :full]
+                return mx.pad(original(*cut, *args, **kwargs),
+                              [(0, 0)] * 3 + [(0, full - kept)])
+        else:
+            def call(queries, keys, values, *args, **kwargs):
+                cut_q, cut_k = queries[..., :kept], keys[..., :kept]
+                if not apply:
+                    return original(queries, keys, values, *args, **kwargs)
+                return original(cut_q, cut_k, values, *args, **kwargs)
+        return call
+    return wrap
+
+
+def _ablate_attention():
+    """Attention removed outright, with keys and values still consumed.
+
+    Clause 18 credits a rewrite with its slope plus the residue between the
+    fitted intercept and this arm, so what this arm removes has to be
+    attention and nothing else. Returning only the queries would let a lazy
+    graph drop the key and value projections and charge them here, so both are
+    consumed through a reduction multiplied by zero. That is what the ablation
+    probe does, which is why its figure and this one are comparable.
+    """
+    def wrap(_original):
+        def call(queries, keys, values, *args, **kwargs):
+            return queries + (keys.sum() * 0.0 + values.sum() * 0.0)
+        return call
+    return wrap
+
+
+def _attention_knob(dial: str) -> Knob:
+    """Candidate A, dialled one of the three ways clause 15 registers.
+
+    A REWRITE, not a retune: a tiled kernel fuses the whole region and never
+    materialises the score matrix, so it deletes cost that lives in the
+    intercept and a slope alone would under-credit it.
+    """
+    def prepare(model, width):
+        return {"attention": _attention_ladder(model, dial, width)}
+
+    def arm(prepared, phi, *, slice_operand=True):
+        return {_seam("attn-core"): _attention_call(
+            dial, prepared["attention"][phi], apply=slice_operand)}
+
+    return Knob(
+        candidate="A",
+        kind=REWRITE,
+        regions=("attn-core",),
+        prepare=prepare,
+        arm=arm,
+        scaffold=lambda prepared, phi: arm(prepared, phi, slice_operand=False),
+        ablate=lambda _prepared: {_seam("attn-core"): _ablate_attention()},
+    )
+
+
+# The three candidate dials, all built, none of them yet candidate A's. Clause
+# 15 picks among them by a criterion registered before any of the three was
+# measured, and `bench/mlx_probes/probe_attention_dials.py` applies it.
+ATTENTION_KNOBS = {dial: _attention_knob(dial) for dial in ATTENTION_DIALS}
+
+# Candidate A is still absent from this registry on purpose. The three dials
+# above exist; which one IS candidate A is a measurement, and until that
+# measurement is recorded a caller asking for "A" gets a KeyError rather than
 # a dial somebody guessed at.
 KNOBS = {
     "Q": _projection_knob("Q", ("qmm", "head-matmul"), with_head=True),

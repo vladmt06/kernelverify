@@ -273,38 +273,83 @@ def test_a_shape_ratio_refuses_a_floor_summing_to_nothing():
 # --- the attention dial's registered criterion ------------------------------
 
 
-COMPLETENESS = ("key-value-length", "head-dim-qkv", "head-dim-qk")
+# The registry's own order, not a copy of it, so the names in these tests can
+# never drift from the names the dials are built under.
+COMPLETENESS = pk.ATTENTION_DIALS
+MOST, MIDDLE, LEAST = COMPLETENESS
+ALL_ELIGIBLE = {name: 4 for name in COMPLETENESS}
 
 
 def test_the_cheapest_dial_wins():
-    ruling = pk.choose_dial({"head-dim-qk": 0.02, "head-dim-qkv": 0.30,
-                             "key-value-length": 0.50}, COMPLETENESS)
-    assert ruling["chosen"] == "head-dim-qk"
+    ruling = pk.choose_dial({LEAST: 0.02, MIDDLE: 0.30, MOST: 0.50},
+                            COMPLETENESS, ALL_ELIGIBLE)
+    assert ruling["chosen"] == LEAST
     assert ruling["by_completeness"] is False
 
 
 def test_a_tie_on_price_goes_to_the_more_complete_dial():
-    ruling = pk.choose_dial({"head-dim-qk": 0.020, "head-dim-qkv": 0.025,
-                             "key-value-length": 0.028}, COMPLETENESS)
-    assert ruling["chosen"] == "key-value-length"
+    ruling = pk.choose_dial({LEAST: 0.020, MIDDLE: 0.025, MOST: 0.028},
+                            COMPLETENESS, ALL_ELIGIBLE)
+    assert ruling["chosen"] == MOST
     assert ruling["by_completeness"] is True
     assert ruling["tied"] == list(COMPLETENESS)
 
 
 def test_a_price_gap_wider_than_the_tie_band_is_not_a_tie():
-    ruling = pk.choose_dial({"head-dim-qk": 0.02, "key-value-length": 0.05},
-                            COMPLETENESS)
-    assert ruling["chosen"] == "head-dim-qk"
+    ruling = pk.choose_dial({LEAST: 0.02, MOST: 0.05}, COMPLETENESS,
+                            ALL_ELIGIBLE)
+    assert ruling["chosen"] == LEAST
+
+
+def test_the_cheapest_dial_loses_if_it_cannot_place_three_settings():
+    """Clause 15's eligibility test, which outranks the price entirely."""
+    ruling = pk.choose_dial(
+        {LEAST: 0.02, MIDDLE: 0.30, MOST: 0.50}, COMPLETENESS,
+        {LEAST: 2, MIDDLE: 4, MOST: 4})
+    assert ruling["chosen"] == MIDDLE
+    assert ruling["refused"] == {LEAST: 2}
+
+
+def test_every_dial_below_the_setting_floor_refuses_outright():
+    with pytest.raises(RunInvalid, match="fewer than 3 distinct settings"):
+        pk.choose_dial({LEAST: 0.02, MOST: 0.01}, COMPLETENESS,
+                       {LEAST: 1, MOST: 2})
 
 
 def test_a_dial_with_no_completeness_rank_refuses():
     with pytest.raises(RunInvalid, match="no registered completeness rank"):
-        pk.choose_dial({"invented-dial": 0.01}, COMPLETENESS)
+        pk.choose_dial({"invented-dial": 0.01}, COMPLETENESS, {"invented-dial": 4})
+
+
+def test_a_dial_with_no_setting_count_refuses():
+    with pytest.raises(RunInvalid, match="no count of realisable settings"):
+        pk.choose_dial({LEAST: 0.01}, COMPLETENESS, {})
 
 
 def test_choosing_among_no_dials_refuses():
     with pytest.raises(RunInvalid, match="no dial was priced"):
-        pk.choose_dial({}, COMPLETENESS)
+        pk.choose_dial({}, COMPLETENESS, ALL_ELIGIBLE)
+
+
+# --- the attention ladder, without a model ---------------------------------
+
+
+def test_attention_sees_one_token_fewer_than_the_batch_carries():
+    """mlx-lm's own loss trains on `batch[:, :-1]`, so the widths differ by one."""
+    assert pk.attention_width(97) == 96
+    assert pk.attention_width(769) == 768
+
+
+def test_two_dial_positions_that_round_to_one_size_are_one_setting():
+    """A repeated point raises R-squared and says nothing about linearity."""
+    ladder = {1.00: {"kept": 8}, 0.75: {"kept": 6}, 0.50: {"kept": 4},
+              0.25: {"kept": 2}}
+    assert pk.realisable_settings(ladder) == (1.00, 0.75, 0.50, 0.25)
+
+    collapsed = {1.00: {"kept": 2}, 0.75: {"kept": 2}, 0.50: {"kept": 1},
+                 0.25: {"kept": 1}}
+    assert pk.realisable_settings(collapsed) == (1.00, 0.50)
+    assert len(pk.realisable_settings(collapsed)) < pk.MIN_DIAL_SETTINGS
 
 
 # --- the two reductions over rounds ----------------------------------------
