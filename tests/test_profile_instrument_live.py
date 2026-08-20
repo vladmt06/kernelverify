@@ -226,6 +226,14 @@ def test_gradient_checkpointing_replays_the_forward_and_inflates_its_count():
     from mlx_lm.tuner.utils import linear_to_lora_layers
     from mlx_lm.utils import load
 
+    # `grad_checkpoint` replaces the layer CLASS's `__call__` and never puts
+    # it back, so without this the checkpointing stays installed for every
+    # test that loads a Qwen3 model afterwards in the same interpreter. It was
+    # caught by the profile harness's own count check, which read 44 attention
+    # forwards on a 28-block model in a full-suite run and 28 in an isolated
+    # one - which is exactly the failure that check exists to make loud.
+    block_type = None
+    original_call = None
     mx.disable_compile()
     try:
         model, _ = load(str(MODEL))
@@ -234,6 +242,8 @@ def test_gradient_checkpointing_replays_the_forward_and_inflates_its_count():
                                          "dropout": 0.0})
         model.train()
         depth = len(model.model.layers)
+        block_type = type(model.model.layers[0])
+        original_call = block_type.__call__
         grad_checkpoint(model.model.layers[0])
 
         mx.random.seed(0)
@@ -258,6 +268,8 @@ def test_gradient_checkpointing_replays_the_forward_and_inflates_its_count():
         finally:
             installation.remove()
     finally:
+        if block_type is not None and original_call is not None:
+            block_type.__call__ = original_call
         mx.enable_compile()
 
     # The marks are still identity, so this is not a correctness failure.
@@ -269,3 +281,9 @@ def test_gradient_checkpointing_replays_the_forward_and_inflates_its_count():
     counts = pi.counts(recorder.entries)
     assert counts["attn-core"][pi.FORWARD] > depth
     assert counts["qmm"][pi.FORWARD] > 7 * depth
+
+    # And the checkpointing is gone again. Asserted here rather than trusted,
+    # because the leak is invisible in this file and only shows up as wrong
+    # counts in whatever test loads a Qwen3 model next.
+    assert block_type.__call__ is original_call
+    assert block_type.__call__.__module__.startswith("mlx_lm.models")
