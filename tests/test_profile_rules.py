@@ -224,6 +224,21 @@ def test_the_rule_refuses_an_empty_field():
         select_first_operation([])
 
 
+def test_the_rule_refuses_two_readings_of_one_candidate():
+    """A candidate has one share at the primary cell and one credited ratio.
+    Given two, the rule would silently rank the better of them and report a
+    table naming the same candidate twice, which reads as a comparison."""
+    with pytest.raises(RunInvalid, match="more than one reading"):
+        select_first_operation([_reading("L", share=0.5, ratio=2.0),
+                                _reading("L", share=0.1, ratio=1.1)])
+
+
+def test_one_reading_each_is_still_accepted():
+    ruling = select_first_operation([_reading("L", share=0.5, ratio=2.0),
+                                     _reading("A", share=0.1, ratio=1.1)])
+    assert ruling["selected"] == "L"
+
+
 # ---------------------------------------------------------------------------
 # Collapsing many shapes into one credited ratio (Amendment 5)
 # ---------------------------------------------------------------------------
@@ -231,13 +246,18 @@ def _side(count, numerator, denominator):
     return {"count": count, "numerator": numerator, "denominator": denominator}
 
 
+_NONE = {"count": 0, "numerator": [], "denominator": []}
+
+
 def _shape(forward=None, backward=None):
-    entry = {}
-    if forward is not None:
-        entry["forward"] = forward
-    if backward is not None:
-        entry["backward"] = backward
-    return entry
+    """Both directions always named, because the rule requires it.
+
+    A direction a shape never ran in is written as a count of zero. Leaving it
+    out means something different - that it was not measured - and the rule
+    refuses that rather than weighting it as an empty measurement.
+    """
+    return {"forward": forward if forward is not None else dict(_NONE),
+            "backward": backward if backward is not None else dict(_NONE)}
 
 
 def test_the_collapse_weights_each_shape_by_how_often_it_runs():
@@ -327,8 +347,25 @@ def test_a_direction_with_a_zero_floor_refuses():
 
 def test_a_shape_naming_no_direction_refuses():
     """Silence about both directions is not a shape that took no time."""
-    with pytest.raises(RunInvalid, match="no direction"):
+    with pytest.raises(RunInvalid, match="names no"):
         collapse_ratio_lo({"S1": {}})
+
+
+def test_a_direction_left_out_refuses_rather_than_weighing_as_empty():
+    """Absent and zero are different claims. A shape that never ran backward
+    says so with a count of zero; a shape whose backward was never measured is
+    a hole in the floor, and weighting it as an empty measurement would hide
+    the hole behind a number."""
+    with pytest.raises(RunInvalid, match="names no backward"):
+        collapse_ratio_lo({"S1": {"forward": _side(1, [2.0], [1.0])}})
+
+
+def test_a_direction_that_never_ran_is_written_as_a_count_of_zero():
+    collapsed = collapse_ratio_lo({
+        "S1": {"forward": _side(1, [2.0], [1.0]),
+               "backward": _side(0, [], [])}})
+    assert collapsed["shapes"]["S1"]["backward"]["count"] == 0
+    assert collapsed["ratio_lo"] == pytest.approx(2.0)
 
 
 def test_a_shape_carrying_an_unknown_key_refuses():

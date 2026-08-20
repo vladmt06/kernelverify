@@ -30,8 +30,8 @@ from harness_runner import PreconditionFailed  # noqa: E402
 from memory_guard import EXIT_NO_DEVICE, EXIT_PRECONDITION  # noqa: E402
 
 DEPTH, ADAPTED = 36, 16
-CTX = {"cell": "B", "batch": 4, "width": 161, "model": "qwen3-4b-4bit-g64",
-       "adapted": ADAPTED}
+CTX = {"cell": "B", "batch": 4, "width": 161, "tokens": 640,
+       "model": "qwen3-4b-4bit-g64", "adapted": ADAPTED}
 
 
 def _decomposed(totals, *, context=None, counts=None, elapsed=1.0):
@@ -63,17 +63,27 @@ def _mode(totals=None, *, samples, peaks=None, rounds=3, context=None):
 
 
 def _cell_record(cell="B", *, modes=None, identity_ok=True,
-                 completeness_ok=True):
+                 completeness_ok=True, cheap=False):
+    """One child's record.
+
+    `cheap` gives the instrument a cost section 3.3's 2% reconciliation limit
+    can accept. A real instrument does not: measured on 2026-08-20 it cost
+    between 1.08x and 2.86x the plain step, so with the registered limit no
+    real recording binds until Amendment 5 replaces it. Tests about anything
+    other than that limit use the cheap instrument so they are testing what
+    they say they are testing.
+    """
     context = dict(CTX, cell=cell)
+    scale = (lambda base: [1.00, 1.01, 1.02]) if cheap else (lambda base: base)
     modes = modes if modes is not None else {
         "compiled": _mode(samples=[0.95, 1.00, 1.05]),
         "plain": _mode(samples=[0.98, 1.00, 1.02]),
-        "instr-A": _mode({"attn-core": 0.30}, samples=[1.30, 1.32, 1.34],
-                         context=context),
+        "instr-A": _mode({"attn-core": 0.30},
+                         samples=scale([1.30, 1.32, 1.34]), context=context),
         "instr-L": _mode({"head-matmul": 0.10, "cross-entropy": 0.05},
-                         samples=[1.10, 1.12, 1.14], context=context),
+                         samples=scale([1.10, 1.12, 1.14]), context=context),
         "instr-Q": _mode({"qmm": 0.50, "head-matmul": 0.10},
-                         samples=[1.90, 1.92, 1.94], context=context),
+                         samples=scale([1.90, 1.92, 1.94]), context=context),
     }
     return {
         "cell": cell,
@@ -110,6 +120,16 @@ def _plan(**over):
 # ---------------------------------------------------------------------------
 # Which modes run where, and in what order
 # ---------------------------------------------------------------------------
+def test_the_context_carries_the_token_count_the_matmuls_actually_run_at():
+    """mlx-lm pads a batch to `width` and `default_loss` trains on all but the
+    last column, so every matmul sees one fewer token per row than the padded
+    width. A floor sweep that measured at the padded width would agree with
+    the profile about everything except the shape it measured."""
+    context = ps.cell_context("B", batch=4, width=161, model="m", adapted=16)
+    assert context["tokens"] == 4 * 160
+    assert context["tokens"] != 4 * 161
+
+
 def test_every_mode_leads_exactly_once_over_a_full_rotation():
     """Without rotation the first mode of every round always runs on a machine
     that has just been idle, so the mode order would be part of what the
@@ -133,6 +153,15 @@ def test_only_the_cell_that_decides_splits_its_instrumented_passes():
     for cell in rules.CELLS:
         if cell != rules.PRIMARY_CELL:
             assert ps.modes_for(cell) == ps.MODES_REPORTING
+
+
+def test_every_cell_can_price_its_own_compile_transfer():
+    """Amendment 4 reports the ratio beside EVERY share it publishes, and the
+    cells that decide nothing still publish shares - section 4.3 requires them
+    reported and requires cell C's ordering compared against cell B's."""
+    for cell in rules.CELLS:
+        assert "compiled" in ps.modes_for(cell), cell
+        assert "plain" in ps.modes_for(cell), cell
 
 
 def test_an_unregistered_cell_is_refused_rather_than_defaulted():
@@ -290,7 +319,8 @@ def test_the_output_head_is_counted_in_both_l_and_q():
 
 
 def test_a_reporting_cell_labels_its_shares_as_carrying_cross_region_bias():
-    modes = {"plain": _mode(samples=[1.0, 1.0, 1.0]),
+    modes = {"compiled": _mode(samples=[1.0, 1.0, 1.0]),
+             "plain": _mode(samples=[1.0, 1.0, 1.0]),
              "instr-all": _mode({"attn-core": 0.3, "qmm": 0.5,
                                  "head-matmul": 0.1, "cross-entropy": 0.05},
                                 samples=[2.0, 2.0, 2.0],
@@ -299,7 +329,6 @@ def test_a_reporting_cell_labels_its_shares_as_carrying_cross_region_bias():
     assert set(reading["shares"]) == set(rules.CANDIDATES)
     assert all(share["cross_region_bias"]
                for share in reading["shares"].values())
-    assert "compile_transfer" not in reading
 
 
 def test_the_plain_arm_disagreeing_with_itself_makes_the_rounds_ineligible():
@@ -328,14 +357,38 @@ def test_a_share_refuses_to_divide_two_different_workloads():
         ps.cell_reading(record)
 
 
-def test_the_reconciliation_is_reported_and_labelled_as_unable_to_fail():
-    """Section 3.3 registers it, so it is computed. It cannot fail, because
-    the remainder is defined as what the spans leave on the same timeline."""
+def test_the_reconciliation_is_measured_against_the_step_without_the_marks():
+    """Amendment 4 says the regions and the remainder are measured inside the
+    marked step and compared against "that same uncompiled step's own
+    end-to-end time, taken without the interior boundaries". Compared against
+    the marked pass's own elapsed it could not fail; compared against the
+    plain pass, as registered, it is the instrument's cost against a 2%
+    limit."""
     reading = ps.cell_reading(_cell_record())
     for mode, report in reading["reconciles"].items():
-        assert report["ok"], mode
-        assert report["tautological"]
-        assert "exact counts" in report["superseded_by"]
+        assert not report["ok"], mode
+        assert report["limit_pct"] == rules.RECONCILE_PCT
+        assert report["same_check_as"].startswith("instrument_cost")
+    # And the two really are one quantity read at two limits.
+    plain = statistics.median([0.98, 1.00, 1.02])
+    gap = reading["reconciles"]["instr-Q"]["gap_pct"] / 100.0
+    cost = reading["instrument_cost"]["instr-Q"]["ratio"]
+    assert gap == pytest.approx(cost - 1.0)
+
+
+def test_a_cheap_enough_instrument_reconciles():
+    reading = ps.cell_reading(_cell_record(cheap=True))
+    assert all(report["ok"] for report in reading["reconciles"].values())
+
+
+def test_a_real_instrument_cost_blocks_on_the_registered_two_percent(
+        monkeypatch):
+    """The state the profile is actually in. Section 3.3's limit was written
+    before any instrument existed, and no instrument that can put a clock
+    inside an MLX backward meets it."""
+    monkeypatch.setattr(rules, "INSTRUMENT_COST_BAND", (1.0, 3.0))
+    blockers = ps.binding_blockers(_record())
+    assert any("section 3.3" in one for one in blockers)
 
 
 def test_a_share_carries_its_own_marks_and_says_so(monkeypatch):
@@ -369,7 +422,8 @@ def test_a_share_that_is_not_a_fraction_of_a_step_blocks_the_recording(
 def test_a_combined_pass_attributes_no_excess_to_any_one_candidate():
     """It marks every region, so the excess belongs to all of them and
     splitting it would need an apportionment nobody registered."""
-    modes = {"plain": _mode(samples=[1.0, 1.0, 1.0]),
+    modes = {"compiled": _mode(samples=[1.0, 1.0, 1.0]),
+             "plain": _mode(samples=[1.0, 1.0, 1.0]),
              "instr-all": _mode({"attn-core": 0.3, "qmm": 0.5,
                                  "head-matmul": 0.1, "cross-entropy": 0.05},
                                 samples=[2.0, 2.0, 2.0],
@@ -412,7 +466,8 @@ def test_an_unregistered_instrument_cost_band_blocks_a_binding_recording():
 
 def test_a_registered_band_the_cost_sits_inside_stops_blocking(monkeypatch):
     monkeypatch.setattr(rules, "INSTRUMENT_COST_BAND", (1.0, 2.5))
-    assert ps.binding_blockers(_record()) == []
+    assert ps.binding_blockers(
+        _record(cells={"B": _cell_record(cheap=True)})) == []
 
 
 def test_a_cost_outside_the_registered_band_blocks(monkeypatch):
@@ -423,27 +478,28 @@ def test_a_cost_outside_the_registered_band_blocks(monkeypatch):
 
 def test_a_machine_that_went_busy_at_the_closing_gate_blocks(monkeypatch):
     monkeypatch.setattr(rules, "INSTRUMENT_COST_BAND", (1.0, 2.5))
-    blockers = ps.binding_blockers(_record(closing_idle={"idle": False}))
+    blockers = ps.binding_blockers(_record(
+        cells={"B": _cell_record(cheap=True)}, closing_idle={"idle": False}))
     assert any("closing gate" in one for one in blockers)
 
 
 def test_a_marked_pass_that_changed_the_computation_blocks(monkeypatch):
     monkeypatch.setattr(rules, "INSTRUMENT_COST_BAND", (1.0, 2.5))
     blockers = ps.binding_blockers(
-        _record(cells={"B": _cell_record(identity_ok=False)}))
+        _record(cells={"B": _cell_record(identity_ok=False, cheap=True)}))
     assert any("do not compute the same thing" in one for one in blockers)
 
 
 def test_a_seam_that_never_fired_blocks(monkeypatch):
     monkeypatch.setattr(rules, "INSTRUMENT_COST_BAND", (1.0, 2.5))
     blockers = ps.binding_blockers(
-        _record(cells={"B": _cell_record(completeness_ok=False)}))
+        _record(cells={"B": _cell_record(completeness_ok=False, cheap=True)}))
     assert any("region counts differ" in one for one in blockers)
 
 
 def test_a_compile_ratio_outside_amendment_four_s_band_blocks(monkeypatch):
     monkeypatch.setattr(rules, "INSTRUMENT_COST_BAND", (1.0, 2.5))
-    record = _cell_record()
+    record = _cell_record(cheap=True)
     record["modes"]["compiled"] = _mode(samples=[0.4, 0.4, 0.4])
     blockers = ps.binding_blockers(_record(cells={"B": record}))
     assert any("compiled-to-uncompiled" in one for one in blockers)
@@ -539,7 +595,7 @@ class _Runtime:
 
     def run_cell(self, plan, provenance, cell):
         self.events.append(f"run:{cell}")
-        return _cell_record(cell)
+        return _cell_record(cell, cheap=True)
 
     def write_record(self, path, record):
         self.writes.append((Path(path), record))
@@ -645,13 +701,14 @@ def _sweep(*, context=None, killed=False, deltas=None):
 
 def _profile(monkeypatch):
     monkeypatch.setattr(rules, "INSTRUMENT_COST_BAND", (1.0, 2.5))
-    reporting = {"plain": _mode(samples=[1.0, 1.0, 1.0]),
+    reporting = {"compiled": _mode(samples=[1.0, 1.0, 1.0]),
+                 "plain": _mode(samples=[1.0, 1.0, 1.0]),
                  "instr-all": _mode({"attn-core": 0.3, "qmm": 0.5,
                                      "head-matmul": 0.1,
                                      "cross-entropy": 0.05},
-                                    samples=[2.0, 2.0, 2.0],
+                                    samples=[1.0, 1.01, 1.02],
                                     context=dict(CTX, cell="C"))}
-    cells = {"B": _cell_record("B"),
+    cells = {"B": _cell_record("B", cheap=True),
              "C": _cell_record("C", modes=reporting)}
     record = _record(cells=cells)
     record["binding_blockers"] = ps.binding_blockers(record)
@@ -697,6 +754,23 @@ def test_the_ruling_refuses_two_recordings_that_measured_different_workloads(
     measured different batches."""
     sweep = _sweep(context=dict(CTX, cell="B", width=2049))
     with pytest.raises(RunInvalid, match="two workloads"):
+        ps.decide(_profile(monkeypatch), sweep)
+
+
+def test_the_ruling_refuses_a_profile_missing_a_candidate(monkeypatch):
+    """A candidate absent from the table is not a candidate that scored zero,
+    and a rule that ranked the rest would report a comparison of two where
+    three were registered."""
+    profile = _profile(monkeypatch)
+    profile["readings"]["B"]["shares"].pop("A")
+    with pytest.raises(RunInvalid, match="no share for"):
+        ps.decide(profile, _sweep())
+
+
+def test_the_ruling_refuses_a_sweep_missing_a_floor(monkeypatch):
+    sweep = _sweep()
+    sweep["cells"]["B"]["candidates"].pop("Q")
+    with pytest.raises(RunInvalid, match="no credited ratio"):
         ps.decide(_profile(monkeypatch), sweep)
 
 

@@ -196,12 +196,47 @@ def test_a_share_needs_a_positive_denominator():
 # ---------------------------------------------------------------------------
 # Shapes, which the collapse rule weights by
 # ---------------------------------------------------------------------------
-def test_shapes_are_counted_as_they_are_seen():
+def test_shapes_are_counted_per_direction_not_merely_per_shape():
+    """The collapse rule weights a credited ratio by how often each shape ran
+    in each direction, and under LoRA those two counts differ. A tally that
+    knew the shape and not the direction could not be joined with one that
+    knew the direction and not the shape."""
     recorder = pi.Recorder()
     for _ in range(3):
-        recorder.note_shape("qmm", (4096, 2560))
-    recorder.note_shape("qmm", (1024, 2560))
-    assert recorder.shapes["qmm"] == {"4096x2560": 3, "1024x2560": 1}
+        recorder.note_shape("qmm", (4096, 2560), pi.FORWARD)
+    recorder.note_shape("qmm", (4096, 2560), pi.BACKWARD)
+    recorder.note_shape("qmm", (1024, 2560), pi.FORWARD)
+    assert recorder.shapes["qmm"] == {
+        "4096x2560": {pi.FORWARD: 3, pi.BACKWARD: 1},
+        "1024x2560": {pi.FORWARD: 1, pi.BACKWARD: 0}}
+
+
+def test_a_shape_counted_in_one_direction_reads_zero_in_the_other():
+    """Zero is a statement: a shape whose backward never fired ran in a block
+    with nothing trainable beneath it. Absent would be a different claim."""
+    recorder = pi.Recorder()
+    recorder.note_shape("qmm", (8, 8), pi.FORWARD)
+    assert recorder.shapes["qmm"]["8x8"][pi.BACKWARD] == 0
+
+
+def test_the_shape_tally_is_exactly_what_the_collapse_rule_weights_by():
+    """Read straight into the rule, so the two cannot drift apart: what the
+    instrument counts is what the ratio is weighted by."""
+    import profile_rules as rules
+
+    recorder = pi.Recorder()
+    for _ in range(7):
+        recorder.note_shape("qmm", (4096, 2560), pi.FORWARD)
+    for _ in range(3):
+        recorder.note_shape("qmm", (4096, 2560), pi.BACKWARD)
+    tally = recorder.shapes["qmm"]["4096x2560"]
+    collapsed = rules.collapse_ratio_lo({"S1": {
+        "forward": {"count": tally[pi.FORWARD], "numerator": [2.0],
+                    "denominator": [1.0]},
+        "backward": {"count": tally[pi.BACKWARD], "numerator": [4.0],
+                     "denominator": [1.0]}}})
+    assert collapsed["shapes"]["S1"]["forward"]["count"] == 7
+    assert collapsed["shapes"]["S1"]["backward"]["count"] == 3
 
 
 # ---------------------------------------------------------------------------
@@ -414,7 +449,7 @@ def test_clearing_a_warmup_keeps_what_identifies_the_run():
     let the checked share become an unchecked one."""
     recorder = pi.Recorder(context=dict(CTX))
     recorder.entries.append(entry("qmm", pi.ENTER, pi.FORWARD, 1.0))
-    recorder.note_shape("qmm", (8, 8))
+    recorder.note_shape("qmm", (8, 8), pi.FORWARD)
     recorder.clear()
     assert recorder.entries == []
     assert recorder.shapes == {}

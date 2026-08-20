@@ -1,5 +1,48 @@
 # TODOS
 
+## Candidate A's registered floor assumes a backward for every forward
+
+- What: restate section 4.2's floor for candidate A, which multiplies MLX's fused attention forward by 3 "to stand for forward plus backward".
+- Why: that multiplier assumes every forward has a backward.
+  Under LoRA it does not: measured on 2026-08-20, attention fires once per layer forward and only once per ADAPTED layer backward, so on the pinned 4B arrangement the step runs 36 attention forwards and 16 attention backwards.
+  At section 4.2's own stated assumption that a fused backward costs twice its forward, the floor workload is 36 + 2*16 = 68 fused-forward-equivalents, and the registered arithmetic gives 3*36 = 108.
+  The floor is therefore about 1.6x too large, the credited ratio about 1.6x too small, and candidate A's gain is understated against the two candidates whose floors do not have this error.
+- Pros: it is arithmetic on numbers already measured, so no new run is needed to settle it, and the count the corrected version needs is one the instrument already reports.
+- Cons: section 4.2 is committed pre-registration and the correction moves a candidate's credited ratio in its own favour, which is the direction that most needs to be written down before the number exists rather than after.
+- Context: found by an independent Codex audit on 2026-08-20; `tests/test_profile_instrument_live.py` carries the count measurement; `bench/profile_stock.py` `expected_counts` carries the same asymmetry for the profile side.
+- Depends on / blocked by: nothing; it belongs in Amendment 5 with the other nine clauses.
+
+## The profile's share carries its own marks, and the two honest attributions disagree
+
+- What: rule how the Day 1 profile attributes wall time to a region, because section 3.3's definition as written produces shares that are not comparable between the three candidates.
+- Why: a mark evals and then timestamps, so the marks bracketing a region sit inside the spans that form the share's numerator and outside the plain step that forms its denominator.
+  Every share is therefore an upper bound, and the overstatement grows with how many marks a candidate carries - which is exactly what separates the candidates, at 197 marked calls for Q against 32 for A and 2 for L.
+  Measured on the 0.6B model on 2026-08-20: marking the loss pair cost 1.08x the plain step, attention 1.54x, the projections 2.86x, and Q's share came out at 1.40, which is not a fraction of anything.
+  Two corrections were tried and both failed: subtracting the whole excess gave negative shares for A and Q, so the marks' cost is not all inside the spans, and doubling a mark's fences measured nothing because a second eval of an already-materialised tensor is free.
+  The deeper problem is that wall-clock attribution inside a pipelined lazy graph is not uniquely defined.
+  Marking every block gave attention a share of 0.208; marking one block and scaling by the block count gave 0.296, a 45% disagreement, while the blocks themselves proved interchangeable to within 2.3%.
+  Sparse marking also costs far less: 1.15x the plain step against 1.62x.
+- Options, none taken.
+  Keep section 3.3 as written and accept a bias aligned with the decision.
+  Mark one block and scale, which cuts the perturbation and rests on an interchangeability assumption that measured true, but changes the registered attribution.
+  Measure both at the deciding cell and register one, which doubles that cell's window and still requires the choice.
+  Replace the wall-time share with a counted one, which is exact and unperturbed but applies Amdahl's relation to a modelled share rather than a measured one.
+- Pros: the evidence is cheap to extend, since every number above came from seconds of 0.6B GPU time and the probes are reproducible.
+- Cons: section 3.3 is committed pre-registration, so every option except the first is an amendment; and the selection rule calls a two-point gain difference a tie, which is far smaller than the disagreement between the two attributions.
+- Context: `bench/profile_stock.py` records the excess beside every share and blocks a recording whose share is not a fraction; `tests/test_profile_stock_live.py` pins the measurement; the sprint plan carries the same finding.
+- Depends on / blocked by: nothing technical; it must be ruled before the calibration run, because the calibration prices an instrument whose attribution rule is not yet settled.
+
+## Amendment 4's compile band may reject the profile it was written for
+
+- What: check the compiled-to-uncompiled step ratio at the real cell before the binding run, and re-register the band if the real ratio sits outside it.
+- Why: Amendment 4 registers [0.90, 1.10] and says in writing that it was set as an uncalibrated judgement.
+  Measured on the 0.6B model at a 97-token batch on 2026-08-20, the ratio is 1.194, outside the band, so a profile run under that arrangement would REJECT rather than report.
+  The 4B at a real width may sit anywhere; the point is that nothing has measured it and the band can refuse the whole run.
+- Pros: the calibration run already planned would measure it for free, since it runs the same cell with both modes.
+- Cons: re-registering a band after seeing the number it rejects is the exact move the pre-registration exists to prevent, so if the band is to move it has to move on a stated argument rather than on the observed value.
+- Context: `bench/profile_rules.py` `compile_transfer` and `COMPILE_RATIO_BAND`; the plan's NOT-in-scope table deliberately declined to re-register it before the first run.
+- Depends on / blocked by: the calibration run, which needs Vlad's explicit go.
+
 ## The committed end-to-end harness registers a sequence length its corpus cannot produce
 
 - What: decide what sequence length the end-to-end measurement actually runs at, and reconcile section 8's registered 2048 with whatever a real instruction corpus yields.

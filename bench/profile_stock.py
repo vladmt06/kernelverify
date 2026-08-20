@@ -144,7 +144,13 @@ STOCK_MEASUREMENT_MODULE = "metalrunner.measurement"
 # docstring for why the combined pass biases exactly the comparison the rule
 # makes.
 MODES_DECIDING = ("compiled", "plain", "instr-A", "instr-L", "instr-Q")
-MODES_REPORTING = ("plain", "instr-all")
+# `compiled` is here too, and not as symmetry. Amendment 4 requires the
+# compiled-to-uncompiled ratio "beside every share it publishes", and the
+# cells that decide nothing still publish shares - section 4.3 requires them
+# reported, and requires cell C's ordering compared against cell B's. A cell
+# with no compiled total could not carry the bound its own shares are read
+# under.
+MODES_REPORTING = ("compiled", "plain", "instr-all")
 
 MODE_REGIONS = {
     "compiled": (),
@@ -201,7 +207,7 @@ def candidates_from(mode: str) -> tuple[str, ...]:
 
 
 def cell_context(cell: str, *, batch: int, width: int, model: str,
-                 adapted: int) -> dict:
+                 adapted: int, supervised: int | None = None) -> dict:
     """What identifies the workload a pass measured.
 
     Carried into every decomposition, and checked wherever a numerator from
@@ -210,9 +216,25 @@ def cell_context(cell: str, *, batch: int, width: int, model: str,
     this profile's shares. Two passes with different contexts describe
     different steps, and a ratio between them is a number nothing downstream
     could tell was meaningless.
+
+    `tokens` is the token count the projections actually run at, and it is
+    carried rather than left to be derived because deriving it is where a
+    floor sweep would go wrong. mlx-lm pads a batch to `width` and then
+    `default_loss` trains on `batch[:, :-1]`, so every matmul in the step sees
+    `width - 1` tokens per row. At the widest band this corpus can fill that
+    is 160 rather than 161, and a sweep that measured its floor at the padded
+    width would be measuring a shape the step never produces while agreeing
+    with the profile about everything else.
+
+    `supervised` is the count of tokens the loss actually trains on, and it is
+    in the context because candidate L's floor is defined as the same
+    operations "timed on only the supervised rows of the same cell". A floor
+    measured against a different supervised count is a floor for a different
+    problem, and the credited ratio would still divide.
     """
-    return {"cell": cell, "batch": batch, "width": width, "model": model,
-            "adapted": adapted}
+    return {"cell": cell, "batch": batch, "width": width,
+            "tokens": batch * (width - 1), "model": model, "adapted": adapted,
+            "supervised": supervised}
 
 
 def expected_counts(depth: int, adapted: int,
@@ -359,14 +381,22 @@ def cell_reading(record: Mapping[str, object], *,
         # `caveat` below for the two attempts that showed it cannot be.
         excess = instrumented_total - plain_total
         split = len(scored) == 1
-        # Reported because section 3.3 registers it, and labelled because it
-        # cannot fail: the remainder is defined as what the spans leave on the
-        # same timeline, so the sum is the instrumented step by construction.
+        # Section 3.3 as Amendment 4 restates it: the regions and the
+        # remainder are measured INSIDE the marked step and compared against
+        # "that same uncompiled step's own end-to-end time, taken without the
+        # interior boundaries" - which is the plain pass, not this one.
+        #
+        # Compared against this pass's own elapsed it could not fail, because
+        # the remainder is defined as whatever the spans leave on the same
+        # timeline. Compared against the plain pass, as registered, it is the
+        # instrument's cost measured against a 2% limit, so the registered
+        # reconciliation and the instrument-cost band are one check with two
+        # limits rather than two checks. Both are reported; the 2% is what is
+        # registered today and it is the one that binds.
         reading.setdefault("reconciles", {})[mode] = dict(
             rules.reconciles(combined["totals"], combined["remainder"],
-                             combined["elapsed"]),
-            tautological=True,
-            superseded_by=["exact counts", "identity", "instrument cost"])
+                             plain_total),
+            same_check_as="instrument_cost, at section 3.3's 2% limit")
         for candidate in scored:
             regions = list(pi.CANDIDATE_REGIONS[candidate])
             marked_total = sum(combined["totals"][name] for name in regions)
@@ -416,6 +446,14 @@ def binding_blockers(record: Mapping[str, object]) -> list[str]:
             blockers.append(
                 f"cell {cell}: the compiled-to-uncompiled ratio is "
                 f"{transfer['ratio']:.4f}, outside {transfer['band']}")
+        for mode, report in sorted(reading.get("reconciles", {}).items()):
+            if not report["ok"]:
+                blockers.append(
+                    f"cell {cell} {mode}: the marked regions and the "
+                    f"remainder account for {report['accounted']:.4f}s against "
+                    f"{report['step_total']:.4f}s for the same step without "
+                    f"them, a gap of {report['gap_pct']:.1f}% past section "
+                    f"3.3's {report['limit_pct']:.1f}% limit")
         for candidate, share in sorted(reading["shares"].items()):
             if not 0.0 < share["share"] < 1.0:
                 blockers.append(
@@ -515,6 +553,17 @@ def decide(profile: Mapping[str, object],
             f"measured {floors['context']!r}: a share from one over a ratio "
             f"from the other is a comparison of two workloads")
 
+    missing = sorted(set(rules.CANDIDATES) - set(reading["shares"]))
+    if missing:
+        raise RunInvalid(
+            f"the profile carries no share for {missing}, and the rule ranks "
+            f"every registered candidate; a candidate absent from the table "
+            f"is not a candidate that scored zero")
+    absent = sorted(set(rules.CANDIDATES) - set(floors.get("candidates", {})))
+    if absent:
+        raise RunInvalid(
+            f"the floor sweep carries no credited ratio for {absent}, so "
+            f"their gain cannot be computed")
     kill = rules.kill_q(floors["ceiling_ratios"])
     readings, ratios = [], {}
     for candidate in rules.CANDIDATES:
@@ -522,6 +571,18 @@ def decide(profile: Mapping[str, object],
             continue
         floor = floors["candidates"][candidate]
         if candidate == "Q":
+            # The share counts every quantized linear the step ran, so the
+            # floor has to cover every shape the share counted. A floor over a
+            # subset would credit Q with a ratio measured on part of the
+            # operation and divided into a share measured on all of it.
+            registered = set(rules.SHAPES)
+            observed = set(floor["per_shape"])
+            if observed != registered:
+                raise RunInvalid(
+                    f"Q's floor covers {sorted(observed)} and the registered "
+                    f"shapes are {sorted(registered)}: missing "
+                    f"{sorted(registered - observed)}, unregistered "
+                    f"{sorted(observed - registered)}")
             collapsed = rules.collapse_ratio_lo(floor["per_shape"])
             ratios[candidate] = collapsed
             credited = collapsed["ratio_lo"]
@@ -826,9 +887,6 @@ def _profile_child(task: Mapping[str, object], guard: _ChildGuard) -> dict:
     guard.check(f"{cell}: load")
     target = _load_target(plan, provenance, batch=registered["batch"],
                           mask_prompt=mask_prompt)
-    context = cell_context(cell, batch=target.rows, width=target.width,
-                           model=Path(provenance["base_model"]["directory"]).name,
-                           adapted=target.adapted)
 
     mx.disable_compile()
     try:
@@ -841,22 +899,31 @@ def _profile_child(task: Mapping[str, object], guard: _ChildGuard) -> dict:
     records = {mode: {"totals_s": [], "peak_gb": [], "passes": []}
                for mode in modes}
 
-    def run(mode: str) -> dict:
+    def run(mode: str, context) -> dict:
         return timed_mode(step, state, target.batch, mode, context=context,
                           clear_cache_threshold=threshold)
 
+    def described(supervised) -> dict:
+        return cell_context(
+            cell, batch=target.rows, width=target.width, adapted=target.adapted,
+            model=Path(provenance["base_model"]["directory"]).name,
+            supervised=supervised)
+
     # Warm every mode once, untimed: the first compiled call pays for
     # compilation and the first of any mode pays for first-touch allocation,
-    # and neither is a property of the step.
+    # and neither is a property of the step. The warm-up is also where the
+    # supervised token count comes from, which is why the context the timed
+    # rounds carry is built after it rather than before.
     supervised = None
     for mode in modes:
-        supervised = run(mode)["supervised_tokens"]
+        supervised = run(mode, described(None))["supervised_tokens"]
+    context = described(supervised)
 
     observed_counts = {}
     for round_index in range(rounds):
         guard.check(f"{cell}: round {round_index + 1}/{rounds}")
         for mode in rotated(modes, round_index):
-            measured = run(mode)
+            measured = run(mode, context)
             records[mode]["totals_s"].append(measured["elapsed_s"])
             records[mode]["peak_gb"].append(phys_footprint_gb()[1])
             if measured["decomposed"] is not None:

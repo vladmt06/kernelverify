@@ -180,7 +180,16 @@ def collapse_ratio_lo(per_shape: Mapping[str, Mapping[str, object]]) -> dict:
         for direction in DIRECTIONS:
             side = entry.get(direction)
             if side is None:
-                continue
+                # Absent is not zero. A shape that genuinely never ran in a
+                # direction says so with an explicit count of zero, and a
+                # shape whose direction was never measured must not be
+                # silently weighted as if it had been measured and found
+                # empty: the first contributes nothing because there is
+                # nothing, the second would hide a hole in the floor.
+                raise RunInvalid(
+                    f"shape {shape} names no {direction}; a direction that "
+                    f"never ran is written as a count of zero, and one that "
+                    f"was never measured cannot be weighted at all")
             count = side.get("count")
             if (not isinstance(count, int) or isinstance(count, bool)
                     or count < 0):
@@ -207,8 +216,6 @@ def collapse_ratio_lo(per_shape: Mapping[str, Mapping[str, object]]) -> dict:
             per_direction[direction] = {"count": count,
                                         "numerator": count * smallest,
                                         "denominator": count * largest}
-        if not per_direction:
-            raise RunInvalid(f"shape {shape} names no direction at all")
         contributions[shape] = per_direction
     if denominator_total <= 0.0:
         raise RunInvalid("the weighted floor is zero, so no ratio is bounded")
@@ -368,6 +375,17 @@ def select_first_operation(readings: Sequence[Reading]) -> dict[str, object]:
     unknown = [r.candidate for r in readings if r.candidate not in CANDIDATES]
     if unknown:
         raise RunInvalid(f"not candidates of this pre-registration: {unknown}")
+    # One reading per candidate, by construction: a candidate has one share at
+    # the primary cell and one credited ratio. Two readings for one candidate
+    # means a harness produced a duplicate, and the rule would then silently
+    # rank the better of them and report a table with the same name twice.
+    seen = [r.candidate for r in readings]
+    duplicated = sorted({name for name in seen if seen.count(name) > 1})
+    if duplicated:
+        raise RunInvalid(
+            f"more than one reading for {duplicated}: a candidate has one "
+            f"share and one credited ratio, so the rule cannot say which of "
+            f"two readings is the one it was asked about")
 
     scored = sorted(
         ({"candidate": r.candidate, "gain": gain(r.share, r.ratio_lo),

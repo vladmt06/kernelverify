@@ -97,10 +97,21 @@ class Recorder:
     shapes: dict[str, dict[str, int]] = field(default_factory=dict)
     context: dict = field(default_factory=dict)
 
-    def note_shape(self, region: str, shape: tuple[int, int]) -> None:
-        by_shape = self.shapes.setdefault(region, {})
-        key = f"{shape[0]}x{shape[1]}"
-        by_shape[key] = by_shape.get(key, 0) + 1
+    def note_shape(self, region: str, shape: tuple[int, int],
+                   direction: str) -> None:
+        """Count one call at one shape, in one direction.
+
+        Per direction and not merely per shape, because the collapse rule
+        weights a credited ratio by how often each shape ran in EACH
+        direction, and under LoRA those two counts genuinely differ. A tally
+        that knew the shape and not the direction, beside a tally that knew
+        the direction and not the shape, cannot be joined into the
+        cross-product the rule reads without inventing the part neither
+        measured.
+        """
+        counts = self.shapes.setdefault(region, {}).setdefault(
+            f"{shape[0]}x{shape[1]}", {FORWARD: 0, BACKWARD: 0})
+        counts[direction] += 1
 
     def clear(self) -> None:
         """Drop what a warm-up recorded, keeping what identifies the run.
@@ -113,12 +124,22 @@ class Recorder:
         self.shapes.clear()
 
 
-def make_mark(recorder: Recorder, region: str, end: str):
+def make_mark(recorder: Recorder, region: str, end: str, shape=None):
     """An identity that fences and timestamps, in both directions.
 
     Built per region and per end rather than once, because a
     `mx.custom_function` carries its gradient rule on itself and the rule is
     what has to know which label it is recording.
+
+    `shape` is carried by the mark for the same reason. A wrapper can read the
+    shape off the layer it is wrapping on the way forward, but the backward
+    has no layer to read: a gradient rule sees a cotangent and nothing else.
+    So a shape that is to be counted in both directions has to be bound into
+    the mark at the point where the layer is still in hand.
+
+    The count is taken at the end that OPENS the span in each direction -
+    enter going forward, exit coming back - so one call at one shape is
+    counted exactly once per direction, the same way `counts` tallies spans.
     """
     import mlx.core as mx
 
@@ -126,12 +147,16 @@ def make_mark(recorder: Recorder, region: str, end: str):
     def mark(*tensors):
         mx.eval(*tensors)
         recorder.entries.append((region, end, FORWARD, time.perf_counter()))
+        if shape is not None and end == _OPENS[FORWARD]:
+            recorder.note_shape(region, shape, FORWARD)
         return tensors[0] if len(tensors) == 1 else tensors
 
     @mark.vjp
     def mark_vjp(_primals, cotangents, _output):
         mx.eval(cotangents)
         recorder.entries.append((region, end, BACKWARD, time.perf_counter()))
+        if shape is not None and end == _OPENS[BACKWARD]:
+            recorder.note_shape(region, shape, BACKWARD)
         return cotangents
 
     return mark
@@ -211,12 +236,24 @@ def _wrap_attention(recorder: Recorder, region: str):
 
 
 def _wrap_quantized_layer(recorder: Recorder, region: str):
-    enter, exit_ = (make_mark(recorder, region, ENTER),
-                    make_mark(recorder, region, EXIT))
+    """Bracket each quantized layer with marks bound to that layer's shape.
+
+    One pair of marks per SHAPE rather than one pair for the whole region.
+    The pairs are built on first sight of a shape and reused after, so a model
+    with six distinct projection shapes carries six pairs however many times
+    each of them runs.
+    """
+    marks: dict[tuple[int, int], tuple] = {}
+
+    def pair(shape: tuple[int, int]):
+        if shape not in marks:
+            marks[shape] = (make_mark(recorder, region, ENTER, shape=shape),
+                            make_mark(recorder, region, EXIT, shape=shape))
+        return marks[shape]
 
     def wrap(original):
         def call(self, x, *args, **kwargs):
-            recorder.note_shape(region, _quantized_shape(self))
+            enter, exit_ = pair(_quantized_shape(self))
             return exit_(original(self, enter(x), *args, **kwargs))
         return call
 

@@ -153,10 +153,18 @@ def test_the_shapes_the_instrument_records_include_the_key_value_projections(
     them; this is the measurement that says they exist."""
     shapes = trained_step["recorder"].shapes["qmm"]
     depth = trained_step["depth"]
-    assert sum(shapes.values()) == 7 * depth
+    assert sum(counts[pi.FORWARD] for counts in shapes.values()) == 7 * depth
     # Five distinct projection shapes, not four: q and o differ, gate/up and
     # down differ, and k/v are their own.
     assert len(shapes) == 5
+    # And the backward is counted per shape too, which is what the collapse
+    # rule weights by. A shape whose backward never fired reads zero rather
+    # than being absent, because zero is the truth about the blocks below the
+    # first adapted one.
+    backward = {name: counts[pi.BACKWARD] for name, counts in shapes.items()}
+    assert sum(backward.values()) == pi.counts(
+        trained_step["recorder"].entries)["qmm"][pi.BACKWARD]
+    assert any(count > 0 for count in backward.values())
 
 
 @requires_metal
