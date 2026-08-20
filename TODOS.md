@@ -29,8 +29,14 @@
   Replace the wall-time share with a counted one, which is exact and unperturbed but applies Amdahl's relation to a modelled share rather than a measured one.
 - Pros: the evidence is cheap to extend, since every number above came from seconds of 0.6B GPU time and the probes are reproducible.
 - Cons: section 3.3 is committed pre-registration, so every option except the first is an amendment; and the selection rule calls a two-point gain difference a tie, which is far smaller than the disagreement between the two attributions.
-- Context: `bench/profile_stock.py` records the excess beside every share and blocks a recording whose share is not a fraction; `tests/test_profile_stock_live.py` pins the measurement; the sprint plan carries the same finding.
+- Measured after the above, and it settles which of the two is wrong: both are.
+  `bench/mlx_probes/probe_attention_ablation.py` measures the same quantity with no instrument inside the step, by replacing attention with a stand-in of the same output shape and reading the whole step's time.
+  At width 97 it puts attention at 0.042 to 0.047 of the step against 0.208 for dense marking and 0.296 for sparse, so both marked figures are four to six times the truth.
+  The gap matches the fence count at roughly half a millisecond per fence.
+  The ablation is believed because it reproduces a scaling law it cannot know: doubling the width multiplies attention by 2.42, then 3.45, then 4.08, which is linear at the short end and quadratic at the long end with the crossover where the geometry puts it.
+- Context: `bench/profile_stock.py` records the excess beside every share and blocks a recording whose share is not a fraction; `tests/test_profile_stock_live.py` pins the measurement; `bench/mlx_probes/probe_attention_ablation.py` is the unmarked check and reproduces in about four minutes on the 0.6B; the sprint plan carries the same finding.
 - Depends on / blocked by: nothing technical; it must be ruled before the calibration run, because the calibration prices an instrument whose attribution rule is not yet settled.
+  What the ablation does not settle is which method should REPLACE marking, since ablating candidate L and candidate Q are separate designs and neither exists.
 
 ## Amendment 4's compile band may reject the profile it was written for
 
