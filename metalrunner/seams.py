@@ -44,6 +44,14 @@ A name is only a seam if the caller looks it up at call time. `run()` calls
 reaches it; a name already bound into a default argument, a closure or a
 compiled function would not be reached, and no amount of care here changes
 that.
+
+The name may sit on a class rather than directly on the module, written as a
+dotted path like `QuantizedLinear.__call__`. Everything above still holds,
+because a method is looked up on the class at call time exactly the way a
+module global is looked up on its module. Assigning to the instance instead
+would not be reached at all: Python resolves `instance(x)` through the type,
+so an instance-level `__call__` is simply never consulted, and a measurement
+built on one would install nothing and report nothing wrong.
 """
 
 from __future__ import annotations
@@ -58,7 +66,13 @@ class SeamRefusal(RuntimeError):
 
 @dataclass(frozen=True)
 class Seam:
-    """A module-level name, and where the object bound to it is defined.
+    """A name reached from a module, and where the object bound to it is
+    defined.
+
+    `attribute` is normally one name on the module. It may also be a dotted
+    path such as `QuantizedLinear.__call__`, which names a method on a class
+    the module exposes; the leading segments are walked to find the object
+    that owns the final name, and the replacement is installed there.
 
     `defined_in` is the module the object's own `__module__` should name. It
     differs from `module` only for a re-export, and stating it is how a seam
@@ -73,6 +87,30 @@ class Seam:
     @property
     def origin(self) -> str:
         return self.defined_in or self.module
+
+    @property
+    def name(self) -> str:
+        """The final segment, which is what the replacement is called."""
+        return self.attribute.rsplit(".", 1)[-1]
+
+    def resolve(self) -> tuple[object, str]:
+        """The object that owns this seam's final name, and that name.
+
+        A missing step along the way refuses here rather than later: a seam
+        whose class was renamed upstream must not read as a seam that merely
+        holds something unexpected.
+        """
+        owner = importlib.import_module(self.module)
+        segments = self.attribute.split(".")
+        for index, segment in enumerate(segments[:-1]):
+            try:
+                owner = getattr(owner, segment)
+            except AttributeError:
+                reached = ".".join([self.module] + segments[:index])
+                raise SeamRefusal(
+                    f"{self} cannot be reached: {reached} has no {segment!r}"
+                ) from None
+        return owner, segments[-1]
 
     def __str__(self) -> str:
         return f"{self.module}.{self.attribute}"
@@ -98,9 +136,9 @@ class Installation:
         if seam in self._originals:
             raise SeamRefusal(f"{seam} is already installed by this run")
 
-        module = importlib.import_module(seam.module)
+        owner, name = seam.resolve()
         try:
-            original = getattr(module, seam.attribute)
+            original = getattr(owner, name)
         except AttributeError:
             raise SeamRefusal(
                 f"{seam} does not exist, so metalrunner cannot replace it"
@@ -117,7 +155,7 @@ class Installation:
         replacement = wrap(original)
         self._counts[seam] = 0
         counted = self._counting(seam, replacement)
-        setattr(module, seam.attribute, counted)
+        setattr(owner, name, counted)
         self._originals[seam] = original
         self._installed[seam] = counted
         self._order.append(seam)
@@ -125,10 +163,10 @@ class Installation:
     def remove(self) -> None:
         """Put every original back, newest first, and report any surprise."""
         for seam in reversed(self._order):
-            module = importlib.import_module(seam.module)
-            if getattr(module, seam.attribute, None) is not self._installed[seam]:
+            owner, name = seam.resolve()
+            if getattr(owner, name, None) is not self._installed[seam]:
                 self.foreign_on_removal.append(str(seam))
-            setattr(module, seam.attribute, self._originals[seam])
+            setattr(owner, name, self._originals[seam])
         self._order.clear()
         self._originals.clear()
         self._installed.clear()
@@ -143,7 +181,7 @@ class Installation:
             self._counts[seam] += 1
             return replacement(*args, **kwargs)
 
-        call.__name__ = seam.attribute
+        call.__name__ = seam.name
         call.__qualname__ = f"metalrunner:{seam}"
         return call
 

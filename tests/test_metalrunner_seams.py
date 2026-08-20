@@ -358,3 +358,150 @@ def test_the_real_mlx_lm_re_exports_are_reachable():
             lambda original: original)
         installation.remove()
         assert getattr(mlx_lm.lora, attribute).__module__ == origin
+
+
+# ---------------------------------------------------------------------------
+# Names that live on a class, not directly on the module
+# ---------------------------------------------------------------------------
+# The Day 1 profile has to reach `QuantizedLinear.__call__` and
+# `QuantizedEmbedding.as_linear`, which are methods rather than module
+# globals. A method is looked up on its class at call time exactly the way a
+# module global is looked up on its module, so it is a seam by the same
+# argument, and the seam names it with a dotted path.
+# ---------------------------------------------------------------------------
+@pytest.fixture()
+def classy(monkeypatch):
+    """A throwaway module holding a class with two methods on it."""
+    module = types.ModuleType("metalrunner_seam_class")
+
+    class Widget:
+        def __call__(self, value):
+            return f"stock call {value}"
+
+        def sideways(self, value):
+            return f"stock sideways {value}"
+
+    Widget.__module__ = module.__name__
+    Widget.__call__.__module__ = module.__name__
+    Widget.sideways.__module__ = module.__name__
+    module.Widget = Widget
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    return module
+
+
+def test_a_method_seam_is_reached_by_calling_the_instance(classy):
+    """The mechanism the profile depends on: replacing the method on the
+    class changes what `instance(...)` does, for every instance."""
+    seam = seams.Seam(classy.__name__, "Widget.__call__")
+    installation = seams.Installation()
+    installation.install(seam, lambda _o: lambda self, value: f"ours {value}")
+    assert classy.Widget()("x") == "ours x"
+
+
+def test_a_method_seam_still_receives_the_instance(classy):
+    """`self` arrives as the first argument, so a replacement that delegates
+    can still reach the instance's own state."""
+    seen = []
+    seam = seams.Seam(classy.__name__, "Widget.sideways")
+    installation = seams.Installation()
+
+    def wrap(original):
+        def call(self, value):
+            seen.append(self)
+            return original(self, value)
+        return call
+
+    installation.install(seam, wrap)
+    widget = classy.Widget()
+    assert widget.sideways("y") == "stock sideways y"
+    assert seen == [widget]
+
+
+def test_removing_a_method_seam_puts_the_method_back(classy):
+    original = classy.Widget.__call__
+    seam = seams.Seam(classy.__name__, "Widget.__call__")
+    with seams.Installation() as installation:
+        installation.install(seam, lambda _o: lambda self, value: "ours")
+    assert classy.Widget.__call__ is original
+    assert classy.Widget()("x") == "stock call x"
+
+
+def test_calls_through_a_method_seam_are_counted(classy):
+    """The count is what proves a region was actually reached. The profile
+    reads it to check attention fired once per layer per step rather than
+    trusting that it did."""
+    seam = seams.Seam(classy.__name__, "Widget.__call__")
+    installation = seams.Installation()
+    installation.install(seam, lambda original: original)
+    widget = classy.Widget()
+    for _ in range(3):
+        widget("x")
+    assert installation.counts[str(seam)] == 3
+
+
+def test_a_missing_step_on_the_way_refuses_and_names_it(classy):
+    """A class renamed upstream must not read as a seam holding something
+    unexpected: the two have different repairs, so they get different
+    refusals."""
+    installation = seams.Installation()
+    with pytest.raises(seams.SeamRefusal, match="has no 'Gadget'"):
+        installation.install(seams.Seam(classy.__name__, "Gadget.__call__"),
+                             lambda _o: lambda self: None)
+
+
+def test_a_missing_method_on_a_real_class_refuses(classy):
+    installation = seams.Installation()
+    with pytest.raises(seams.SeamRefusal, match="does not exist"):
+        installation.install(seams.Seam(classy.__name__, "Widget.absent"),
+                             lambda _o: lambda self: None)
+
+
+def test_a_foreign_method_at_a_class_seam_refuses(classy):
+    """The origin check does not weaken on the way through a class."""
+    def interloper(self, value):
+        return "theirs"
+
+    interloper.__module__ = "some_other_package"
+    classy.Widget.__call__ = interloper
+
+    installation = seams.Installation()
+    with pytest.raises(seams.SeamRefusal, match="already replaced it"):
+        installation.install(seams.Seam(classy.__name__, "Widget.__call__"),
+                             lambda _o: lambda self, value: "ours")
+
+
+def test_replacing_call_on_an_instance_reaches_nothing(classy):
+    """Why the seam goes on the class and not the object.
+
+    Python resolves `instance(...)` through the type, so a `__call__` written
+    onto the instance is never consulted. An instrument built that way
+    installs nothing, raises nothing, and reports every region as absent,
+    which is the failure this test exists to keep out of the profile.
+    """
+    widget = classy.Widget()
+    widget.__call__ = lambda value: f"ours {value}"
+    assert widget("x") == "stock call x"
+
+
+def test_the_real_profile_patch_points_are_reachable():
+    """The acceptance case against the live install: all four names the Day 1
+    profile marks must be installable, and two of them are methods."""
+    import mlx.nn  # noqa: F401
+    import mlx_lm.models.qwen3  # noqa: F401
+
+    points = (
+        ("mlx_lm.models.qwen3", "scaled_dot_product_attention",
+         "mlx_lm.models.base"),
+        ("mlx.nn", "QuantizedLinear.__call__", "mlx.nn.layers.quantized"),
+        ("mlx.nn", "QuantizedEmbedding.as_linear", "mlx.nn.layers.quantized"),
+        ("mlx.nn", "losses.cross_entropy", "mlx.nn.losses"),
+    )
+    for module, attribute, origin in points:
+        seam = seams.Seam(module, attribute, defined_in=origin)
+        owner, name = seam.resolve()
+        assert getattr(owner, name).__module__ == origin
+        installation = seams.Installation()
+        installation.install(seam, lambda original: original)
+        installation.remove()
+        assert getattr(*seam.resolve()).__module__ == origin
+        assert installation.foreign_on_removal == []
