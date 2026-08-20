@@ -21,6 +21,7 @@ from profile_rules import (
     RECONCILE_PCT,
     SHAPES,
     Reading,
+    collapse_ratio_lo,
     compile_transfer,
     gain,
     kill_q,
@@ -221,3 +222,118 @@ def test_the_rule_refuses_a_candidate_it_never_registered():
 def test_the_rule_refuses_an_empty_field():
     with pytest.raises(RunInvalid):
         select_first_operation([])
+
+
+# ---------------------------------------------------------------------------
+# Collapsing many shapes into one credited ratio (Amendment 5)
+# ---------------------------------------------------------------------------
+def _shape(count, numerator, denominator):
+    return {"count": count, "numerator": numerator, "denominator": denominator}
+
+
+def test_the_collapse_weights_each_shape_by_how_often_it_runs():
+    """A shape that runs 252 times per step and one that runs once are not
+    equal evidence about the operation as a whole."""
+    collapsed = collapse_ratio_lo({
+        "S1": _shape(252, [2.0], [1.0]),   # fast floor, runs constantly
+        "S5": _shape(1, [10.0], [10.0]),   # no headroom, runs once
+    })
+    assert collapsed["ratio_lo"] == pytest.approx((252 * 2.0 + 10.0)
+                                                  / (252 * 1.0 + 10.0))
+    assert collapsed["ratio_lo"] > 1.9
+
+
+def test_the_collapse_keeps_the_worst_pairing_at_the_aggregate():
+    """Smallest numerator over largest denominator, shape by shape, so no
+    shape's optimistic sample can be paired with another's pessimistic one."""
+    collapsed = collapse_ratio_lo({
+        "S1": _shape(1, [3.0, 4.0, 5.0], [1.0, 2.0]),
+        "S2": _shape(1, [9.0, 10.0], [4.0, 5.0]),
+    })
+    assert collapsed["ratio_lo"] == pytest.approx((3.0 + 9.0) / (2.0 + 5.0))
+
+
+def test_a_single_shape_collapses_to_the_plain_ratio():
+    """The collapse must not disagree with `ratio_lo` where both apply."""
+    numerator, denominator = [3.0, 4.0], [1.0, 2.0]
+    collapsed = collapse_ratio_lo({"S1": _shape(1, numerator, denominator)})
+    assert collapsed["ratio_lo"] == pytest.approx(ratio_lo(numerator,
+                                                           denominator))
+
+
+def test_the_collapse_reports_what_each_shape_contributed():
+    """Which shape carries the ratio is the first thing a reader asks, and
+    the answer decides where a kernel would actually be aimed."""
+    collapsed = collapse_ratio_lo({"S1": _shape(2, [3.0], [1.0]),
+                                   "S2": _shape(5, [1.0], [1.0])})
+    assert collapsed["shapes"]["S1"] == {"count": 2, "numerator": 6.0,
+                                         "denominator": 2.0}
+    assert collapsed["shapes"]["S2"]["count"] == 5
+
+
+@pytest.mark.parametrize("count", [0, -1, 1.5, True, None])
+def test_a_shape_the_instrument_never_saw_refuses_rather_than_weighing_zero(
+        count):
+    """Zero occurrences is not a weight, it is the share and the floor
+    disagreeing about which workload they measured."""
+    with pytest.raises(RunInvalid, match="not a count"):
+        collapse_ratio_lo({"S1": _shape(count, [1.0], [1.0])})
+
+
+@pytest.mark.parametrize("numerator,denominator", [([], [1.0]), ([1.0], [])])
+def test_a_shape_measured_on_one_side_only_refuses(numerator, denominator):
+    with pytest.raises(RunInvalid, match="one side"):
+        collapse_ratio_lo({"S1": _shape(1, numerator, denominator)})
+
+
+def test_a_shape_with_a_zero_floor_refuses():
+    with pytest.raises(RunInvalid, match="floor of zero"):
+        collapse_ratio_lo({"S1": _shape(1, [1.0], [0.0])})
+
+
+def test_the_collapse_refuses_an_empty_field():
+    with pytest.raises(RunInvalid, match="at least one shape"):
+        collapse_ratio_lo({})
+
+
+# ---------------------------------------------------------------------------
+# The footprint tie-break needs every tied candidate measured (Amendment 5)
+# ---------------------------------------------------------------------------
+def test_an_unmeasured_footprint_sends_the_whole_band_to_table_order():
+    """Ranking a measured delta against an unmeasured one would decide the
+    sprint on which candidate happened to get a number."""
+    ruling = select_first_operation([
+        Reading("A", 0.50, 2.0, footprint_delta=None),
+        Reading("L", 0.50, 2.0, footprint_delta=1),
+    ])
+    assert ruling["selected"] == "L"          # L is the earlier table row
+    assert ruling["footprint_measured"] is False
+    assert "table order" in ruling["reason"]
+
+
+def test_a_fully_measured_band_still_uses_the_footprint():
+    ruling = select_first_operation([
+        Reading("L", 0.50, 2.0, footprint_delta=9),
+        Reading("A", 0.50, 2.0, footprint_delta=1),
+    ])
+    assert ruling["selected"] == "A"
+    assert ruling["footprint_measured"] is True
+    assert "peak-footprint delta" in ruling["reason"]
+
+
+def test_an_unmeasured_footprint_outside_the_band_does_not_reach_the_rule():
+    """Only the tied band is tie-broken, so a distant candidate with no
+    footprint number cannot drag the winner to table order."""
+    ruling = select_first_operation([
+        Reading("L", 0.50, 4.0, footprint_delta=9),
+        Reading("A", 0.50, 4.0, footprint_delta=1),
+        Reading("Q", 0.01, 1.01, footprint_delta=None),
+    ])
+    assert ruling["selected"] == "A"
+    assert ruling["footprint_measured"] is True
+
+
+def test_the_footprint_defaults_to_unmeasured():
+    """A reading that says nothing about footprint must not read as zero,
+    which would silently win every tie-break."""
+    assert Reading("A", 0.5, 2.0).footprint_delta is None

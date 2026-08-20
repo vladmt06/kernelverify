@@ -65,12 +65,20 @@ KILL_SHAPES = 4
 
 @dataclass(frozen=True)
 class Reading:
-    """One candidate's inputs to the gain formula, and where they came from."""
+    """One candidate's inputs to the gain formula, and where they came from.
+
+    `footprint_delta` is bytes, the first tie-break in section 4.3, and it is
+    None when nothing measured it. The tie-break asks for the peak-footprint
+    delta of an implementation that does not exist yet, so what stands in for
+    it is the delta measured across that candidate's own floor arms, which is
+    a statement about the floor rather than about a kernel; Amendment 5 names
+    that substitution and requires it labelled wherever it is reported.
+    """
 
     candidate: str
-    share: float          # f, section 3.3
-    ratio_lo: float       # r_lo, section 4.2
-    footprint_delta: int  # bytes, the first tie-break in section 4.3
+    share: float                 # f, section 3.3
+    ratio_lo: float              # r_lo, section 4.2
+    footprint_delta: int | None = None
 
 
 def gain(share: float, ratio: float) -> float:
@@ -110,6 +118,64 @@ def ratio_lo(numerator: Sequence[float], denominator: Sequence[float]) -> float:
     if largest <= 0.0:
         raise RunInvalid("a measured floor of zero cannot bound a ratio")
     return smallest / largest
+
+
+def collapse_ratio_lo(per_shape: Mapping[str, Mapping[str, object]]) -> dict:
+    """One credited ratio out of many shapes, weighted by how often each runs.
+
+    A candidate's floor is measured shape by shape, but the operation it would
+    replace is the whole set of them, and the shapes do not appear equally
+    often: the quantized matmul runs seven times per layer across six distinct
+    shapes and the output head runs once per step. A ratio taken over shapes
+    without weighting would credit a shape that runs once as heavily as one
+    that runs 252 times, so the collapse weights each shape by its measured
+    occurrence count.
+
+    The worst pairing is preserved at the aggregate, exactly as `ratio_lo`
+    preserves it per shape: the weighted sum of the SMALLEST numerator each
+    shape produced, over the weighted sum of the LARGEST denominator each
+    shape produced. A candidate is therefore credited with the least its
+    measurements support, and no shape's optimistic sample can be paired with
+    another shape's pessimistic one to manufacture headroom.
+
+    Counts come from the instrument's own per-shape call counts, not from the
+    model's declared geometry, because a share and a ratio that disagree about
+    how often an operation ran are two readings of different workloads.
+    """
+    if not per_shape:
+        raise RunInvalid("a collapsed ratio needs at least one shape")
+    numerator_total = 0.0
+    denominator_total = 0.0
+    contributions = {}
+    for shape, entry in sorted(per_shape.items()):
+        count = entry.get("count")
+        if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+            raise RunInvalid(
+                f"shape {shape} ran {count!r} times, which is not a count; a "
+                f"shape the instrument never saw is not weighted at zero, it "
+                f"is a disagreement between the share and the floor")
+        numerator = entry.get("numerator") or ()
+        denominator = entry.get("denominator") or ()
+        if not numerator or not denominator:
+            raise RunInvalid(
+                f"shape {shape} has samples on only one side, so it cannot "
+                f"contribute a ratio")
+        smallest, largest = min(numerator), max(denominator)
+        if largest <= 0.0:
+            raise RunInvalid(
+                f"shape {shape} has a measured floor of zero, which cannot "
+                f"bound a ratio")
+        numerator_total += count * smallest
+        denominator_total += count * largest
+        contributions[shape] = {
+            "count": count, "numerator": count * smallest,
+            "denominator": count * largest}
+    if denominator_total <= 0.0:
+        raise RunInvalid("the weighted floor is zero, so no ratio is bounded")
+    return {"ratio_lo": numerator_total / denominator_total,
+            "numerator_total": numerator_total,
+            "denominator_total": denominator_total,
+            "shapes": contributions}
 
 
 def reconciles(regions: Mapping[str, float], remainder: float,
@@ -216,18 +282,29 @@ def select_first_operation(readings: Sequence[Reading]) -> dict[str, object]:
     # differ by two points or more; inside that band the reading is not
     # precise enough to order them, so the registered tie-breaks do it and a
     # hair more gain wins nothing.
-    tied = sorted(
-        (row for row in scored if largest - row["gain"] < TIE_GAIN),
-        key=lambda row: (row["footprint_delta"],
-                         CANDIDATES.index(row["candidate"])),
-    )
+    band = [row for row in scored if largest - row["gain"] < TIE_GAIN]
+
+    # The footprint tie-break needs every tied candidate measured. Ranking a
+    # measured delta against an unmeasured one would decide the sprint on
+    # which candidate happened to get a number, so an unmeasured member sends
+    # the whole band to table order and the ruling says that is what happened.
+    measured = all(row["footprint_delta"] is not None for row in band)
+    if measured:
+        tied = sorted(band, key=lambda row: (row["footprint_delta"],
+                                             CANDIDATES.index(row["candidate"])))
+        broken_by = ("smaller peak-footprint delta then table order")
+    else:
+        tied = sorted(band, key=lambda row: CANDIDATES.index(row["candidate"]))
+        broken_by = ("table order, because the peak-footprint delta is not "
+                     "measured for every tied candidate")
     winner = tied[0]
     return {
         "selected": winner["candidate"], "ranked": scored, "floor": GAIN_FLOOR,
         "verdict": "SELECTED",
         "tied_with": [row["candidate"] for row in tied[1:]],
+        "footprint_measured": measured,
         "reason": (f"largest gain at cell {PRIMARY_CELL}"
                    if len(tied) == 1 else
                    f"tied within {TIE_GAIN} of the largest gain, broken by "
-                   f"smaller peak-footprint delta then table order"),
+                   f"{broken_by}"),
     }
