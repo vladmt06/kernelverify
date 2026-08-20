@@ -74,30 +74,63 @@ def arms_agree(ours, theirs) -> bool:
     b = np.array(theirs).astype(np.float64)
     return float(np.max(np.abs(a - b))) <= 5e-3 * max(1.0, float(np.max(np.abs(b))))
 
-def interleaved_samples(build_a, build_b, rounds: int,
-                        guard=None) -> tuple:
-    """Per-round times of two arms, sampled interleaved within every round.
+def interleaved_arms(builders, rounds: int, guard=None, *,
+                     rotate: bool = True) -> dict:
+    """Per-round times of n labelled arms, sampled interleaved every round.
+
+    ``builders`` maps a label to a ``build_one(i)`` callable, and its order is
+    the arm order; a mapping rather than a list because two arms sharing a
+    label would silently overwrite one another's samples.
 
     Interleaving is load-bearing and NOT sufficient (AGENTS.md): it equalizes
     a clock excursion across the arms but cannot detect one, so the caller
-    must still gate on the reference arm's own spread. Both arms are warmed
-    first; the dispatch batch is calibrated on arm A to MIN_SAMPLE_MS.
+    must still gate on a reference arm's own spread. Every arm is warmed
+    first, and ONE dispatch batch is calibrated on the FIRST arm and used by
+    all of them, because per-arm batches would make the per-round times
+    incomparable, which is the whole point of sampling them together.
+
+    ``rotate`` starts each round at a different arm so no arm always runs
+    first, which is where allocation and cache effects land. It defaults on
+    for the n-arm path and is turned OFF by the two-arm wrapper below, whose
+    fixed order is what every published pack certificate was measured under.
 
     ``guard``, when given, is called once per round with a cell label and may
-    refuse by raising (the pricing probe's memory checks); None leaves the
-    microbenchmark path exactly as it was. The seam lives HERE because this
-    loop is shared and a diverged sampler copy is the ADR 0004 two-halves
-    mistake. ``rounds`` is required rather than defaulted: each harness pins
-    its own round count as a measurement parameter, and a default here would
-    let one of them drift onto a number it never registered.
+    refuse by raising (the pricing probe's memory checks). The seam lives HERE
+    because this loop is shared and a diverged sampler copy is the ADR 0004
+    two-halves mistake. ``rounds`` is required rather than defaulted: each
+    harness pins its own round count as a measurement parameter, and a default
+    here would let one of them drift onto a number it never registered.
     """
-    mx.eval(build_a(0), build_b(0))
+    labels = list(builders)
+    if not labels:
+        raise ValueError("interleaved_arms needs at least one arm")
+    if rounds < 1:
+        raise ValueError(f"rounds must be at least 1, not {rounds}")
+    mx.eval([builders[label](0) for label in labels])
     mx.synchronize()
-    copies = calibrate_copies(lambda c: dispatch(build_a, c))
-    a_samples, b_samples = [], []
+    first = builders[labels[0]]
+    copies = calibrate_copies(lambda c: dispatch(first, c))
+    samples: dict = {label: [] for label in labels}
     for i in range(rounds):
         if guard is not None:
             guard(f"round {i + 1}/{rounds}")
-        a_samples.append(dispatch(build_a, copies) / copies)
-        b_samples.append(dispatch(build_b, copies) / copies)
-    return a_samples, b_samples
+        start = i % len(labels) if rotate else 0
+        for label in labels[start:] + labels[:start]:
+            samples[label].append(dispatch(builders[label], copies) / copies)
+    return samples
+
+
+def interleaved_samples(build_a, build_b, rounds: int,
+                        guard=None) -> tuple:
+    """The two-arm case, in arm order A then B in every round.
+
+    A thin wrapper over ``interleaved_arms`` so there is one sampler rather
+    than two: the pack gates, the pricing probe and the knob ladders all get
+    the same warm-up, the same single calibrated batch and the same guard
+    seam. Rotation is OFF here on purpose: every certificate this function has
+    published was measured with B always following A, and turning rotation on
+    would change what those gates measure without anyone asking for it.
+    """
+    samples = interleaved_arms({"a": build_a, "b": build_b}, rounds, guard,
+                               rotate=False)
+    return samples["a"], samples["b"]
