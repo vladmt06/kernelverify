@@ -626,6 +626,71 @@ def test_the_attention_ablation_arm_also_zeroes_the_key_and_value_backward(rig):
 
 
 @requires_metal
+def test_candidate_l_s_ablation_is_not_a_point_on_its_own_dial(rig):
+    """Clause 18's residue is the intercept minus the ABLATED step.
+
+    An ablated arm that is really the dial's smallest setting makes the
+    residue `a - (a + b * phi_min)`, which for a linear arm is `-b * phi_min`
+    and is negative by a quarter of the slope. Clause 33 makes a residue
+    below `-R` a fault that refuses the profile, so candidate L would reject
+    itself at every plausible resolution floor, which is every one.
+
+    The check is that the ablation and the smallest setting are different
+    computations, which is the whole of what an ablation being an ablation
+    means and is invisible in a fit.
+    """
+    import mlx.core as mx
+
+    knob = pk.KNOBS["L"]
+    prepared = knob.prepare(rig["model"], WIDTH)
+    smallest, _sg, _sc = _loss_and_gradients(rig, knob.arm(prepared, min(pk.PHIS)))
+    ablated, _ag, _ac = _loss_and_gradients(rig, knob.ablate(prepared))
+
+    assert not mx.array_equal(smallest, ablated), (
+        "candidate L's ablated arm computes the smallest dial setting's own "
+        "loss, so it is a point on the dial's own line and not an ablation")
+
+
+@requires_metal
+def test_candidate_l_s_ablation_keeps_the_backward_reaching_the_model(rig):
+    """An ablation AT THE LOSS is not the same problem as one mid-step.
+
+    Attention's ablated arm can multiply its operands by zero because the
+    queries still pass through carrying a gradient of one. The loss is the
+    ROOT of the backward, so an ablated loss whose derivative in the logits
+    is zero would make every cotangent below it zero and delete the entire
+    step rather than candidate L's two regions, while still producing a
+    number and a faster time.
+
+    That failure is invisible in a timing and would be credited straight into
+    candidate L's residue, so it is pinned here.
+    """
+    import mlx.core as mx
+
+    knob = pk.KNOBS["L"]
+    prepared = knob.prepare(rig["model"], WIDTH)
+    stock_loss, stock_grad, _sc = _loss_and_gradients(rig, {})
+    _d, _dg, dialled_counts = _loss_and_gradients(rig, knob.arm(prepared, 1.0))
+    loss, grad, counts = _loss_and_gradients(rig, knob.ablate(prepared))
+
+    assert counts == dialled_counts, (
+        f"the ablated arm reaches candidate L's seams {counts} times against "
+        f"a dialled arm's {dialled_counts}, so it removed a call site rather "
+        f"than the work behind it")
+    assert not mx.array_equal(stock_loss, loss), (
+        "the ablated arm computes stock's loss, so it removed nothing")
+    assert sorted(stock_grad) == sorted(grad), (
+        "the ablated arm changed which parameters have a gradient at all, so "
+        "it removed more of the model than candidate L's two regions")
+    stock_live = {n for n in stock_grad if bool(mx.any(stock_grad[n] != 0))}
+    live = {n for n in grad if bool(mx.any(grad[n] != 0))}
+    assert live == stock_live, (
+        f"{len(stock_live - live)} tensors that carry a gradient under stock "
+        f"carry none under the ablated arm, so the ablation cut the backward "
+        f"path rather than removing the head matmul and the loss")
+
+
+@requires_metal
 def test_the_fused_entry_point_cannot_be_reached_from_inside_the_real_step(rig):
     """Clause 19's floor for candidate A, checked where clause 19 puts it.
 

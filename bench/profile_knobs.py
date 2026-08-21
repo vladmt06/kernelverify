@@ -800,9 +800,6 @@ def _loss_knob() -> Knob:
             _seam("cross-entropy"): _loss_call(kept, apply=slice_operand),
         }
 
-    def ablate(prepared):
-        return arm(prepared, min(PHIS))
-
     return Knob(
         candidate="L",
         kind=REWRITE,
@@ -810,8 +807,41 @@ def _loss_knob() -> Knob:
         prepare=prepare,
         arm=arm,
         scaffold=lambda prepared, phi: arm(prepared, phi, slice_operand=False),
-        ablate=ablate,
+        ablate=lambda _prepared: _ablate_loss(),
     )
+
+
+def _ablate_loss():
+    """Candidate L's two regions removed outright, with the backward kept.
+
+    Attention's ablated arm can multiply its operands by zero because the
+    queries still pass through carrying a gradient of one. That trick cannot
+    be used here: the loss is the ROOT of the backward, so a zero derivative
+    would make every cotangent below it zero and delete the whole step
+    instead of this candidate's two regions, while still producing a number
+    and a faster time.
+
+    So the head returns a one-column slice of its own input and the loss
+    reads that column. No logits tensor is built at all, which is exactly
+    what a streamed mask-aware kernel also never builds, and the hidden
+    states keep a gradient of one on the column that survives, so the model's
+    own backward runs at full size.
+
+    The loss VALUE is meaningless here, as it is at every dialled setting,
+    and nothing compares it against stock's; only times are compared.
+    """
+    def wrap_head(_original):
+        def call(_self, x):
+            return x[..., :1]
+        return call
+
+    def wrap_loss(_original):
+        def call(logits, _targets, *_args, **_kwargs):
+            return logits[..., 0]
+        return call
+
+    return {_seam("head-matmul"): wrap_head,
+            _seam("cross-entropy"): wrap_loss}
 
 
 def _causal_mask(queries: int, keys: int):
