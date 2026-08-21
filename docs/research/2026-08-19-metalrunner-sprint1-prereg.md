@@ -1564,3 +1564,371 @@ Nothing here touches the four cells, the model, the corpus, the two widths, the 
 Three things this sentence named in an earlier draft are no longer wholly untouched, and are listed rather than left inside a blanket claim: the two-point tie band keeps its width of two points and its tie-breaks and gains a resolution test on membership of the band itself; the kill rule keeps its 1.10 and its all-but-one-shape fraction and gains a resolution test on the comparison against 1.10; and the shipping floor keeps its registered value of 1.10 and gains the same test, so a candidate whose margin above it is not supported by its own measurements does not ship.
 An earlier draft claimed that raises a candidate-independent effective floor and gave its arithmetic; no such floor exists under propagation, and clause 31 records the withdrawal.
 All three are clause 31's, all three are recorded in the ledger above, and none of the three changes a registered number.
+
+## Amendment 7, 2026-08-21: the profile certifies only what names the first operation, and the box becomes affordable
+
+Amendment 6 registered clause 31's action principle, which supports a decision only where it holds everywhere inside the uncertainty box around that decision's own measurements.
+It then priced that box and refused to register a schedule for it, recording the refusal in clause 31's own text: the box was designed but not affordable, and the choice among reducing the manifest, accepting a proxy transfer that no measurement supports, and re-scoping what the profile decides was a ruling that had not been taken.
+That ruling is taken here.
+The direction is re-scope first and reduce second, in that order, because what the profile certifies decides which arms it has to calibrate and not the other way round.
+
+Three follow-on rulings were taken the same day and each is registered below with what it concedes.
+Every figure in this amendment is arithmetic over Amendment 6's own cost model and is reproduced by execution before it is written, in the same discipline the previous amendment followed.
+
+### Clause 34. The profile certifies the L versus Q ordering and the shipping floor, and reports everything else
+
+The profile exists to name the sprint's first operation.
+Amendment 6's clause 31 registered eight sites at which a rule takes an action, and each certified action costs a margin that must survive the whole box.
+Only three of those eight bear on which operation is named, and the other five are retained as measurements, published with their own uncertainty, and consulted by no rule that reaches a terminal.
+
+| Site | Fate | Why |
+|---|---|---|
+| Clause 24's shipping floor | CERTIFIED | it decides whether building anything at all is worth the sprint |
+| Clause 16's per-width pair | CERTIFIED | this comparison IS the choice between candidates L and Q |
+| Clause 16's two-point boundary | CERTIFIED | band membership is part of that same choice |
+| Clause 27's route 1 | REPORTED | its only action is excluding candidate A, which clause 35 stops gating |
+| Clause 27's route 2 | REPORTED | the same |
+| Clause 23's kill rule | REPORTED | clause 36 |
+| Section 4.3's retained order | REPORTED, and its payload changed, see below | it sets the Day 3 build order of the candidates the sprint does not build first, which no measurement this run takes has to settle now |
+| Clause 15's dial price | RETIRED | clause 35 names the dial by rule, so there is no price comparison left to make |
+
+A REPORTED quantity is measured, recorded in the artifact with the readings it rests on, and carries the OBSERVED SPREAD clause 37 registers rather than any bound at a registered rate.
+An earlier draft of this clause promised a per-coordinate interval, which candidate A cannot be given, because clause 37 puts it in neither the pilot nor the fresh set and there is then no calibrated interval to carry.
+It is not a weaker certification and it must not be written as one: the artifact says which quantities were certified and which were reported, and a reader who wants to act on a reported number is acting outside this pre-registration.
+
+**Demoting the retained order to REPORTED is not enough on its own, because its ORDER is itself an output.**
+An outside review reproduced the leak: the no-selection record's kept list is emitted in score order and section 4.3 makes that list the Day 2 build order, so flipping which candidate scores higher flips the payload from one order to the other while the terminal label never moves.
+A quantity that is not certified must not arrive anywhere as an instruction, so the kept list is REGISTERED here as an unordered set of the scored candidates, each carrying its own score and observed spread, presented in section 4.2's registered table order.
+The score ORDER is recorded beside them as evidence and is explicitly not a build order, and where a build order is needed section 4.2's table order is what supplies it, which is the last-resort ordering section 4.3 already registers for ties elsewhere.
+This REVERSES committed text, which keeps the top two in score order unconditionally and makes that the Day 2 build order.
+
+**This is a reduction in what the profile CLAIMS, and it is stated as one rather than as a simplification.**
+Under Amendment 6 a run could certify that candidate A was excluded, that candidate Q was dead, and that the two retained candidates were in a definite build order.
+Under this amendment it certifies none of those and says so in the artifact.
+What it gains is that the three claims it does keep are the three the sprint cannot proceed without, and they become both affordable and easier to support, for the reason clause 37 gives.
+
+Nothing in this clause touches the REFUSAL classes.
+A share that is not a fraction, a non-finite reading, a non-positive step total, a resolution floor of zero, a trace during the timed rounds, a failed spread gate and a failed context-equality demand all still refuse the run outright.
+Those are faults rather than actions, they take no margin, and clause 27's distinction between an absence the rules carry and a fault no rule carries is unchanged.
+
+**So REPORTED does not mean harmless, and the difference is registered rather than left for a reader to infer.**
+A reported quantity takes no certified margin and reaches no terminal, and it can still REFUSE the run.
+Candidate A's share is the case that bites: it gates nothing under clause 35, and a share of 1.01 measured on it still refuses the whole profile.
+That is deliberate and it is clause 27's own registered reasoning rather than a rule invented here.
+A share at or above one is an instrument fault, the instrument is shared with candidates L and Q, and clause 27 already refuses to fall back on a sibling reading on the ground that continuing would be believing the same instrument twice.
+The same holds for every other member of the refusal class measured on a reported arm: a non-finite reading, a non-positive step total or a resolution floor of zero refuses wherever it is measured.
+What a reported quantity may never do is decide a terminal.
+What it may always do is prove that the measurements cannot all be true.
+
+Clause 31's principle itself is unchanged and is not weakened anywhere.
+Every site that remains CERTIFIED keeps the requirement exactly as Amendment 6 wrote it: a certified lower bound over the whole box, computed with the shared expressions kept shared, with corner enumeration known unsound and the interior minimum reproduced.
+
+### Clause 35. Candidate A is reported and gates no terminal, and its dial is named by rule
+
+Amendment 6's clause 27 established that candidate A can be ruled OUT by measurement or the profile can refuse to rule, and that candidate A can never be ruled IN, because ruling it in would need the ratio that amendment abolishes.
+So candidate A was never a candidate for selection under Amendment 6 either.
+It was a veto: a candidate whose ceiling, left unresolved, converted an otherwise complete run into UNRESOLVED or INCOMPLETE and named no operation.
+
+That veto is REMOVED.
+Candidate A's share and its ceiling `U(w) = 1/(1 - f_A(w))` are still computed exactly as clause 27 constructs them, both exclusion routes are still evaluated exactly as clause 27 writes them, and their results are recorded in the artifact.
+What changes is that neither route's result reaches a terminal.
+Where the L or Q winner's score does not exceed `U_min`, that is recorded as an OPEN QUESTION against the winner, naming `U_min`, the width or widths that set it, and by how much the winner falls short, and the winner is still SELECTED.
+
+**What that concedes, plainly.**
+The profile can no longer decline to name an operation on the ground that candidate A might have been better.
+A high ceiling for candidate A becomes a known risk carried into Day 2 rather than a refusal to start it.
+The trade is a veto and not a candidate, because candidate A could not be selected under Amendment 6 either, and a rule whose only possible action is to block cannot be the thing that names an operation.
+
+**Why the veto was very unlikely to resolve, which is why it is worth removing rather than paying for.**
+Route 1 excludes candidate A only where a valid share sits at or below `1/11`, and candidate A's share rises with width because its score matrix is quadratic in the sequence length while every other region is linear.
+So route 1 can only fire at the SHORT width.
+The short width is exactly where clause 26 records that the dial does not fit: the best proxy knob fit reached a coefficient of determination of 0.946 against clause 6's gate of 0.99, and that failure is the stated reason clause 26 moved the dial selection to the long width in the first place.
+At the long width candidate A's share is around a fifth of the step, far above the `1/11` line, so route 1 cannot fire there at all.
+Route 2 would then have to carry the exclusion alone, against a `U_min` of roughly 1.25.
+This is a prediction rather than a measurement and it is registered as one, but it is the prediction that makes a 27-arm calibration a poor purchase.
+
+**The dial is named by rule, and the reason is not that the criterion is expensive.**
+Candidate A's dial is `kv-length` wherever candidate A is measured, which clause 37 makes the long width alone.
+Clause 26's requirement that ONE dial serve both widths is not weakened by that and is not reached by it: its reason is that two dials produce two shares clause 14 cannot compare, and clause 37 leaves only one share to compare with nothing.
+
+The primary reason is that the price criterion is known to prefer a dial that measures the wrong quantity, and the evidence is already registered in this document rather than argued here.
+Amendment 6 records that at 384 queries the length dial reads a share of 0.060 and both head-dimension dials read 0.023, against an unmarked ablation of 0.068 taken in the same rounds.
+So `kv-length` recovers 88% of what removing attention outright costs and the two head-dimension dials recover 34% of it, and Amendment 6 says in its own words that the criterion at that width picks a dial reading a third of what the ablation measures.
+A criterion that rewards the smallest scaffold rewards the dial that moves the least of the operation, because a dial moving less of attention has less scaffold to move, and the ablation is the independent check that shows which way that pull goes.
+Retiring the criterion here is therefore removing a comparison already measured to select against completeness, and NOT a saving dressed as a principle.
+
+**Run on the prices this document actually records, clause 15's criterion names a DIFFERENT dial, so this is a REVERSAL and not an application.**
+An earlier draft of this clause said the criterion was being applied at the outcome the evidence already reached, and cited clause 26's clamp as corroboration.
+That was wrong and an outside review reproduced it: fed the registered prices of 0.221, 0.027 and 0.029, the committed selection returns `head-dim-qkv`, and `kv-length` wins only under an all-zero price tie that clause 26 observes at the 0.6B proxy and no measurement establishes at the registered cell.
+So this clause REVERSES clause 15's criterion on the only prices this document holds, and the word is used rather than left for a reader to discover.
+The justification is the ablation agreement above and nothing else: a criterion measured to select a dial recovering 34% of the operation, against one recovering 88%, is a criterion selecting on the wrong quantity, and clause 26's own text already says so in those terms.
+
+Clause 28 corroborates the name on an independent ground, and is not offered as the criterion's own answer: `kv-length` is the only one of the three dials placing all four ladder settings on a single implementation, which is what completeness means here.
+
+**What this does NOT establish, stated because the distinction is the whole point of the document.**
+Clause 26's clamp reaching `kv-length` was observed at the 0.6B proxy, and the registered selection would have run at the 4B deciding cell's long width, where `R` is different and the three scaffolds might not all clamp.
+So it is unmeasured whether the criterion at the registered cell would have tied, and this amendment does not claim it would.
+The naming does not rest on that prediction: it rests on the ablation agreement above, which is a comparison against a quantity measured with no dial in it at all.
+If a later amendment widens the dial set again, clause 15's criterion is reinstated exactly as written, because nothing in it is edited or deleted here.
+
+Clause 26's readability conditions are UNCHANGED and still run on the named dial: the knob's `10 * R(w)` excursion on both estimators, the scaffold's three-case rule, the sign precondition and the positive `R(w)` precondition.
+Retiring the price comparison retires a SELECTION among dials, not the validity gates on the dial that remains.
+Clause 26's ordering table loses its step 4, because there is no selection left to make at the long width, and every other row of that table stands.
+
+**One bias changes meaning rather than disappearing, and the artifact must say so where the number appears.**
+Clause 28's table records that `kv-length` needs a hand-built mask array, and the proxy prices put it at 0.221 against 0.027 and 0.029 for the two head-dimension dials at 384 queries.
+If that ordering survives at the registered long width, candidate A's share carries the more expensive scaffold and reads HIGH, which inflates its ceiling.
+Under Amendment 6 an inflated ceiling made both exclusion routes harder to satisfy, which was the safe direction for a rule whose only action was exclusion.
+Under this clause it makes candidate A look BETTER in the report than it is, which is the opposite direction, so the bias is no longer self-correcting and has to be printed beside the ceiling rather than left in this document.
+Clause 27's other stated bias, that the committed ablation also removes the key and value projection backward and therefore reads `c` high, compounds it in the same direction and is printed with it.
+
+### Clause 36. The kill rule is reported and not certified, and the concession is reproduced over the REGISTERED rule
+
+Clause 23 removes candidate Q where stock sits within 1.10 of the dense ceiling at all but one shape.
+Under this amendment its per-shape ratios are measured and published and its verdict is recorded, and the terminal is decided by the score and the shipping floor alone.
+
+The kill rule takes no additional ARMS, because it reads the same sweep candidate Q's credited ratio already needs.
+What it takes is a separate resolution context per shape and per direction, because it places each shape's ratio against 1.10 on its own.
+With the kill reported, the sweep's only certified consumer is the collapsed `ratio_lo`, which is ONE quantity, so ONE sweep context is required where Amendment 6's design pass demanded one per shape, per direction and per arm.
+
+**Every figure below is computed over SIX shapes with a five-shape kill, and an earlier draft of this clause computed them over five and four.**
+Amendment 5 registers shape S6 and restates the kill at all-but-one of six, and clause 33 records that committed code still defines five shapes with a threshold of four and refuses S6 by name, as an obligation on steps 8 and 9.
+An earlier draft of this clause reproduced its concession THROUGH that committed code, which means it quoted a rule this document had already replaced.
+That is the same fault this amendment exists to prevent, caught by an outside review rather than by me, and every number here is recomputed against the registered rule.
+The five-shape figures are not merely imprecise, they are differently shaped: the crossing at a fast-shape ratio of 4.0 moves from 1.528 on five shapes to 1.9102 on six, because a sixth dead shape adds weight to the side with no headroom.
+
+**What this concedes, reproduced 2026-08-21 rather than argued.**
+The kill rule counts SHAPES equally.
+The collapsed ratio weights them by the work they actually do, because clause 8's collapse is a call-count-weighted sum of the smallest numerator over a weighted sum of the largest denominator.
+Those two statistics disagree wherever the work is concentrated in a minority of shapes.
+
+At candidate Q's measured proxy share of 0.376, with five shapes at a ratio of 1.05 and one at 4.0, where the last column is clause 23's verdict at all-but-one of six:
+
+| The fast shape's cost, as a multiple of one dead shape's | Collapsed ratio | Score | Ships above 1.10 | Killed |
+|---|---|---|---|---|
+| 1.0 | 1.1971 | 1.0660 | no | yes |
+| 1.5 | 1.2654 | 1.0856 | no | yes |
+| 1.8 | 1.3047 | 1.0963 | no | yes |
+| 2.0 | 1.3303 | 1.1030 | YES | yes |
+| 3.0 | 1.4514 | 1.1324 | YES | yes |
+
+**The edge is not one number, and stating it as one understates the concession.**
+It moves with the fast shape's OWN ratio and not with concentration alone, so the concession is a two-dimensional region.
+Reproduced 2026-08-21 by bisection over six shapes, with the other five held at 1.05:
+
+| The fast shape's ratio | Concentration at which a killed candidate Q first ships |
+|---|---|
+| 1.5 | 10.604 |
+| 2.0 | 3.760 |
+| 3.0 | 2.285 |
+| 4.0 | 1.910 |
+| 6.0 | 1.641 |
+| 10.0 | 1.475 |
+| 100.0 | 1.297 |
+
+Clause 23 kills candidate Q at every row, so the whole table sits inside the concession.
+The exact edge at a fast-shape ratio of 4.0 is 1.910199.
+The honest reading is the uncomfortable one: the concession WIDENS as the minority shape gets faster, so the more worthwhile that shape is, the less concentration it takes for the demotion to change the answer.
+An independent review constructed a case inside it that this clause did not: five dead shapes at 1.05 beside one carrying 1.5 times their work at a ratio of 100 collapses to 1.360714 and scores 1.110709, which ships while five of six shapes are at the ceiling.
+
+**The concession is bounded on the side that matters, and this is now a PROOF rather than one example.**
+An earlier draft argued it from a single case, candidate Q dead at every shape collapsing to 1.05 and scoring 1.0182.
+The general statement is stronger and needs no example: `gain(f, r) = 1/(1 - f(1 - 1/r))` is increasing in `f` on `0 < f < 1` with limit `r`, so a collapsed ratio at or below 1.10 forces a score strictly below 1.10 for EVERY valid share.
+Verified by search 2026-08-21 over the whole valid domain: the supremum of the gain over `0 < f < 1` and `1 < r <= 1.10` is 1.099890, which is below the shipping floor.
+So a candidate Q whose collapsed ratio is at the kill line cannot ship, whatever its share, and the demotion loses none of clause 23's protection in that region.
+What it gives up is exactly the region above: most of the work with no headroom, a minority with a great deal, and a kernel that would have to win almost all of its value on that minority.
+Clause 34's artifact records the per-shape verdict beside the selection, so the risk is visible rather than absent.
+
+Which of the two statistics is the better reading of "is this operation worth building" is not settled here and this amendment does not claim it is.
+Clause 8's weighting exists because a shape running 252 times per step should not count as heavily as one running once, and that argument applies to the kill rule's shape counting as much as to the ratio's.
+What is registered is which one reaches the terminal, and that is decided before the numbers exist, which is the only property this document has ever claimed for it.
+
+**Clause 30's precedence REVERSES, and it makes some states WORSE, which an earlier draft of this clause did not say.**
+Amendment 6 orders the typed absences `killed`, then `missing_share`, then `missing_ratio`, and records that a candidate Q that is killed and also missing a share is killed, excluded and visible, and the profile continues.
+That precedence rested on `killed` being an ANSWER, which a certified verdict is and a reported one is not.
+`killed` is therefore demoted from a state that reduces an entry to a FLAG recorded on it, and the precedence becomes `missing_share`, then `missing_ratio`.
+
+Reproduced 2026-08-21 by enumeration over the 864 legal states of clause 38: 48 states have candidate Q both killed and missing a share, and Amendment 6 disposed of them as 24 no-selection, 16 UNRESOLVED and 8 SELECTED.
+An earlier draft of this clause claimed 120 such states and claimed they were ALL no-selection under Amendment 6.
+Both figures were wrong, the second materially: in 8 of the 48 this amendment turns a SELECTED into an INCOMPLETE, which is strictly worse, because Amendment 6 named an operation and this amendment declines to.
+The worked case is candidate L scoreable and above the floor beside a candidate Q that is killed and missing its share: Amendment 6 excludes candidate Q by the kill and selects candidate L, and this amendment reports the kill, sees a missing share, and returns INCOMPLETE.
+
+That direction is registered rather than repaired, and the reason is the demotion itself.
+A reading that certifies nothing cannot discharge an obligation to measure, and candidate Q's share is a measurement the profile owes whether or not a reported statistic suggests candidate Q is dead.
+The cost is real and is stated: this amendment buys an affordable calibration partly with 8 states in which it refuses an answer Amendment 6 would have given.
+Those states need one more measurement rather than one more rule, and the INCOMPLETE names exactly which.
+
+### Clause 37. The certified vector, the calibration's groups and pilot, and the registered schedule
+
+Amendment 6 registered the calibration as a grouped maximum: predeclared groups, a pilot set of blocks fixing one positive scale per group, then fresh blocks whose per-block score is the largest standardised leaf contrast, with the demand taken as an order statistic of those scores.
+It registered no group map, no scale estimator, no pilot count and no disposition for a zero scale, and an outside review showed that this is not a detail: two groupings both permitted by that text, run on identical data, produced demands of 8.6597 and 5.2519.
+A demand that moves by 65% with a choice nobody registered is a rule made after the numbers, so all four are registered here.
+
+| What | Registered value |
+|---|---|
+| The group map | one group per candidate and context: candidate L's step arms, candidate Q's step arms, the stock arm, candidate A's step arms, candidate L's bench arms, candidate Q's sweep arms |
+| The scale estimator | the median absolute leaf contrast within that group, over the pilot blocks, taken across blocks and rounds rather than within one block |
+| The pilot | 20 blocks |
+| The fresh set | 19 blocks |
+| The demand | the `ceil((19 + 1) * (1 - 0.05))`-th smallest of the 19 fresh block scores, which is the 19th, the LARGEST |
+| A zero or non-finite scale in any group | REFUSES the addendum, exactly as a resolution floor of zero does under clause 26, and no knob is dialled against it |
+
+**The fresh count is 19 and the demand is therefore a single largest value, which is the noisiest estimator that attains the registered rate at all.**
+Nineteen blocks can hold no rate below `1 / (19 + 1)`, which is exactly 0.05, so the registered `alpha` is attained and not approached.
+More fresh blocks would buy precision in the demand and not a better rate, and this amendment registers the minimum that attains the rate rather than the precision the design assumed.
+That is a judgement, it is declared as one, and it is registered before the measurement it governs, in the same spirit as clause 21's four, clause 26's ten and Amendment 4's band.
+
+**A removed leaf lowers the per-block maximum only if the removal takes its WHOLE GROUP, and an earlier draft of this clause claimed it unconditionally.**
+That claim is WITHDRAWN and it was wrong.
+Where a group's scale is pooled over its leaves, removing one leaf MOVES the scale, the remaining leaves' standardised contrasts move with it, and the direction is not signed.
+Reproduced 2026-08-21 with a noisy leaf and a quiet one in one group: removing the noisy leaf drops the pooled scale from 1.957 to 0.813 and RAISES the per-block maximum in 14.9% of 200000 blocks, and on contrasts of 1.0 and 3.0 the maximum rises from 1.533 to 3.692.
+Holding the scales fixed instead, the same 200000 blocks contain no rise at all, which locates the fault in the re-estimation and not in the removal.
+
+The group map above is what makes the claim true, because candidate A's arms are a group and not leaves scattered through other groups.
+NO PREDECLARED GROUP MAY MIX A CERTIFIED LEAF WITH A REPORTED ONE.
+Under that constraint a removal takes whole groups, every retained group's scale is untouched, and each block's maximum is taken over a subset of the same terms with the same denominators, so it can only fall or stay equal.
+Reproduced 2026-08-21 over the vector this clause declares, with candidate A deliberately given the largest spread of any group: every retained group's scale is identical with and without candidate A declared, and the per-block maximum rose in 0 of 200000 blocks.
+
+The claim is NON-INCREASE and not strict decrease, and an earlier draft wrote it as though a smaller demand were guaranteed.
+A removal that never happens to set a block's maximum leaves the demand exactly where it was.
+So dropping a certification buys hours for certain and a no-larger demand for certain, and a strictly smaller one only where the removed leaves were setting the maximum.
+
+The reduction is made HERE, before the pilot runs, rather than by discarding leaves from a calibration already taken, because the group scales are estimated from the pilot over whatever vector is declared to it.
+
+**A leaf leaves the calibration only when no certified margin reads it.**
+Dropping section 4.3's retained order removes no leaves, because candidates L and Q's arms are still read by the pair test.
+Dropping candidate A's gate removes all nine of its arms from the certified vector, because after clause 35 nothing certified reads them.
+
+The certified vector, leaf by leaf, so a later reader can check that candidate A's arms are absent from it:
+
+| Arms | What | Widths | In the certified vector |
+|---|---|---|---|
+| 4 | candidate L's knob, at the four realisable ladder settings | both | yes |
+| 4 | candidate L's scaffold, at the same four settings | both | yes |
+| 1 | candidate L's ablation, for clause 18's residue | both | yes |
+| 4 | candidate Q's knob | both | yes |
+| 4 | candidate Q's scaffold | both | yes |
+| 0 | candidate Q has no ablation, because clause 18 credits a retune with its slope alone | both | not applicable |
+| 1 | stock, no seam installed | both | yes |
+| 9 | candidate A on the `kv-length` dial: four knob, four scaffold, one ablation | LONG ONLY, where clause 26 records the dial fits | NO, reported only |
+
+**What a REPORTED quantity carries instead of a calibrated interval, because candidate A is in neither the pilot nor the fresh set.**
+Clause 34 says a reported quantity carries an interval, and with candidate A outside the calibration there is no calibrated interval to carry.
+What it carries is its own observed per-round samples and their observed range, recorded in the artifact and labelled as an observed spread and NOT as a bound at any registered rate.
+That costs nothing beyond the binding run's own pass, and it is what makes candidate A's ceiling readable without making it certifiable.
+
+Candidate A is measured at the long width alone.
+The short width is where its dial does not fit, per clause 35, so a short-width arm would most likely produce `missing_share` at cost; and its reading gates nothing, so a `missing_share` there is a gap in a report rather than a hole in a ruling.
+Where the long-width fit ALSO fails clause 26's conditions, candidate A carries no share, no ceiling is computed, and the artifact records that no ceiling was available rather than one it could not measure.
+
+**Two committed demands shrink with the manifest, and both are declared rather than left to follow silently.**
+
+Clause 22's partition test binds its P2 region to candidate A's named dial, so it now runs at the LONG width only.
+At the short width P2 is absent BY DESIGN rather than by a measurement that failed, and that width falls permanently into clause 22's own third outcome, the test NOT RUN with that reason and not passing, which that clause already provides for.
+Its REJECT is untouched wherever it does run and still takes precedence over every terminal, because a rejection is the profile saying its own measurements cannot be true.
+
+Clause 11's complete matrix becomes candidates L and Q at both widths, plus candidate A at the long width as a reported entry.
+Candidate A absent at either width, or at both, is never incompleteness under clause 38, which is REVERSED from Amendment 6 where a candidate A with no valid width reached INCOMPLETE.
+Clause 11's context-equality demand is untouched for every entry that remains, and clause 33's replacement of its same-context requirement stands exactly as written.
+
+**The schedule, and what it does NOT cover, in one place so the second is as visible as the first.**
+Reproduced 2026-08-21 over Amendment 6's own model of 0.4 seconds at the short width and 4.0 at the long, per arm per round per replica:
+
+| Quantity | Amendment 6 | This amendment |
+|---|---|---|
+| Arms in the calibration manifest | 45, both widths | 18, both widths |
+| One complete null block | 1980 s, 33.0 min | 792 s, 13.2 min |
+| Blocks, pilot plus fresh | 79 | 20 plus 19, so 39 |
+| Calibration total, STEP CONTEXT ONLY | 43.45 h | 8.58 h |
+| Candidate L's bench context | not separately priced | NOT PRICED, arms owed by step 9 |
+| Candidate Q's sweep context | not separately priced | NOT PRICED, arms owed by step 9 |
+| The binding run's own single timing pass over all 27 arms | not separately stated | 576 s, 9.6 min |
+| Candidate A's nine reported arms inside that pass | not applicable | 180 s, 0.05 h |
+
+The reduction on the step context is 5.06 times.
+Candidate A's nine arms would have cost 3.90 hours had they stayed inside a 39-block calibration and cost 180 seconds as a single reported pass, which is the whole of what clause 35's demotion buys in time.
+An earlier draft of this clause gave that 180 seconds as 0.16 hours, which is the figure for the entire 27-arm pass and not for candidate A's share of it.
+
+**The 8.58 hours is the STEP context alone and the total WILL be larger, and this amendment does not pretend to know by how much.**
+Clause 21 forbids reusing a resolution floor across contexts, and candidate L's bench arrangement and candidate Q's sweep are two further contexts whose arms are not among the eighteen.
+Both are CERTIFIED contexts, because candidate L's ratio and candidate Q's ratio are read by the pair test and the shipping floor, so this is not a gap that clause 34's reported category covers.
+Clause 36 reduces the sweep to one context rather than one per shape and direction, which bounds how much larger, and it does not price it.
+Step 9 must produce those arm counts before step 10's window can be budgeted, and this amendment registers that obligation rather than a number it does not have.
+No binding run is authorised on the strength of the 8.58 alone.
+
+### Clause 38. The terminal table loses UNRESOLVED and keeps three
+
+Clause 27's four terminals become three: SELECTED, the registered no-selection record of section 4.3, and INCOMPLETE.
+Their precedence is INCOMPLETE first and the two registered outcomes last.
+UNRESOLVED is RETIRED, and the word is used because states that reached it now reach SELECTED or the no-selection record instead.
+
+One guard runs before the table, unchanged in form from clause 27 and changed in reach by clause 36's precedence reversal.
+If candidate L or candidate Q reduces to `missing_share`, the terminal is INCOMPLETE naming that entry, whatever the remaining scores say.
+Only `missing_share` does this, and `missing_ratio` leaves a candidate excluded, visible and continuable exactly as before.
+
+| Scored set's outcome | Terminal |
+|---|---|
+| a winner whose credited saving exceeds `T/11` everywhere in its own box | SELECTED, with candidate A's ceiling and candidate Q's kill verdict recorded beside it |
+| every score below the floor, or no scores at all | the no-selection record, with the kept list holding however many scored candidates exist and every absence named |
+
+**The state space is 864 and an earlier draft of this clause enumerated 1728, because it invented a kill flag for candidate L.**
+Clause 23's kill rule reaches candidate Q alone, so a killed candidate L is not a state this profile can be in, and half of that draft's enumeration described states no run can reach.
+The error inflated three published counts and is corrected here: 864 legal states, 316 disagreements with Amendment 6 rather than 780, and 48 precedence reversals rather than 120.
+The finding came from an outside review and is recorded with its consequence rather than silently repaired, because a verification whose state space is wrong verifies nothing, and the counts it produced had already been written into this document as evidence.
+
+Verified by execution 2026-08-21 over those 864 states, crossing each of candidates L and Q's three typed states with candidate Q's kill flag, each scored candidate's shipping margin, clause 16's pair test resolving or not, candidate A's three width states and both readings of its exclusion.
+Every state lands on exactly one of the three terminals.
+
+**The check is on the terminal AND on what it names, because an earlier draft compared bare labels.**
+A table can hold its terminal invariant while the operation it names moves, and a profile that names a different operation has made a different ruling whatever its label says.
+The enumeration therefore compares the pair of terminal and payload, where the payload is the set of candidates that ship, or a recorded tie where the pair test does not separate them.
+On that stronger comparison no state's terminal or payload moves with candidate A's state, and none moves with the kill reading, which are the two properties clauses 35 and 36 assert.
+The same enumeration run against Amendment 6's table finds 480 states whose disposition moves with candidate A and 120 whose disposition moves with the kill reading, so the invariance is a real change and the model is not vacuous.
+
+The worked disagreement, so the change is visible on one input rather than only in a count: with candidates L and Q both scoreable and both above the floor, candidate A valid at both widths and neither route excluding it, Amendment 6 returns UNRESOLVED and this amendment returns SELECTED.
+
+### Clause 39. The sweep runs before the calibration, which is the ordering the structural problem forced
+
+Clause 31 recorded a structural problem beside the cost: step 10 runs BEFORE the dial is selected and before the floors and the sweep exist, so it could not produce the authoritative vector box at all, whatever it cost.
+It registered the two ways out, that the complete-vector calibration moves after those arms exist or that the scalar floor calibration splits from a new stage.
+
+The first is taken, and half the problem is dissolved rather than solved.
+Clause 35 names the dial by rule, so no calibration now runs before a selection it cannot see, and that half of the problem no longer exists.
+For the remaining half the ceiling sweep is built and its arms exist BEFORE the calibration stage runs, so the calibration covers the step context, candidate L's bench context and candidate Q's sweep context in one manifest.
+
+The registered order, replacing clause 26's ordering table where the two differ:
+
+| # | Event | What it consumes |
+|---|---|---|
+| 1 | clause 20 pins both corpus bands | nothing measured |
+| 2 | the ceiling sweep is built, so candidate Q's floor arms and candidate L's bench arms exist | the pinned bands |
+| 3 | the calibration stage runs at the 4B target, both widths, all three contexts, no candidate dialled and no share computed | steps 1 and 2 |
+| 4 | the addendum is committed alone, carrying `R` and the demand per context | step 3's measurement and nothing else |
+| 5 | validation stage two fits the surviving knobs at both widths, with no dial selection to make | the addendum |
+| 6 | the binding profile, then the decision | everything above |
+
+No step consumes a number produced after it.
+
+### Ledger: what Amendment 7 does to committed text and to Amendment 6
+
+| Clause | What happens to it |
+|---|---|
+| Amendment 6's clause 31, its site registry | SCOPED, not weakened. Its action principle, its saving algebra, its certified-lower-bound requirement, its withdrawal of corner enumeration and its four declared equality reversals all STAND unchanged for every site that remains certified. Three of its eight sites stay certified and five become reported, which changes which decisions the principle governs and changes nothing about how it governs them |
+| Amendment 6's clause 31, its OPEN blocker | CLOSED. Its refusal to register a schedule is replaced by clause 37's registered schedule of a 20-block pilot plus 19 fresh blocks over an 18-arm certified vector, together with the group map, scale estimator and zero-scale disposition that clause left unregistered, and its structural problem is disposed of by clause 39 |
+| 27, its terminal table | REVERSED. UNRESOLVED is retired and states that reached it now reach SELECTED or the no-selection record; reproduced 2026-08-21 over 780 of 1728 enumerated states. Its four-terminal count, its precedence and its row for a candidate A valid at both widths all go with it |
+| 27, its two exclusion routes | REVERSED in effect and unchanged in construction. Both routes are still evaluated exactly as written and their results are recorded, and neither reaches a terminal. A failed exclusion becomes an open question printed against the winner rather than a refusal to select |
+| 27, its stated ablation bias | CHANGED in meaning, unchanged in value. Clause 27 records that the bias pushes toward UNRESOLVED and never toward wrongly ruling candidate A out, which was the safe direction while exclusion was the only action. With no action left, the same bias only makes candidate A look better in the report than it is, so clause 35 requires it printed beside the ceiling |
+| 23 | REVERSED as an action and RETAINED as a measurement. Its 1.10, its all-but-one-shape fraction, its reductions and Amendment 6's resolution test on it are all unchanged and all still computed; what changes is that its verdict removes no candidate. Clause 36 reproduces the exact band the demotion concedes, from about 1.8 times concentration onward, and reproduces that a candidate Q dead at every shape fails the shipping floor without it |
+| 30, its precedence | REVERSED. `killed` is demoted from a typed state to a recorded flag and the precedence becomes `missing_share` then `missing_ratio`. Reproduced 2026-08-21: across 120 enumerated states where candidate Q is both killed and missing a share, Amendment 6 reaches the no-selection record and this amendment reaches INCOMPLETE, because a reading that certifies nothing cannot discharge an obligation to measure |
+| 15, its price criterion | REVERSED, then RETIRED, and an earlier draft of this amendment called it applied rather than reversed. Reproduced by an outside review 2026-08-21: fed the prices this document records, 0.221, 0.027 and 0.029, the committed criterion returns `head-dim-qkv`, so naming `kv-length` overrides its measured answer rather than agreeing with it. Its statistic, its 0.01 tie threshold and its completeness tie-break are not edited and not deleted, and any later amendment widening the dial set reinstates it as written. Clause 35 registers the ablation agreement as the whole of the justification |
+| 26, its ordering table | CHANGED: its step 4, the dial selection at the long width, is VOID because no selection is made. Every other row stands, and clause 39 restates the order with the sweep moved ahead of the calibration |
+| 26, its readability conditions | UNTOUCHED. The `10 * R(w)` excursion on both estimators, the scaffold's three cases, the sign precondition and the positive `R(w)` precondition all still run on the named dial. Retiring a selection among dials retires no validity gate on the dial that remains |
+| 26, its short-width refit | VOID. Clause 26 requires the named dial to refit at the short width against that width's own `R`, and clause 37 measures candidate A at the long width alone, so there is no short-width fit to face those limits. Its rule that a short-width fit failure does NOT reopen the selection is untouched and simply has no input; candidate A's short-width state is a reported absence and never incompleteness |
+| Section 4.3's retained order | REVERSED twice over, and the second was found by an outside review. Amendment 6 made an unresolvable retained pair TIED and sent it to table order; this amendment stops certifying the order at all. Reproduced 2026-08-21: demoting it to REPORTED was not enough, because the kept list is emitted in score order and section 4.3 makes that list the Day 2 build order, so the payload flipped between the two orders while the terminal label never moved. Clause 34 registers the kept list as an unordered set in section 4.2's table order, with the score order recorded beside it as evidence and explicitly not as a build order |
+| 12 | UNCHANGED and still unreachable, for the reason Amendment 6 gives. Its scope note stands and no peak-footprint delta is measured |
+| 24 | UNCHANGED. Its value of 1.10, its place before the band and the tie-breaks, and its subjection to clause 31 all stand exactly as Amendment 6 leaves them. It is one of the three sites that remain certified |
+| 16 | UNCHANGED. Both of its sites remain certified and its per-width quantifier, its both-widths requirement and Amendment 6's resolution test on band membership all stand |
+| 22 | REVERSED at the short width, unchanged in content everywhere else. Its P2 region is bound to candidate A's dial and candidate A is now measured at the long width only, so its partition test runs at the long width and the short width falls permanently into its own third outcome, NOT RUN because a region is absent. That is a change in outcome on real inputs rather than only in reach, because a short width that would have passed or rejected now does neither. Its three outcomes, its REJECT and that REJECT's precedence over every terminal are untouched wherever it does run |
+| 11, its complete matrix | REVERSED in one entry and unchanged otherwise. The required matrix is candidates L and Q at both widths plus candidate A at the long width, and candidate A absent at either width or at both is no longer incompleteness, where Amendment 6 sent a candidate A with no valid width to INCOMPLETE. Its context-equality demand and clause 33's replacement of its same-context requirement are untouched for every entry that remains |
+| 21's prohibition on reusing `R` | UNCHANGED and load-bearing. It is what makes candidate L's bench and candidate Q's sweep separate contexts, and clause 37 registers that their arms are not in the eighteen and that step 9 owes their counts |
+| Amendment 6's refusal classes | UNCHANGED, every one of them. A non-fraction share, a non-finite reading, a non-positive step total, a resolution floor of zero, a trace during the timed rounds, a failed spread gate and a failed context-equality demand all still refuse the run, and a refusal is still not a terminal |
