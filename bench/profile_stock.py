@@ -1096,6 +1096,14 @@ def _structural_pass(model, batch) -> dict:
             name for name in plain_grad
             if not bool(mx.array_equal(plain_grad[name], marked_grad[name]))),
         "counts": pi.counts(recorder.entries),
+        # Clause 8's shape ratio is a sum over directions of `calls * cost per
+        # call`, "with the call counts supplied by the structural pass of
+        # clause 3", and this is that supply. Per shape AND per direction,
+        # because under LoRA the two genuinely differ: the three projections
+        # consuming the lowest adapted block's input have no backward at all.
+        "shape_counts": {region: {shape: dict(directions)
+                                  for shape, directions in sorted(shapes.items())}
+                         for region, shapes in sorted(recorder.shapes.items())},
         "foreign_on_removal": list(installation.foreign_on_removal),
         # Amendment 10 clause 45's floor holds one dense weight per SHAPE, so
         # it covers whatever shapes this model runs. Clause 23's kill prices
