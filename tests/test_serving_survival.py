@@ -16,6 +16,7 @@ import os
 import struct
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -42,6 +43,7 @@ from calibrate_quant_serving import (
     refuse,
     require_available_memory,
 )
+from memory_guard import subprocess as mg_subprocess
 from machine_state import MEASUREMENT_LOCK_PATH, MeasurementLock
 
 BENCH_DIR = Path(__file__).resolve().parents[1] / "bench"
@@ -893,6 +895,74 @@ def test_low_available_memory_refuses_before_the_large_cell():
 
 def test_ample_available_memory_passes():
     assert require_available_memory(24.0, "cell", reader=lambda: 30.0) == 30.0
+
+
+# A machine holding almost everything: 1 GiB of genuinely free pages beside
+# 30 GiB of active anonymous memory. kern.memorystatus_level reads a PRESSURE
+# percentage here and stays high, which is the fault below.
+_BUSY_VM_STAT = """Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                    65536.
+Pages active:                                1966080.
+Pages inactive:                               393216.
+Pages speculative:                             32768.
+Pages throttled:                                   0.
+Pages wired down:                             196608.
+Pages purgeable:                                6553.
+"Translation faults":                      988754640.
+"""
+
+
+def _vm_stat_returning(body):
+    def run(argv, **kwargs):
+        assert argv == ["vm_stat"]
+        return types.SimpleNamespace(stdout=body, returncode=0)
+    return run
+
+
+def test_availability_counts_only_memory_obtainable_without_eviction(monkeypatch):
+    """free + purgeable + speculative, and NOT inactive.
+
+    Inactive pages are reclaimable, so counting them would make the gate
+    report room that only exists after the compression this gate exists to
+    stay out of. 65536 + 6553 + 32768 pages at 16384 bytes is 1.71 GB;
+    including the 393216 inactive pages would read 8.15 GB instead.
+    """
+    monkeypatch.setattr(mg_subprocess, "run", _vm_stat_returning(_BUSY_VM_STAT))
+    assert available_memory_gb() == pytest.approx(
+        (65536 + 6553 + 32768) * 16384 / 1e9)
+
+
+def test_a_nearly_full_machine_no_longer_reads_as_nearly_empty(monkeypatch):
+    """The regression that let a doomed run start.
+
+    Until 2026-08-22 this gate read kern.memorystatus_level, whose 92 on a
+    loaded 38.65 GB machine reported 35.56 GB available, so a 26 GB budget
+    could not be refused and the profile's marked structural pass was waved
+    into a Metal out-of-memory. On the same machine state the gate must now
+    read a small number and REFUSE that budget.
+    """
+    monkeypatch.setattr(mg_subprocess, "run", _vm_stat_returning(_BUSY_VM_STAT))
+    available = available_memory_gb()
+    assert available < 0.1 * machine_ram_gb()
+    with pytest.raises(LowMemoryRefusal):
+        require_available_memory(23.8, "B short", reader=available_memory_gb)
+
+
+@pytest.mark.parametrize("missing", ["Pages free", "Pages purgeable",
+                                     "Pages speculative", "page size"])
+def test_an_unparsable_sampler_raises_rather_than_inventing_a_number(
+        monkeypatch, missing):
+    """Neither silent direction is honest.
+
+    Reporting zero refuses every run for a reason that is not true; reporting
+    the machine's whole RAM is the fault being fixed. A sampler that cannot
+    read its own source says so.
+    """
+    body = "\n".join(line for line in _BUSY_VM_STAT.splitlines()
+                      if missing not in line)
+    monkeypatch.setattr(mg_subprocess, "run", _vm_stat_returning(body))
+    with pytest.raises(RuntimeError, match="vm_stat"):
+        available_memory_gb()
 
 
 # ---------------------------------------------------------------------------

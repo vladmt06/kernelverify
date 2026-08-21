@@ -29,6 +29,7 @@ import ctypes
 import functools
 import math
 import os
+import re
 import subprocess
 
 # Exit codes. 0 = attested, 1 = measured-and-stopped. Everything else is a
@@ -66,10 +67,9 @@ def machine_ram_gb() -> float:
     Cached: hw.memsize cannot change while this process lives, and the
     available-memory gate calls it on every check - once per cell in the
     serving grid and once per arm in the A/B - so an uncached read spawns a
-    subprocess inside the loop the budget exists to protect. The Jetsam meter
-    itself (kern.memorystatus_level) is deliberately NOT cached: that one
-    moves, and reading a stale copy is how a doomed allocation gets waved
-    through.
+    subprocess inside the loop the budget exists to protect. The availability
+    sample itself (vm_stat) is deliberately NOT cached: that one moves, and
+    reading a stale copy is how a doomed allocation gets waved through.
     """
     out = subprocess.run(["sysctl", "-n", "hw.memsize"],
                          capture_output=True, text=True)
@@ -197,17 +197,47 @@ class LowMemoryRefusal(RuntimeError):
         self.needed_gb = needed_gb
 
 
-def available_memory_gb() -> float:
-    """Machine-wide available memory in decimal GB.
+# What a new allocation can take without evicting anything that costs: pages
+# that are free, pages the kernel drops on demand, and read-ahead pages nobody
+# asked for. Inactive pages are deliberately NOT counted even though macOS will
+# reclaim them, because they include dirty anonymous pages and reclaiming those
+# IS the compression this gate exists to stay out of.
+_AVAILABLE_PAGE_KINDS = ("Pages free", "Pages purgeable", "Pages speculative")
 
-    kern.memorystatus_level is the memorystatus (Jetsam) subsystem's own
-    percentage of available memory - the same authority that killed the three
-    runs - so the refusal reads the exact meter the killer reads. Same
-    refusal-gate idiom as bench/machine_state.py: sample, refuse, name why.
+
+def available_memory_gb() -> float:
+    """Machine-wide available memory in decimal GB, read from vm_stat.
+
+    NOT kern.memorystatus_level, which this gate read until 2026-08-22 and
+    which cannot refuse. That sysctl is the memorystatus (Jetsam) subsystem's
+    PRESSURE percentage, and pressure sits near 100 until the machine is
+    already in trouble. Measured here while a marked structural pass exhausted
+    the GPU: the meter read 92, so the gate reported 35.56 GB of 38.65
+    available and waved the run through, and for a 26 GB budget to have been
+    refused it would have had to fall under 62 - deep inside the range where
+    Jetsam is killing processes rather than a range a run can be warned out
+    of. Reading the killer's own meter was the intent, and the number it picked
+    says how close the killer is to acting, not how much room a run can have.
+
+    A sampler that cannot parse vm_stat RAISES. Returning zero would refuse
+    every run for a reason that is not true, and returning the machine's whole
+    RAM is the fault being fixed here, so neither silent direction is honest.
     """
-    out = subprocess.run(["sysctl", "-n", "kern.memorystatus_level"],
-                         capture_output=True, text=True)
-    return int(out.stdout.strip()) / 100.0 * machine_ram_gb()
+    out = subprocess.run(["vm_stat"], capture_output=True, text=True)
+    page = re.search(r"page size of (\d+) bytes", out.stdout)
+    if page is None:
+        raise RuntimeError(
+            f"vm_stat named no page size, so no counter can be sized: "
+            f"{out.stdout[:200]!r}")
+    pages = 0
+    for kind in _AVAILABLE_PAGE_KINDS:
+        found = re.search(rf"^{kind}: +(\d+)\.", out.stdout, re.M)
+        if found is None:
+            raise RuntimeError(
+                f"vm_stat reported no {kind!r}, so availability is unknown "
+                f"rather than low: {out.stdout[:200]!r}")
+        pages += int(found.group(1))
+    return pages * int(page.group(1)) / 1e9
 
 
 def require_available_memory(needed_gb: float, cell: str,
