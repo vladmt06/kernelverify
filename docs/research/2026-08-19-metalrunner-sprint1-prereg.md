@@ -865,3 +865,672 @@ Section 3.2's 2048, its M values, and section 10's scope sentence all move under
 
 One measured number: the resolution floor `R`, from which the scaffold offset limit and clause 16's tie-band demand both take their scale.
 It lands in an addendum committed alone, after the instrument-only stage and before any knob is dialled, and nothing else enters that addendum.
+
+
+---
+
+## Amendment 6, 2026-08-20: the dial selection binds at the long width, and candidate A is judged by a ceiling rather than a ratio
+
+Amendment 5 registered three attention dials, a criterion to pick among them, and a rule putting every floor inside the real step.
+Building the three dials showed that the criterion admits two answers depending on a width it does not register, and that the floor rule cannot be applied to candidate A at all.
+An earlier draft of this amendment answered the second gap with a bench exception for candidate A's floor.
+That draft was reviewed twice by an independent model, blocked twice, and is REPLACED by this text rather than patched; clause 29 records what it got wrong and why, because the record of a rejected design is part of the pre-registration's evidence.
+
+This amendment is written AFTER the measurements that exposed both gaps.
+That is the weakest thing about it and it is stated first rather than buried.
+What it costs is controlled in two ways: every ruling below is made on a mechanism that was registered before the numbers, and every clause that reverses committed text says so in the word "reverses" rather than in the word "extends".
+The 0.6B numbers quoted here are cited as evidence that a gap exists, and none of them is an input to any rule.
+
+### What clause 21's ordering actually binds
+
+Clause 21 says the resolution floor `R` lands in an addendum committed "before any knob is dialled".
+Read literally that forbids the proxy smokes this plan's own sequencing puts before the instrument-only stage, and those smokes have already run: the tables below were measured on 2026-08-20 at the 0.6B proxy with no addendum in existence.
+
+That is an inconsistency inside Amendment 5 rather than a licence taken against it, and it is resolved in the direction the sequencing already assumed.
+Clause 21's ordering binds the RECORDED profile and the two validation stages at the 4B target.
+It does not bind smokes at the 0.6B proxy, which compute no credited share, enter no recording, and cannot be cited as an input to any rule.
+Every 0.6B number in this document is one of those, and is labelled as such wherever it appears.
+
+### What clause 15 asked for, and why it admits two answers
+
+Clause 15 picks candidate A's dial by the smallest fitted scaffold slope expressed as a fraction of that dial's own knob slope.
+It registers no width at which that statistic is evaluated, and the statistic is not stable across width.
+
+Proxy smoke, 0.6B, batch 2, five rounds, three warm-ups, compiled, twenty-eight arms interleaved inside one set of rounds:
+
+| Queries | kv-length | head-dim-qkv | head-dim-qk | Named by the criterion |
+|---|---|---|---|---|
+| 96 | 0.101 | 0.937 | 0.440 | kv-length, on price |
+| 384 | 0.221 | 0.027 | 0.029 | head-dim-qkv, tied with head-dim-qk and broken by rank |
+
+The dial is not a presentation choice, because it sets candidate A's share: at 384 queries the length dial reads 0.060 and both head-dimension dials read 0.023, against an unmarked ablation of 0.068 in the same rounds.
+
+Two separate things are wrong and only one is about width.
+
+The criterion rewards a scaffold that does not move, and a dial that moves less of attention has less scaffold to move, so cleanliness and completeness pull against each other and only the tie-break knows it.
+That is a property of the registered statistic and this amendment does not change it.
+
+And at both widths tried, every scaffold slope sits inside the machine's own jitter, so the ratio being compared has noise in its numerator.
+Clause 6's gate cannot see that, because it tests the fit's shape and not its size: a perfectly straight line whose whole excursion is smaller than the machine resolves passes every limit clause 21 sets.
+The mechanism behind the small excursion is geometric and was registered long before these numbers: attention's score matrix is quadratic in the sequence length and every other region of the step is linear, so attention is a few percent of a short step and roughly a fifth of a long one.
+
+### Clause 26. The dial selection is made once, at the deciding cell's long width, after `R` exists, and only on readable prices
+
+Clause 15's criterion is evaluated ONCE, at the 4B deciding cell, at the LONG width registered by clauses 14 and 20, inside validation stage two, and the dial it names is candidate A's dial at BOTH widths.
+The share is refitted per width and each refit must pass clause 21's limits and clause 11's gates at its own width; the long-width fit is never reused as the short width's share.
+One dial for both widths rather than one per width, because clause 14 selects by the worse of two gains, and a candidate measured by two different dials has two shares that are not comparable.
+
+The earlier draft evaluated the criterion at the 0.6B proxy, and the review that blocked it was right that no `R` exists there: clause 21's statistics table registers `R` per cell and per width, and a 0.6B batch-2 proxy is not a registered cell.
+Moving the selection to the deciding cell removes the gap instead of registering a new `R` context for it.
+The order is therefore writable, and it is this one:
+
+| # | Event | What it consumes |
+|---|---|---|
+| 1 | Clause 20 pins both corpus bands | nothing measured |
+| 2 | The instrument-only stage runs at the 4B target, both widths | the pinned bands |
+| 3 | The `R` addendum is committed alone | step 2's measurement, nothing else |
+| 4 | Validation stage two fits all three attention dials at the deciding cell's long width, and this clause names the dial | the long width's own `R`, from the addendum |
+| 5 | The named dial refits at the short width, and both refits face clause 21 and clause 11 | the short width's own `R` |
+| 6 | The binding profile, then the decision | everything above |
+
+No step consumes a number produced after it, and `R` never depends on any dial, so the circularity the review asked about does not exist in this ordering.
+A selection taken before clause 20 pins both bands is NON-BINDING and is recorded as such, because the long width is a property of a band that clause 20 pins and not a number a harness may pass in.
+
+A price is READABLE only when both of its terms are measurements rather than noise, and clause 6 does not establish that.
+Two conditions are added here:
+
+| Condition | Rule |
+|---|---|
+| The knob's excursion | `abs(slope) * span >= 10 * R(w)`, for the pooled slope AND for the median of the per-round slopes, both; a dial failing either is not eligible at that width, whatever its price |
+| The scaffold's readability | three-way, below |
+
+`span` is the distance between the highest and lowest ACTUAL realisable `phi` values of clause 1's ladder, the same values that enter the fit.
+
+**The scaffold is read in three cases and not two, because a fitted slope is a trend and not a movement.**
+This AMENDS clause 5, whose text defines the scaffold slope as "the fitted slope of a scaffold-only arm" with no other case, and the ledger row for clause 5 records it.
+An earlier version of this clause clamped a scaffold to zero when its fitted excursion was below `R` and recorded the fitted slope otherwise, and that leaves a scaffold that moves without fitting recorded as still.
+Reproduced 2026-08-20: scaffold times of 100, 110, 110, 100 across the ladder fit a slope of exactly zero with zero offset while the arm actually moved by 10, so its price is zero under either of those two cases and no committed limit objects.
+
+| Case | Rule |
+|---|---|
+| Observed range below `R(w)` | the scaffold did not move by as much as the machine resolves, so its slope is recorded as ZERO |
+| Observed range at or above `R(w)` AND `abs(slope) * span >= R(w)` AND the scaffold's own pooled fit clears clause 6's two SHAPE limits, the coefficient-of-determination floor and the residual limit | the scaffold moved and the fitted line describes that movement, so the fitted slope stands |
+| Observed range at or above `R(w)` and NEITHER of the other two conditions holds | the scaffold moved by more than the machine resolves and the line does NOT describe it, so its price cannot be read and the dial is NOT ELIGIBLE at that width |
+
+The second case demands clause 6's two SHAPE limits on the SCAFFOLD's own fit, not only a resolvable excursion, because a resolvable excursion is not evidence that the line describes anything.
+It demands the shape limits and NOT the whole of clause 6, deliberately: clause 6's gate also rejects a slope of negative sign, and this amendment has already registered that a scaffold slope may legitimately be of either sign because clause 21 treats it in absolute value.
+Invoking the gate wholesale would refuse an ordinary arm that gets cheaper as the dial shrinks, which is the opposite of what this case is guarding against.
+Reproduced 2026-08-20: scaffold medians of 100, 130, 110 and 105.5 at `R = 1` have a range of 30 and a fitted excursion of 1.05, which clears `R`, while the fit's coefficient of determination is 0.0012 and its largest residual is over eighteen times `R`; without the gate that arm keeps a fitted slope, prices at 0.035, and can win clause 15's criterion outright.
+The third case is the one the earlier version lost, and it is a refusal rather than a number because there is no honest number to record: the arm demonstrably moved and the only statistic on offer does not describe the movement.
+The three cases are exhaustive at every boundary, including a range exactly equal to `R(w)` and a fitted excursion exactly equal to it, because the first case takes strictly below and the other two take at-or-above.
+The RANGE is taken over the arm medians, the same reduction the pooled fit uses, and not over the raw per-round samples; the two disagree, and four arm medians all equal to 100 can sit on rounds spanning 99 to 101, giving a range of 0 against a range of 2.
+
+Two PRECONDITIONS are evaluated before either of those two, both closing a hole a review reproduced rather than argued.
+
+The registered SIGN rule stands and is evaluated FIRST, and it is about the KNOB's slope alone.
+Clause 21's statistics table already rejects a candidate's reading on a non-positive slope, and an excursion condition written on the absolute value cannot see the sign, so a dial whose registered slope is negative would clear `10R` and be admitted by a rule that committed text rejects.
+Reproduced 2026-08-20: per-round slopes of -60, -20, -20, 52 and 20 give a registered median of -20 and a pooled slope of -20, and at `R = 1` both absolute excursions are 15 against a limit of 10.
+So a non-positive pooled or median KNOB slope rejects the reading before either excursion condition is evaluated, and the absolute values in the conditions are about MAGNITUDE only, never about admitting a sign the committed text already refused.
+A negative knob slope means the step got slower as the operation got smaller, which is not a dial whatever its size.
+A SCAFFOLD slope carries no such rule and may be of either sign: clause 21 already limits it by absolute value, so a scaffold that gets cheaper as the dial shrinks is an ordinary arm and rejecting it would refuse a reading committed text accepts.
+
+`R(w)` must be POSITIVE.
+An `R` of zero would make every positive slope clear `10R` and every strict excess clear clause 16's `2R`, so a harness reporting a resolution floor of zero is claiming it can resolve any difference at all, which is never true of a machine.
+An `R` measured at zero at any width REFUSES the addendum, and no knob is dialled against it.
+Whether this machine can produce a median `R` of exactly zero is a device question nobody has answered, so the refusal is registered rather than assumed unnecessary.
+
+Three scope questions decide what these conditions actually do, and all three are answered here rather than left to a reading.
+
+WHICH ESTIMATOR: both.
+Amendment 5 gates the pooled fit and reports the median of the per-round slopes as `b`, and those two can disagree, so a condition on one certifies a number the rule does not consume.
+Reproduced by execution on 2026-08-20: five exact per-round lines whose arm medians are collinear give a pooled slope of 20 and a median slope of 0.05, so at `R = 0.5` the pooled excursion clears `10R` while the median excursion is below `R`, and the share built from the median then excludes candidate A by route 1 where the pooled share would not have.
+Requiring BOTH to clear `10R` closes that gap without changing which estimator feeds `f`, which stays the median exactly as clause 21's statistics table registers.
+
+WHICH WIDTH: each, against its own `R(w)`, because `R` is registered per width and a condition evaluated at one width says nothing about the other.
+Clause 26's SELECTION reads the long width's evaluation, and clause 27's validity reads each width's own.
+
+WHICH KNOBS: the clamp applies to every scaffold slope wherever one is read, not to candidate A's dials alone, and that CHANGES clause 21's scaffold-slope limit rather than sitting beside it.
+Clause 21 limits the scaffold slope to one tenth of the knob's slope, and that limit exists to catch a scaffold whose own cost moves with the dial and therefore enters the knob's slope; a scaffold whose entire excursion across the ladder is below what the machine resolves cannot be moving the knob's slope by a resolvable amount, so the limit would be guarding against something that is not there.
+The consequence is registered rather than discovered: where a scaffold's excursion is under `R`, clause 21's scaffold-slope limit is satisfied by the clamp and is not binding, and the profile records that it was clamped rather than measured.
+
+The clamp EXTENDS clause 18's registered convention to a new quantity rather than inventing a second treatment of the same situation.
+Committed clause 18 records a RESIDUE below the resolution floor as zero and says nothing about any other number, so this is an extension of that convention's reach to a scaffold slope and not an appeal to a general rule committed text does not contain.
+Its consequence is registered in advance: two dials whose scaffolds are both clamped to zero have equal prices, they tie, and clause 15's tie-break sends the tie to the higher completeness rank.
+Applied to the proxy smoke above, where every scaffold slope sat inside jitter, the clamp would have zeroed every price and named kv-length by completeness at BOTH widths, so the instability in the table is what the clamp exists to remove; that is evidence the condition does work, and it is evidence rather than an input.
+
+The multiplier 10 is a judgement, declared as a judgement, registered before the measurement it multiplies, in the same spirit as clause 21's four and Amendment 4's band.
+
+The criterion applies only to dials that satisfy both conditions AND pass clause 6's linearity gate at the long width.
+If no dial does, the criterion names no dial and candidate A has no knob and therefore no share at either width.
+That is the registered falsifier of this clause's own premise: the claim that the long width resolves what the short one does not is a prediction, and this is what happens when the prediction is wrong.
+
+If the named dial then fails a FIT LIMIT at the SHORT width only, the selection is not reopened and no second dial is tried, because a dial chosen for passing where another failed is a dial chosen by the answer.
+Candidate A's short-width share is then `missing_share` at that width under clause 30, and clause 27 says what its ceiling can still decide with one width.
+
+"Fit limit" is exactly clause 21's four limits plus this clause's two excursion conditions, and nothing else.
+A trace during a timed round or a round refused by the spread gate is NOT a fit limit: clause 25 says a trace during timing is always a fault whatever caused it, and a refused round means the machine, not the dial, so both still refuse the run as they always did.
+That distinction is the whole of the exception: a fit limit says this dial cannot measure this width, and the other two say this RUN cannot be believed.
+
+Both of those outcomes need clause 11's pass condition to move, and this REVERSES it in part.
+Clause 11 passes validation when "every knob's pooled fit clears clause 21's four limits at both widths", which would fail the whole validation on exactly the two continuations this clause registers, and a failed validation blocks the binding profile, so the registered terminals below would be unreachable.
+The pass condition is now, in four parts:
+
+| Fit | Must clear the fit limits at |
+|---|---|
+| The SHARE fits of candidates L and Q, and of the partition regions P1 and P3 | both widths |
+| The SHARE fit of candidate A's dial, where clause 26 names one | the long width |
+| Candidate A, where clause 26 names NO dial | nothing: naming no dial is a registered outcome of clause 26 and does not fail validation |
+| The FLOOR fits of candidates L and Q, the denominators of their ratios | nothing: see below |
+
+The rows say FITS rather than candidates, because a candidate has two of them and they fail differently.
+The share fit is the numerator `b`, measured on stock; the floor fit is the denominator `d`, measured on the floor arm.
+Gating the floor fit inside validation would make a bad denominator stop the run, which contradicts clause 30's `missing_ratio` being a continuable state; leaving it ungated entirely would let an unreadable denominator be credited.
+Reproduced 2026-08-20: with `b = 20`, `d = 1e-12`, `R = 1` and `span = 0.75`, the stock excursion is 15 and the floor excursion is `7.5e-13`, and the resulting ratio is `2e13` with a gain of 1.2499999999999842, which reads as a candidate that eliminates its operation entirely.
+
+So the floor fit is gated OUTSIDE validation, by the same conditions and with the same consequence as any other unreadable measurement: a floor fit that fails clause 21's limits, or whose excursion is below `10 * R(w)` by either estimator, or whose slope is non-positive, yields NO credited ratio for that candidate at that width, typed `missing_ratio` under clause 30, and the run continues.
+
+**The condition reaches the PER-ROUND reduction too, because that is what clause 9 actually credits.**
+Clause 9 takes the smallest per-round numerator over the largest per-round denominator, so the credited ratio is decided by individual rounds and not by the pooled or median statistics the conditions above test.
+Reproduced 2026-08-20: per-round slopes of `1e-12`, 20, 20, 20 and 20 give a median and a pooled slope of 20, clearing both excursions and every fit limit, while clause 9 credits the `1e-12` round and returns a ratio of `5.46e-14`; replacing that round with -1 returns a NEGATIVE ratio, which no clause registers a meaning for at all.
+
+The condition is written on the CREDITED quantities and not on the raw slopes, because those are different numbers and only one of them reaches the rule.
+Clause 18 credits `A = b + c` for a rewrite and `A = b` for a retune, with the residue POOLED rather than per-round, so a round's credited numerator is its own slope plus one shared residue.
+Reproduced 2026-08-20: with per-round slopes of `1e-12`, 40, 40, 40, 40 and a pooled residue of 40, the credited minimum numerator is 40 and the reading is perfectly ordinary, so a condition written on the raw slope would refuse a measurement the rule can read.
+So the registered condition is: the smallest per-round credited NUMERATOR and the largest per-round credited DENOMINATOR that clause 9 reduces must each be positive and satisfy `value * span >= 10 * R(w)`, in the same excursion form the conditions above use and never in a bare comparison against `10 * R(w)`, which is a different test.
+A reduction that does not yields no credited ratio for that candidate at that width, typed `missing_ratio`, rather than a number driven by the one round the machine could not resolve.
+**Candidate L's bench gets its own registered `R`, because without one two of its limits cannot run at all.**
+An earlier version of this clause gated candidate L's bench floor on "clause 21's limits and the sign rule only", and that is not a weaker gate, it is a broken one: clause 21's scaffold-OFFSET limit is `3R` and this clause's excursion condition is `10R`, so both silently vanish where no `R` exists, leaving only the scale-free limits.
+Reproduced 2026-08-20: on the bench, `b = 20` with `d = 1e-12` and `span = 0.75` clears every remaining scale-free limit and the sign rule, and credits a ratio of `2e13`.
+
+`R_bench(w)` is measured by the same identical-arms construction clause 21 registers, on the bench arrangement candidate L's floor actually uses, by the instrument-only stage of step 10, and it lands in the same addendum as the two step widths' own values.
+It is keyed PER CELL AND PER WIDTH exactly as clause 21 keys `R`, and for the same reason: the bench arrangement differs between the two widths, so one value cannot serve both.
+Reproduced 2026-08-20: at `d = 4` and `span = 0.75` a short-bench floor of 0.20 clears `3 >= 2` while a long-bench floor of 0.50 refuses at `3 < 5`, so borrowing the short width's value turns candidate L from absent into scoreable.
+It is a THIRD registered CONTEXT beside the two step widths, named here before it exists, because an unregistered `R` context is exactly the fault an earlier draft of this amendment was blocked for.
+Candidate L's floor fit is then gated exactly as every other floor fit is, against `R_bench(w)` in place of `R(w)`, and the fact that its resolution floor comes from a bench rather than a step is recorded beside its ratio wherever that ratio appears.
+
+An `R_bench(w)` measured at zero refuses the addendum on exactly the same terms as a zero `R(w)`, for the same reason and with no separate argument.
+
+Two committed lines about that addendum are in tension with each other and this clause resolves them rather than adding to the confusion.
+Amendment 5's closing section calls it "one measured number ... and nothing else enters that addendum", while clause 21's own statistics row requires several, since `R` is measured per width and per cell.
+The addendum carries ONE KIND of quantity, the resolution floor, in every context registered for it, and "nothing else enters that addendum" governs the kind and not the count.
+Clause 26 adds one context to that list, the bench arrangement candidate L's floor uses, keyed per cell and width like the rest, and adds nothing else.
+
+**A score built on a bench floor is not resolved by the step's `R` alone.**
+Clause 16's tie test and clause 27's route 2 both convert a difference in score into a time and compare it against `2 * R(w)`, and that is the step's resolution; candidate L's score contains a floor measured on a bench whose own resolution is `R_bench(w)`, so a movement the bench cannot resolve can move candidate L's score by more than the step's test allows for.
+Reproduced 2026-08-20: at `T = 100`, candidate L's attributed cost 20, a ceiling of 1.188, `R_step = 0.05` and `R_bench = 0.20`, a floor of 4 gives a score of 1.190476 and a route-2 gap of 0.175 against a demand of 0.10, while moving the floor by 0.19, which is less than `R_bench`, gives 1.187790 and reverses the exclusion, with both floor fits clearing `10 * R_bench`.
+So wherever either test involves candidate L, its bench context is a CONTRIBUTING context and the demand must be met there as well as at the step.
+An earlier version of this paragraph said the demand is taken against the COARSER of the two, which is a different rule and a wrong one: it collapses two contexts into one scalar, and clause 31 records why that cannot be done, since a resolution floor is only comparable to a difference converted with its OWN `T`.
+This paragraph states the motivation and clause 31 states the rule; where they appear to differ, clause 31 governs and this paragraph is the history.
+Clause 31 states that rule once, for every comparison the selection makes and not only these two, and names exactly which contexts contribute; this paragraph is the reason it exists and not a second copy of it.
+
+**The excursion condition is a NEW limit and it reaches every knob.**
+Clause 21 registered four limits and this clause adds a fifth, so a knob that clears all four and moves the step by less than `10 * R(w)` is now ineligible where before it was not.
+Reproduced 2026-08-20: at `R = 1` and `span = 0.75`, a knob of slope 12 with a flat scaffold, a perfect fit and no residual passes every committed limit and fails this one, because 9 is below 10.
+That expansion is deliberate and is recorded here rather than left to be discovered: a fit whose whole excursion is smaller than the machine resolves is a clean line through noise, and clause 6 tests a fit's SHAPE and never its SIZE.
+
+A failure of candidate A's dial at the short width alone does not fail validation; it is typed `missing_share` at that width and carried into the profile as such.
+Where no dial is named at all, candidate A is typed `missing_share` at BOTH widths, validation still passes on the rest, and the binding profile runs to the INCOMPLETE terminal clause 27's table registers for it.
+Everything else in clause 11, the trace discipline, the spread gate and the complete-matrix demand as reinterpreted by clause 30, stands.
+
+The same failure reaches clause 22, whose P2 region is measured by the dial this clause names.
+The double-counting test is therefore PER WIDTH: at a width where P2 carries a typed absence the test is recorded as NOT RUN with that reason, it does not pass, and the width where P2 is valid still binds.
+A test that cannot run at one width is a stated cost of the one-width continuation, recorded in the artifact, and it never converts a typed absence into a pass.
+
+It can still REJECT, and this is the one case where a missing region does not stop the check.
+Every share is non-negative, so a missing addend can only make a sum larger, and a subtotal of the MEASURED regions already above one is a proof that the full sum is above one whatever the missing region turns out to be.
+Reproduced 2026-08-20: `P1 = 0.60` and `P3 = 0.50` subtotal to 1.10 with P2 absent, and every admissible P2 only raises it.
+So the rule is: where the measured regions alone sum above one, the profile REJECTS at that width and says which regions proved it; where they do not, and a region is absent, the test is NOT RUN.
+Recording NOT RUN in the first case would suppress a rejection the numbers already establish, which is the opposite of what a double-counting test is for.
+
+That REJECT takes precedence over every terminal in clause 27's table, including INCOMPLETE, and the ledger row for clause 22 says so.
+A rejection and a terminal are different things: a terminal is a ruling the profile reached, and a rejection is the profile saying its own measurements cannot be true, which is the fault class clause 27 already puts a non-fraction share in.
+Without that precedence the same run is both REJECT and NOT RUN: make every attention dial ineligible so candidate A is `missing_share` at both widths, which the table sends to INCOMPLETE, while `P1 = 0.60` and `P3 = 0.50` prove the partition sum above one.
+
+### What a gradient trace does to candidate A's floor
+
+Section 4.2 nominates MLX's fused attention as candidate A's floor, and clause 19 requires every floor to be installed at the same seam as the dial and measured INSIDE the real step.
+Neither can be done, and the reason was reproduced on this machine by reading the operation MLX built rather than by reading MLX's source.
+
+| Question | Answer |
+|---|---|
+| Where does the fused kernel run | Head dimensions 64, 80 and 128, and at none of 32, 48, 72, 96, 160, 256 |
+| Does a gradient trace keep it | No, at none of those three |
+| Is that a property of the operands or of the trace | Of the trace: a call whose operands nothing differentiates is composed too |
+| Does it hold inside mlx-lm's own step | Yes: the first layer's attention fuses untraced and is composed under `nn.value_and_grad` |
+
+This settles the investigation section 4.2 left open, and it settles it on DISPATCH rather than on time: no timing appears in that table and none is claimed here.
+Stock's training attention is the composed path in every block and both directions, so the fused entry point is a different implementation from the one stock runs, which is what the investigation doubted.
+Whether it is faster is a GPU measurement nobody has taken, and this amendment neither takes it nor assumes it.
+
+It also makes clause 19 inapplicable to candidate A.
+A floor arm installed at the attention seam of the real step is composed by the trace and runs stock's own computation, so its ratio is one implementation divided by itself, and its only content is measurement noise while it looks like a measured floor.
+What that number is exactly depends on the samples rather than on the operation: clause 9's worst pairing of two zero-spread distributions returns 1.0, and of noisy ones it can land either side of 1.0, so no particular value is claimed here.
+That is worse than no number at all, which is why clause 27 takes no number.
+
+### Clause 27. Candidate A has no floor and no credited ratio anywhere, and its verdict comes from a ceiling
+
+This clause REVERSES clause 19 for candidate A: no floor arm for candidate A is installed anywhere, in the step or on a bench, and no credited ratio for candidate A exists in any recording, artifact or report.
+Candidate Q is untouched and keeps its in-step floor; candidate L is untouched and keeps clause 19's written bench exception.
+
+Candidate A keeps its share.
+`f_A(w) = (b + c) / T(w)` per clause 18's rewrite row, with `b` from the dial clause 26 names, `c` from the same ablation cross-check clause 18 already requires, and clause 18's residue conventions unchanged.
+A share is VALID at a width when its fit passed clause 21's limits and clause 26's two excursion conditions at that width, when clause 11's gates passed for that run, AND when the share is a fraction: `0 < f_A(w) < 1`.
+
+That last requirement is not decoration, and it is registered because a construction defeats the rule without it.
+Clause 22's partition reads `b/T` with no residue term while a rewrite candidate's share is `(b + c)/T`, so a large residue can carry a share past one while every fit gate and the partition sum stay clean.
+Reproduced by execution on 2026-08-20: a pooled fit of `a = 13, b = 89` against `T = 100` with an ablated step of 1 clears the scaffold offset, clears `10R` twice over, fits perfectly, and leaves the partition summing to 0.99, while the share reads 1.01.
+
+**A share that is not a fraction REFUSES the profile, for ANY candidate, and is not typed absent.**
+An earlier version of this clause typed it `missing_share` at that width and continued on the other one.
+That is weaker than the discipline it sits beside and it contradicts committed code: clause 22 already REJECTS the profile on a partition sum above one, the knob module refuses a non-fraction share where it is computed, and `gain` raises on a share outside `[0, 1]`, so the typed-absent reading registered an outcome the code refuses and the four terminals do not contain.
+The registered rule is therefore: a share at or above one, or at or below zero, at ANY width and for ANY of the three candidates, REFUSES the profile outright, naming the candidate, the width and the value, and is recorded as an instrument fault.
+The sibling width is not used, because it came from the same instrument and the same machinery; a share of 1.401 is exactly what exposed the instrument Amendment 5 exists to replace, and continuing on its other reading would be believing the same instrument twice.
+
+**Every reading the rules consume must be FINITE.**
+A NaN score satisfies neither `score >= 1.10` nor `score < 1.10`, so one non-finite number makes the terminal table neither total nor disjoint by defeating both branches of its own test.
+Reproduced 2026-08-20: `ratio_lo([NaN], [1])` returns NaN and `gain(0.5, NaN)` returns NaN, and a profile carrying that beside a killed Q and an excluded candidate A matches no row of the table below.
+A non-finite share, ratio, gain, step total or resolution floor REFUSES the profile in the same way and for the same reason as a non-fraction share.
+
+**A refusal is not a fifth terminal.**
+The four terminals below are terminals of a RULING, and a refusal is the run declining to produce one, which is the class clause 25's trace counter, clause 11's spread gate and clause 11's context-equality demand already belong to.
+Those three refuse today and are not terminals, and these two join them rather than extending the table.
+The distinction is the one clause 30 already draws between an absence and a fault: an absence is a measurement that legitimately does not exist and the rules carry it, while a fault is a measurement that exists and cannot be true, and no rule carries that anywhere.
+
+What replaces the ratio is the registered gain formula's own supremum, on that domain and nowhere else.
+For `0 < f < 1` and over POSITIVE FINITE `r`, `gain = 1/(1 - f*(1 - 1/r))` is increasing in `r` with supremum `U = 1/(1 - f)` as `r` grows without bound, so `U(w) = 1/(1 - f_A(w))` is the best score candidate A could earn at width `w` under any such ratio, including one no implementation could reach.
+The domain on `r` is stated because the claim is false without it: at `f = 0.5` a ratio of -1.1 gives a gain of 22 against a supremum of 2, and -1 is a pole.
+A ratio is a measured cost divided by a measured cost and is positive and finite by construction, so no reachable measurement leaves this domain; the restriction is there so the theorem is true as written rather than true in practice.
+Committed code agrees and says so at the boundary: reproduced 2026-08-21, `gain(0.5, -1.1)` raises rather than returning the 22 the bare formula gives, because a ratio at or below zero is refused before the formula is evaluated.
+So the domain restriction is a statement about the theorem and not a gap in what the harness can produce.
+Verified by execution on 2026-08-20: the formula is monotone in `r`, approaches `U` from below, and in exact arithmetic attains it at no finite ratio.
+The word exact is doing work and is not decoration.
+Reproduced 2026-08-21 in double precision at `f = 0.087`: the computed gain is strictly below `U` up to a ratio of 1e14 and compares EQUAL to it from 1e15 upward, while the same computation in exact rational arithmetic is still below by about 1e-16.
+That rounding cannot reach any disposition here, because candidate A has no ratio under this clause and never computes a gain: its ceiling is evaluated directly as `1/(1 - f_A(w))` from the share alone, and route 1 tests the share against `1/11` rather than the ceiling against 1.10, which is the second reason that test is stated on `f`.
+Off that domain none of this holds, and WHICH expression fails has to be named, because the two behave differently and only one of them is undefined.
+At `f = 1` the CEILING is undefined, since `1/(1 - f)` divides by zero, while the GAIN is perfectly defined there and equals `r` exactly; reproduced 2026-08-21, committed `gain(1.0, 3.0)` returns 3.0 and raises nothing.
+Above `f = 1` the gain acquires a finite pole at `r = f/(f - 1)` and the ceiling goes NEGATIVE, which would read as a ceiling below the shipping floor and exclude candidate A on a broken measurement.
+That is why the domain is part of validity and why route 1 below is stated on `f` rather than on `U`.
+
+The domain is STRICT at both ends and committed code's is not, so the two boundary values are disposed of here rather than left to whichever check runs first.
+A share of exactly 0 is UNREACHABLE through clause 26: it requires a fitted slope of exactly zero, whose excursion is zero, which fails the `10R` condition at every positive `R`, and `R` is now required positive.
+A share of exactly 1 IS reachable through those conditions, because a slope equal to the whole step clears every excursion condition, and it is a FAULT: it says the candidate is the entire step with nothing left for the adapters, the norms, the elementwise work and the optimizer, which no step can be.
+It therefore joins the refusal class named above beside the trace counter and the spread gate, and is not a terminal.
+Committed `bench/profile_rules.py` accepts the CLOSED interval `[0, 1]` and returns `r` at a share of 1 without raising, so that refusal does not exist in code today; this amendment does not reverse the committed check, it adds the strict upper end, and step 8's rewrite carries the obligation.
+Candidate A's selection score under clause 14 would be the worse of its two gains, so it is bounded above by `U_min`, the smallest `U(w)` over the widths where its share is valid, and bounded STRICTLY: no finite ratio attains the ceiling.
+
+Two exclusion routes, and what follows when both fail depends on how much was measured:
+
+| # | Route | Rule |
+|---|---|---|
+| 1 | Excluded by arithmetic | a valid share at EITHER width with `f_A(w) <= 1/11`, RESOLVABLY so under clause 31, excludes candidate A: its score is strictly below `U(w) = 1/(1 - f_A(w)) <= 1.10` and therefore strictly below the shipping floor. The test is on `f` and not on `U`, because the two are equivalent only on the domain `0 < f < 1` that validity already requires, and stating it on `f` keeps it right even if a share reaches the rule that should not have. The boundary rules OUT in the arithmetic, because `f = 1/11` puts the ceiling exactly at 1.10 and no finite ratio attains a ceiling. Under clause 31 the exclusion is nonetheless unreachable AT the boundary and in a neighbourhood of it, because a difference of zero resolves at no positive `R`: reproduced 2026-08-20, `f = 1/11` exactly converts to a difference of 0.00 ms against a demand of 0.10 ms. That is the conservative direction and it is registered rather than discovered, since exclusion is the action this route takes; the arithmetic boundary is stated inclusively so the rule stays right if the resolution test is ever satisfied there |
+| 2 | Excluded by dominance | the L/Q winner's clause 14 score exceeds `U_min` and the excess is RESOLVABLE under clause 31, which fixes the conversion, the demand and the contributing contexts in one place and is the ONLY statement of them. An earlier version of this row added "at BOTH registered widths", borrowing committed clause 16's quantifier. That was a second rule for one comparison and it is withdrawn: both quantities here are REDUCED scores, which committed clause 16 never sees, so its per-width quantifier does not reach them. Reproduced 2026-08-21: at a score of 1.30 against a `U_min` of 1.25, with the short width at `T = 100` and `R = 0.1` and the long at `T = 10` and `R = 1`, the setting-width reading resolves at 3.077 ms against 0.2 and the both-widths reading fails at 0.308 ms against 2, giving SELECTED and UNRESOLVED on one measurement. "The L/Q winner" is the candidate section 4.3 SELECTS, which after the tie band and clause 12's table-order fall-through need not be the top scorer and never scores above it, so this is the reading that makes the exclusion harder to take. Where the two widths produce the same `U` exactly, the artifact names both as setting `U_min` |
+
+Route 1 consumes only shares, so it is evaluated before any scoring.
+Route 2 consumes the L/Q winner, so it is evaluated after clause 14 and clause 24 have run over candidates L and Q alone.
+Where clause 24 admits no candidate at all there is no winner, so route 2 has no input and does not exclude, and candidate A's disposition falls to route 1 or to the table.
+Verified by execution: over every pair of scores on a grid spanning the floor, no state has both a route-2 winner and every score below the floor, so the table's second row naming route 1 alone leaves nothing uncovered.
+
+Which candidate counts as the winner is a real choice and it is made here rather than in code.
+Reproduced 2026-08-20: at scores of 1.300 for candidate Q and 1.290 for candidate L the two sit inside the two-point band, the band is both of them, clause 12's second condition sends it to table order, and candidate L is selected at 1.290 while the top scorer is candidate Q at 1.300; at `U_min = 1.295` the top-scorer reading excludes candidate A and the selected-candidate reading does not.
+The selected candidate is registered, on the same principle clause 8 and `ratio_lo` each already follow: each picks the reduction that makes its own action harder to take, and exclusion is the only action this route takes.
+It is also the comparison that means something, because the selected candidate is the operation the sprint would actually build, so the question this route asks is whether building it forecloses candidate A.
+Candidate A never enters clause 14's scoring, clause 24's floor or tie band, clause 16's tie machinery, or clause 12's footprint tie-break, because a candidate without a ratio has no gain to score, no tie to break and no delta to compare.
+
+Both exclusion routes are SOUND with a valid share at one width only: the true two-width ceiling is at most the known one, so a winner that beats the known ceiling beats the true one, and an arithmetic exclusion at the valid width needs no second width at all.
+Verified by execution with the rest of the ceiling arithmetic.
+A FAILED exclusion is not sound with one width, and this is the asymmetry the terminals below encode: the missing width could carry a smaller share and a lower ceiling that route 1 or route 2 would have cleared, so failing to exclude on one width is a missing measurement that could be decisive, and the honest verdict is INCOMPLETE rather than UNRESOLVED.
+With no valid share at any width there is no ceiling and no route can run, and the terminal is INCOMPLETE naming both absences, exactly as the table's last row says; this is an absence and not a fault, so it does not refuse the run.
+
+The profile has exactly four terminals, one per run: SELECTED, the registered no-selection record of section 4.3, UNRESOLVED, and INCOMPLETE.
+Their precedence is INCOMPLETE first, UNRESOLVED second, and the two registered outcomes last.
+
+One guard runs BEFORE the table and is written here rather than left implicit, because a table over candidate A's states cannot see a fault in a different candidate.
+If candidate L or candidate Q reduces to `missing_share` under clause 30, the terminal is INCOMPLETE naming that entry, whatever candidate A's state is and whatever the remaining scores say.
+Only `missing_share` does this: a `killed` or `missing_ratio` candidate is excluded and visible and the profile continues, because those are answers rather than absences.
+
+With that guard passed, the table below is total and disjoint, where "scored set" is the candidates among L and Q that clause 30 leaves scoreable:
+Verified by execution 2026-08-21 over all 2304 combinations of candidate A's share validity, candidates L and Q's typed absences, the shipping floor's arithmetic reading and both exclusion routes' arithmetic readings, each crossed with clause 31 resolving or not resolving at its three sites here.
+Every state lands on exactly one of the four terminals, no state reaches a terminal that clause 31 declares because clause 31 declares none, and no state reaches SELECTED through a comparison the machine could not resolve.
+
+| Candidate A's state | Scored set's outcome | Terminal |
+|---|---|---|
+| Excluded by route 1 or route 2 | a winner at or above the floor | SELECTED, with candidate A's exclusion recorded |
+| Excluded by route 1 | every score below the floor, or no scores at all | the no-selection record, with the kept list holding however many scored candidates exist, two, one or none, and every exclusion named |
+| Valid at both widths, neither route excludes | any | UNRESOLVED: the artifact names the winner-so-far or its absence, `U_min`, the width or widths that set it, and which route failed by how much; where the scored candidates all sit below the floor their reading is recorded INSIDE this artifact, because one run gets one terminal |
+| Valid at one width, neither route excludes | any | INCOMPLETE: the missing width is named as the decisive absence |
+| No valid width | any | INCOMPLETE, per clause 30 |
+
+The no-scores row of the no-selection record is reachable because clause 30 can exclude candidates without making the matrix incomplete: a killed Q beside an L with no ratio leaves nothing to score and nothing unmeasured, which is an answer, not an absence.
+A dominance test with no winner cannot run, so with no scored winner an unexcluded candidate A always lands on the UNRESOLVED or INCOMPLETE row by its own width count.
+
+One bias is stated rather than absorbed.
+The committed ablation used for `c` also removes the key and value projection backward, pinned by its own test, so `c` and therefore `f_A` and `U` read HIGH.
+An inflated ceiling makes both exclusion routes harder to satisfy, so the bias pushes toward UNRESOLVED and never toward wrongly ruling candidate A out, which is the safe direction for a rule whose only action on this candidate is exclusion.
+
+What this clause gives up is stated plainly: candidate A can be ruled OUT by measurement or the profile can refuse to rule, but candidate A can never be ruled IN, because ruling it in would need the ratio this amendment abolishes.
+That asymmetry is the honest shape of the situation: the floor that would have supplied the ratio cannot be measured where the share lives, and a rule that cannot measure a number does not get to use one.
+
+### Clause 28. Where the fused kernel places on each dial, kept as evidence
+
+Measured 2026-08-20 on clause 1's registered ladder of 1.00, 0.75, 0.50 and 0.25, at head dimension 128:
+
+| Dial | Fused settings it places | Why |
+|---|---|---|
+| kv-length | 4 of 4 | the fused kernel does not constrain the key and value sequence length, and it accepts the array mask a shortened key set needs |
+| head-dim-qkv | 2 of 4 | the ladder reaches 128, 96, 64 and 32 and the kernel fuses only at 128 and 64 |
+| head-dim-qk | 1 of 4 | the kernel additionally requires the value head dimension to equal the query and key head dimension, so only the full setting fuses at all |
+
+Under the earlier draft this table decided which dial could carry a bench floor.
+With no floor it decides nothing, and it is kept because it closes the door the draft left open: two of the three dials place too few fused settings for any floor ladder to fit one implementation, so even the rejected bench design could not have produced a clean four-point floor fit on a head-dimension dial, and a line through two implementations looks fine and means nothing.
+
+### Clause 29. Why the bench exception was rejected, in writing
+
+The earlier draft measured candidate A's `r` on a bench by four arms and claimed clause 10 stood unchanged.
+Two review rounds blocked it, every finding was reproduced here before it was admitted, and the two that killed the design are recorded so the rejection is auditable:
+
+| Finding | Reproduction |
+|---|---|
+| A bench ratio paired with an in-step share breaks clause 18's exact identity | on `T = 100`, `A_step = 20`, `A_bench = 15`, `F_bench = 6`: the registered formula with the bench ratio returns 88 where the replacement arithmetic returns 86, and the difference is an unmeasured in-step floor cost the pairing silently assumes; clause 18's whole argument is that `f` and `r` share one `A`, and a bench `r` does not |
+| The bench's fused-forward-plus-stock-backward arm is a mechanism no seam produces | outside a gradient trace nothing generates a backward at all, inside one the forward composes, and a hand-built vjp would be a new mechanism needing its own registration and falsifier; the symbol `ScaledDotProductAttentionVJP` exists in the installed libmlx and was measured UNREACHABLE from Python in 0 of 72 attempted configurations on this machine, 2026-08-20 |
+
+Clause 10's voids are unchanged by that rejection: section 4.2's "times 3" and its "twice the forward" relation remain void and remain unreplaced.
+Clause 10's floor construction, "the whole attention region with MLX's fused implementation installed, measured in the step by the same dial", is REVERSED along with clause 19's requirement it implemented: there is no floor for candidate A anywhere, so there is nothing for that sentence to govern.
+Clause 10's call counts, 36 forwards and 16 backwards on the pinned arrangement, stand as structural facts under clause 3, and nothing consumes them in a ratio because no ratio for candidate A exists.
+
+### Clause 30. A candidate that loses a measurement is ABSENT with a typed reason, not omitted
+
+Clause 11 requires a complete three-candidate by two-width matrix and refuses an incomplete one.
+Clauses 26 and 27 admit outcomes in which an entry is legitimately not a number, so what the matrix means has to be registered rather than left to the code.
+Every absence is TYPED, and the type decides the branch:
+
+| Type | Meaning | Effect |
+|---|---|---|
+| `missing_share` | a candidate has no valid share at a width the rule needs | the matrix is INCOMPLETE: the profile refuses the verdict SELECTED, names the entry and its reason, and reports nothing as chosen. For candidate A alone, a share missing at ONE width narrows clause 27's ceiling to the valid width rather than refusing, and missing at BOTH widths refuses |
+| `missing_ratio` | a share exists and no credited ratio does | for candidates L and Q this is Amendment 5's existing exclusion, now typed: the candidate is excluded from scoring, stays visible in the artifact with its share, and the ruling records why. For candidate A it is not an absence at all: it is this amendment's permanent state, and clause 27 is its disposition |
+| `killed` | candidate Q removed by the kill rule | excluded from scoring, visible in the artifact with the kill record, exactly as section 5 already provides; typed here so the selection's input accounts for it |
+
+The entries are PER WIDTH, and a candidate can carry different absences at the two widths, so the reduction to one candidate-level state is fixed here rather than left to whichever branch the code checks first.
+The precedence is `killed`, then `missing_share`, then `missing_ratio`.
+`killed` wins because the kill rule reads the ceiling sweep and not the knob, so a killed candidate's other absences no longer matter and do not make the matrix incomplete.
+`missing_share` beats `missing_ratio` because a candidate with no share at some width cannot even be partially assessed, and the profile is INCOMPLETE whichever other numbers it has.
+Worked out: a Q that is killed and also missing a share is killed, excluded and visible, and the profile continues; an L missing its short share and its long ratio is `missing_share`, and the profile is INCOMPLETE.
+
+The selection rule takes the absences as an INPUT beside the readings.
+Its input must account for exactly the three registered candidates, each present with its numbers or absent with one typed reason after the reduction above, and it refuses anything else: a duplicate, an unknown name, an untyped absence, or a candidate simply not mentioned.
+A candidate can therefore never disappear between the profile and the ruling, which is the fault this clause exists to make impossible.
+
+If no candidate has a score at all because every scored candidate is excluded by type, that is an answer rather than an absence, and clause 27's terminal table says which terminal it feeds; it is not INCOMPLETE by itself.
+
+INCOMPLETE and UNRESOLVED are different verdicts and both refuse SELECTED.
+INCOMPLETE means a required measurement does not exist, including the case where the one measurement that could have excluded candidate A is the one that is missing.
+UNRESOLVED means every measurement the rules can consume exists and the registered rules still cannot separate candidate A's ceiling from the field.
+Both are legal terminals of the decision artifact, neither is a failure of the harness, and clause 27's table is the one place their precedence is written.
+
+Clause 22's disjoint partition names its P2 dial as whatever clause 26 names, and its test runs per width as clause 26 registers.
+If clause 26 names no dial, P2 is unmeasured at both widths; the profile is then INCOMPLETE through candidate A's own `missing_share` at both widths, and the partition record says NOT RUN with that reason at each.
+
+### Clause 31. Every rule's action must survive its own measurements' uncertainty
+
+This clause has been written four times and the first three were wrong in ways reviews reproduced, so what it got wrong is recorded before what it now says.
+The first declared one terminal for every site, which REVERSED committed clause 16.
+The second chose a single governing context as the largest `R`, which is not an ordering at all, because the demand is a time and the same dimensionless gap is a different number of milliseconds at a different `T`.
+The third converted each site's difference to a time and compared it against a scalar demand, and that is the one this clause replaces: a scalar demand assumes each measurement's uncertainty reaches the compared quantity ONE FOR ONE, and it does not.
+Reproduced 2026-08-21: with a step of 100 ms, a credited numerator median of 50, a credited numerator minimum of 10 and a floor of 3, a floor movement of 0.11 ms moves the predicted step by 0.55 ms, an amplification of exactly five, which is the ratio of the median to the minimum.
+The share takes the MEDIAN per-round slope and `ratio_lo` takes the SMALLEST numerator over the LARGEST denominator, and those are different reductions of one measurement, each chosen to make its own rule harder to take.
+That is committed and intended, and it is precisely why uncertainty does not transfer one for one.
+
+**The principle: bound the ACTION, not the gap.**
+Every rule here takes an action when a signed quantity is positive: a candidate ships, a route excludes, a shape counts toward a kill.
+Write that quantity `d(z)`, where `z` is the vector of measurements it rests on, and let `B(z)` be the registered uncertainty box around them.
+The action is SUPPORTED only when it survives everywhere in the box:
+
+    inf over B of d(z) > 0
+
+This is deliberately not `sup |d(z) - d(z0)|`, which counts movement AWAY from the boundary as though it threatened the action; only movement toward zero can take the action away.
+Each measurement enters the box ONCE, so a step total shared by two candidates, or the common samples behind a median and a minimum, are not counted twice.
+
+**The common algebra, which makes every score site one expression.**
+For a candidate at a width, with `M` the median per-round credited numerator, `N` the smallest, `F` the largest credited denominator and `T` the step total:
+
+    K = M * (1 - F/N)          the credited saving
+    P = T - K = T/g            the credited replacement step
+
+so the gain is `T/(T - K)` and every score comparison is a comparison of savings.
+Its sensitivities are `dK/dM = 1 - F/N`, `dK/dN = M*F/N^2` and `dK/dF = -M/N`, so `dP/dF = M/N`, which is the amplification reproduced above rather than an assumption.
+Over a box with the reduced scalars in intervals and while `0 < F < N` holds, the saving's own bounds are exact:
+
+    K_lo = M_lo * (1 - F_hi/N_lo)          K_hi = M_hi * (1 - F_lo/N_hi)
+
+The authoritative construction recomputes `M`, `N` and `F` from the SHARED source samples rather than boxing the three summaries independently, because independent boxes admit combinations the raw rounds cannot produce.
+Verified by execution 2026-08-21, because each of these is a claim a site's margin rests on and a wrong one would put a rule's sign the wrong way round: over 200000 random draws the sign of a gain difference matched the sign of a saving difference with no exception, and clause 16's registered time conversion equalled the saving difference exactly, to within 7e-13; the band expression matched the two-point gain test's sign over 200000 draws with no exception; and every interior point of 50000 random operand boxes fell inside the saving bounds above.
+
+**The site registry.** Each row is a signed margin and the direction its failure takes, which is unchanged from the previous draft: a site that cannot support its action does not take it.
+
+| Site | The action's margin | Not supported means |
+|---|---|---|
+| Clause 24's shipping floor | `K - T/11` at each width, since a gain of 1.10 is a saving of `T/11` | the candidate is treated as BELOW the floor and does not ship |
+| Clause 27's route 1 | `T/11 - M_A` at a width, on candidate A's share alone | candidate A is NOT excluded by this route |
+| Clause 27's route 2 | the winner's minimum-over-widths saving fraction minus candidate A's, whose sign is the sign of the winner's score minus `U_min` | candidate A is NOT excluded by this route |
+| Clause 16's per-width pair | `K_1 - K_2` at each width, which has the same sign as the gain difference and equals its time conversion exactly | the pair is TIED and continues through committed tie-breaks |
+| Clause 16's two-point boundary | `E_a - E_l - 0.02 * (1 - E_a) * (1 - E_l)`, on the saving fractions, which has the same sign as the two-point gain test | treated as INSIDE the band |
+| Section 4.3's retained order | the difference of the two saving fractions | the pair is recorded unordered and section 4.2's table order stands in |
+| Clause 15's dial price | the competitor's price minus the observed best's, minus the registered 0.01 | the prices TIE and the completeness rank governs |
+| Clause 23's kill rule | per round, the floor cost minus the stock cost divided by 1.10, so a shape counts only if every round supports it | the shape does NOT count toward the kill |
+
+The dial price propagates the PRICE and not the scaffold excursions, with `p_lo = dist(0, [s_lo, s_hi]) / b_hi` and `p_hi = max(|s_lo|, |s_hi|) / b_lo`, because two dials with different knob slopes have excursion differences unrelated to their price order.
+The kill rule uses the operand margin directly and not a converted ratio, because a conversion through a shape's stock slope amplifies the floor's uncertainty by that slope over the round's own numerator, which is the same fault this clause exists to remove.
+
+**The two-width minimum must be optimised INSIDE the box, and corners are not enough.**
+Route 2, the retained order and the band all compare quantities that are a minimum over two widths, and a minimum's argument can switch inside the box.
+Reproduced 2026-08-21 by enumeration: over four thousand random admissible boxes the corner-only minimum overstated the true minimum by as much as 0.042, because the true minimum was attained on a setting-switch line and not at a corner.
+So the exact evaluation is over the box's corners TOGETHER WITH every intersection of a switch line with a box edge, and freezing the width observed to set the minimum is unsound.
+That also removes the previous draft's near-setting-width admission test outright: choosing which widths to inspect was an attempt to approximate this, it is not itself a ruling, and joint optimisation already includes every switch.
+
+**What this clause does NOT reach, unchanged from the previous draft.**
+The validity guards refuse rather than rule, and a readability gate whose threshold is already denominated in `R` cannot have its boundary removed by another test, only moved; both keep the treatments recorded below and in clause 26.
+
+**OPEN, and it blocks the binding run: the box itself is not yet defined.**
+Clause 33 registers a calibrated demand `C` from measured null blocks, and that is ONE scalar contrast between two arm medians.
+It does not define a SIMULTANEOUS box over every arm, width, candidate, shape and reduction that this clause's inf must be taken over, and assigning `+/- C` independently to each leaf would abandon the registered rate rather than apply it.
+The box must instead be calibrated from complete null blocks, either as the order statistic of each block's LARGEST primitive contrast over the whole predeclared vector, or as multiplicity-corrected per-coordinate bounds; which of those is right, and whether such blocks are exchangeable across the step dials, candidate L's bench and the kill sweep, is a question about this machine that no measurement has answered.
+A further transfer is already known to be false: the registered four-point ladder's least-squares slope weights are 1.2, 0.4, -0.4 and -1.2, so equal arm radii permit a slope movement of 3.2 times the radius rather than one times it, and the intercept's weights permit two times.
+Until the box is defined and calibrated, no run of this profile binds anything, and that is registered here rather than discovered when a window has already been spent.
+
+### Clause 32. Amendment 5's replacement thresholds, restated here rather than edited there
+
+An earlier version of this amendment rewrote two rows of Amendment 5's replacement-threshold table IN PLACE.
+That was a process fault and it is reversed: committed text is preserved wherever it stands, and what supersedes it is written here, which is how every other change in this amendment works.
+The document's whole discipline is that a reader can see what was binding at the time a measurement was taken, and an in-place edit destroys exactly that.
+The two rows are restored to their committed wording and are REPLACED by the two rows below for every figure this amendment relies on.
+
+Clause 4 registers when a figure measured uncompiled is replaced by its compiled value.
+Its time row reads `R` and its ratio row reads `R / F`, and both were written when `R` named one quantity.
+Candidate L now has a step context and a bench context, so a bare `R` names two numbers and admits two opposite readings of whether a figure moved.
+
+| Kind of figure | Replaced when the compiled value differs by more than |
+|---|---|
+| a time | `R` in the context that time was measured in, `R(w)` for a step time and `R_bench(w)` for a bench time |
+| a ratio `r = A / F` | `(F * R_num + A * R_den) / (F * (F - R_den))`, where `R_num` is the resolution of the context the numerator was measured in and `R_den` that of the denominator |
+
+Clause 4's share row and its count row are untouched, and its rule that a figure inside its threshold stands as written is untouched.
+
+**The ratio bound is exact rather than first-order, and the difference is reachable.**
+An earlier version of this clause wrote `R_num / F + A * R_den / F^2`, which is the first-order expansion and understates the movement two unresolvable operand movements can produce together.
+Reproduced 2026-08-21: at `A = 20`, `F = 4` and `R_num = R_den = 0.2`, movements of 0.199 in each operand, both strictly inside their own resolution, move the ratio by 0.3141, while the first-order threshold is 0.3000 and would have called that a real change.
+The exact supremum is `(A + R_num) / (F - R_den) - A / F`, which is the expression in the table, and a brute-force search over the corners of the operand box confirms nothing exceeds it.
+The bound requires `F > R_den`, which is the same condition as the floor slope being a measurement at all, and a floor whose slope is inside its own resolution has no credited ratio under clause 9 in the first place.
+
+**Which operands set the threshold is fixed here, because the two readings disagree.**
+The threshold is computed from BOTH the uncompiled and the compiled operand values, and the figure is replaced only if the movement exceeds the LARGER of the two thresholds.
+Reproduced 2026-08-21 at `A = 20`, `F = 4`, `R_num = R_den = 0.2` with compiled operands `A = 20.199` and `F = 3.801`: the ratio moves by 0.3141, the EXACT bound from the old operands is 0.3158 and from the compiled ones 0.3507, so the movement clears neither and the figure STANDS under both.
+The two bounds still differ by 0.035, which is enough to disagree on a movement between them, so the rule is stated rather than left to whichever operand set the code happens to hold.
+Taking the larger is the direction that makes replacement harder, which is the principle every other reduction in this amendment follows, and it needs no rule about which measurement is authoritative.
+
+**This clause reaches candidates L and Q only.**
+Candidate A has no ratio at all under clause 27, so the ratio row never applies to it, and the committed row's mention of a floor cost has no referent there.
+
+### Clause 33. Units, ordering, and what steps 7 to 10 must produce
+
+An independent pass tried to WRITE the selection function from this amendment alone and reported that it could not, for reasons that were not disagreements about the rules but quantities the rules consume and nothing supplies.
+Those are registered here rather than left for the implementation to invent, because a quantity invented at implementation time is a rule made after the numbers.
+
+**One unit, stated once, and this is a CHANGE rather than a description.**
+Every time this amendment's rules consume is in MILLISECONDS: step totals, fitted slopes and intercepts, residues, both resolution floors and every threshold derived from them.
+Committed text and committed code do not currently work that way and the amendment does not pretend otherwise: section 8's worked example gives its samples in seconds, the knob timer returns seconds, and current recordings store fields named for seconds.
+So the conversion happens where a recording is READ, once, and never where a rule is applied, and a rule that receives a number is entitled to assume milliseconds.
+Reproduced 2026-08-21: a step total of 0.1 with `R` of 0.000155 and the same total of 100 with `R` of 0.155 are the same measurement, and mixing the two scales resolves a comparison that the other refuses.
+
+**`T` must be POSITIVE and finite, not merely finite.** A non-positive step total is a fault and joins the refusal class.
+Reproduced 2026-08-21: a `T` of -100 converts a real score difference into a negative time of -7.58 ms, which clears no demand and would silently refuse every comparison at that width.
+
+**The kill rule runs BEFORE clause 30's reduction, and `killed` enters that reduction as its result.**
+Clause 30 reduces a candidate's absences by the precedence `killed`, then `missing_share`, then `missing_ratio`, and `killed` is the outcome of clause 23 rather than an input the profile carries independently.
+Reproduced 2026-08-21: candidate Q carrying `missing_share` while its ceiling-sweep readings kill it at five of six shapes gives INCOMPLETE if the absence is reduced first and a no-selection record if the kill is evaluated first, on one set of measurements.
+The registered order is: clause 23 evaluates the kill from the sweep, its verdict is written as the typed absence `killed`, and only then does clause 30 reduce.
+That order is forced rather than chosen, because clause 30's own reason for putting `killed` first is that a killed candidate's other absences no longer matter, which presupposes the kill is already known.
+
+**`R` itself admits two readings, and the one that binds is fixed here, against an earlier draft of this clause that fixed the wrong one.**
+Committed clause 21 defines `R` as "the median absolute difference between two IDENTICAL arms over the registered rounds at that cell", and that sentence parses two ways: the MEDIAN OVER ROUNDS of each round's paired absolute difference, or the absolute difference between the two arms' MEDIANS.
+They are not the same number and neither is a misreading of the words.
+
+The reading that binds is the SECOND, the absolute difference of the two arms' medians.
+An earlier draft of this clause registered the first and gave a reason that is wrong: it said the paired reading answers "how far apart can two readings be before the difference is the machine", which is a statement about a single round, and NOTHING in these rules consumes a single round.
+Clause 21's statistics table takes the median of the per-round slopes, every fit runs over arm medians, and every share and gain is derived from those.
+If `R` exists to say when a difference between two DERIVED readings is real, the honest null is two identical arms carried through exactly the reduction the rule uses, which is the second reading.
+That earlier draft also claimed the second reading "can report a large floor from arms that agree in every round", which is arithmetically impossible, since arms agreeing in every round have equal medians and a null of exactly zero.
+The claim is withdrawn rather than softened.
+
+**One block of rounds cannot estimate it, and more rounds in one block do not fix that.**
+The null contrast from a single block is one draw from a distribution, not a scale estimate, and its relative spread does not shrink with the round count: under an ideal null it converges to an absolute Normal draw whose coefficient of variation is `sqrt(1 - 2/pi) / sqrt(2/pi)`, about 0.76, whatever `n` is.
+Simulated 2026-08-21 over 400000 nine-round blocks: the paired statistic has a coefficient of variation of 0.36 and the of-medians statistic 0.76, with a central 90% range from 0.09 to 2.91 times its own median.
+So `R` is the MEDIAN OVER `m` INDEPENDENT COMPLETE BLOCKS of each block's null contrast, and `m` is a registered count rather than a convenience.
+
+**The multiplier 2 is not a resolution test, it is a false-separation rate, and the rate is worse than it reads.**
+Committed clause 16 demands `2 * R`, and that construction was registered as a judgement before anything had measured what it buys.
+Simulated 2026-08-21 under an ideal null with `R` at its true value: a fresh null contrast exceeds `2 * R` 17.7% of the time, so the test as written admits noise as a separation about one pair in six.
+With `R` taken from a single block instead of its true value the rate is 29.5%, which is the estimator fault above compounding the threshold fault.
+The paired reading appeared to behave better, at about 2%, and it did so for the wrong reason: its null is 2.46 times larger, so `2 * R_paired` is roughly `4.9 * R`, and it bought conservatism by measuring a different and larger quantity rather than by controlling an error rate.
+
+What replaces the judgement is a rate registered in advance and a multiplier measured against it.
+The registered false-separation rate is `alpha = 0.05`, fixed here, before the null is measured.
+Step 10 measures the null contrast over its `m` blocks and reports the EMPIRICAL critical value `C`, the `ceil((m + 1) * (1 - alpha))`-th smallest of them, which controls a future exchangeable null exceedance at no more than `alpha` without assuming the null's shape.
+Under an ideal null that lands the multiplier near 2.9 rather than 2, but the multiplier is not registered here and the ideal null is not claimed to describe this machine: what is registered is `alpha`, the estimator, and the block count.
+
+**`C` governs the selection comparisons and `R` continues to govern the readability gates, and they are NOT interchangeable.**
+Clause 31's seven sites take their demand from `C`.
+Clause 21's scaffold-offset limit at `3 * R` and clause 26's excursion condition at `10 * R` continue to take `R`, the median null magnitude, exactly as written.
+Reusing `C` in those gates would silently redefine two committed limits that have a different job: they ask whether one measurement is readable at all, not whether two measurements differ.
+Both quantities come out of the same step-10 blocks and neither costs a separate measurement.
+
+**None of this changes a gate's strictness relative to any measurement, because `R` has never been measured at the target.**
+Every figure this pre-registration quotes for a resolution floor was taken at the 0.6B proxy, and the only identical-arms probe in the repository fixes one width, one batch and nine rounds and measures no bench context at all.
+So fixing the reading now SETS what `3 * R` and `10 * R` mean for the first time rather than moving them.
+
+**Three readings an implementation pass could not resolve, settled here rather than by whichever branch the code checks first.**
+
+FIRST, what a negative residue rejects.
+Committed clause 18 says a residue negative by more than `R` "REJECTS that candidate's reading", and clause 27 puts impossible measurements in the refusal class rather than among the typed absences.
+Those pull in different directions for the same event, so the reading is fixed: a residue below `-R` is a FAULT, it refuses the profile rather than typing that candidate absent, and the raw residue is retained and named in the recording's blockers.
+The reason is the one clause 27 already gives: an absence is a measurement that legitimately does not exist and the rules carry it, while a negative residue is a measurement that exists and cannot be true, since it says the step ran SLOWER with the operation removed than the fit predicts without its scaling part.
+Typing it as an absence would let a broken construction produce a ruling on the two candidates that happened to survive it.
+
+SECOND, what context equality demands across two widths.
+Clause 11 requires a complete matrix whose entries share one context, and read literally that is unsatisfiable, because the two registered widths differ in width, in band, in token count and in supervised fraction by design.
+So the demand is fixed in two parts.
+WITHIN a column, meaning one width, every entry must agree exactly on every context field: model, revision, adapter configuration, batch, band, width, seed, optimizer state and the process being stock.
+ACROSS columns, every field EXCEPT width, band, token count and supervised fraction must agree exactly, and those four must differ exactly as the corpus registration says they do.
+A field that differs across columns and is not one of those four refuses the matrix, which is the check that stops a short-width share being paired with a long-width floor.
+
+THIRD, whether an absent reporting-cell share is a blocker.
+Cells A, C and D decide nothing under section 4.3 and are reported beside the decision.
+A typed absence in a reporting cell therefore does NOT make the recording nonbinding, and is recorded with its reason exactly as a deciding-cell absence is.
+The deciding cell B is different and clause 30 governs it unchanged: an absence there is INCOMPLETE by the rule that reads it.
+Stating this is not a licence to lose a reporting cell quietly, because the absence still appears in the record with its type and the artifact still names it.
+
+**Two artifacts carry a measured number from one stage to the next, and neither had a shape.**
+An implementation pass could not write step 7 without inventing both, and an invented transport is a place for a number to change meaning between the stage that measured it and the rule that reads it.
+
+The RESOLUTION ADDENDUM, written by step 11 and read by every stage after it, carries exactly this and nothing else:
+
+| Field | Meaning |
+|---|---|
+| `schema_version` | so a reader can refuse a shape it does not know |
+| `blocks` | the block count `m`, which must be at least 19 for the registered `alpha` to be attainable |
+| `rounds_per_block` | the round count inside one block |
+| `alpha` | the registered false-separation rate, 0.05, copied here so the artifact is self-describing |
+| `contexts` | a mapping keyed by `(cell, width, arrangement)`, where arrangement is `step` or `bench`, each carrying `R`, `C`, the `m` block contrasts they were derived from, and the step median `T` |
+| `recording_sha256` | the step-10 recording these came from |
+| `rules_sha256` | the digest of the rule code that computed `R` and `C` from the blocks |
+
+A context key absent from that mapping is not a resolution floor of zero and not a licence to reuse another context's: a stage that needs a context the addendum does not carry REFUSES, which is clause 21's prohibition on reuse made executable.
+
+The DIAL ARTIFACT, written by step 12 and read by step 13, carries clause 26's selection so the binding run cannot re-decide it:
+
+| Field | Meaning |
+|---|---|
+| `schema_version` | as above |
+| `selected` | the dial's registered name, or `null` for the no-dial outcome |
+| `prices` | every candidate dial's scaffold price and the evidence it was computed from, including the ones that lost |
+| `tie` | whether the completeness rank broke a tie, and between which dials |
+| `ineligible` | each dial that could not place three distinct realisable settings, with which settings it could place |
+| `width` | the registered width the selection binds at, which clause 26 fixes as the long one |
+| `recording_sha256` and `rules_sha256` | as above |
+
+A `null` selection is a legal artifact and not a missing one: clause 26 registers the no-dial outcome, and candidate A then carries `missing_share` at both widths.
+The distinction the artifact has to preserve is between a selection that ran and chose nothing and a selection that never ran, and the second is a run fault rather than a result.
+
+**What steps 7 to 10 must produce, because the rules consume it and nothing records it today.**
+Each row is a quantity this amendment reads, with what exists now beside it.
+None of these is a change to a rule; they are the measurement and plumbing obligations the rules imply, listed so that no step can satisfy its own tests while leaving a rule unfeedable.
+
+| Quantity | State today | Owed by |
+|---|---|---|
+| Per-width readings, with candidate A carried as SHARE-ONLY rather than as an absence | the selection input carries one share and one ratio per candidate, refuses two readings for one candidate, and has no way to say "this candidate never had a ratio". Candidate A's no-ratio state is neither a number nor one of clause 30's three typed absences: `missing_ratio` means a ratio was sought and not obtained, while candidate A's is permanent by clause 27 and is not a measurement that failed. Reproduced 2026-08-21: a reading of candidate A with a share of 0.20 and no ratio raises `TypeError` inside the selection rather than being carried. The schema step 8 builds must therefore have four states per entry, a number, `missing_share`, `missing_ratio` or `killed`, PLUS a candidate-level flag that candidate A carries no ratio by rule | step 8 |
+| A fitted profile at all from the knobs | `bench/profile_stock.py` still imports the demoted marked instrument, never imports `bench/profile_knobs.py`, and builds one scalar reading at cell B | step 7 |
+| Absences as legal outcomes rather than raises | `choose_dial` raises when no dial is eligible and `decide` raises on a missing share or ratio, which are the states clause 30 types and carries | steps 7 and 8 |
+| A scaffold arm's observed RANGE, and its arm medians | the fit object keeps slope, intercept and fit quality and discards the medians, so two scaffolds with identical fits and ranges of 76 and 74 are indistinguishable to clause 26 | step 7 for the knob arms, and step 9 for the floor arms, which run the same three-case rule |
+| The dial ladder's ACTUAL realisable fractions | the ladder returns its nominal keys, so an excursion is computed on a setting the dial may not place, giving 10.5 where the realisable value gives 9.33 against a demand of 10 | step 7 for the knob arms, and step 9 for the floor arms, which are dialled on the same ladder |
+| Six shapes and the all-but-one threshold | committed code registers five shapes and a threshold of four, and refuses S6 by name | step 9 produces the sixth shape's measurements and step 8 widens the rule that reads them; neither alone is enough |
+| Per-shape stock slopes for clause 31's kill conversion | `bench/ceiling_sweep.py` DOES NOT EXIST yet, so there is no sweep to describe: today `bench/profile_stock.py` consumes a `ceiling_ratios` mapping supplied to it, and the kill entry point receives no rounds, widths, resolution floor or stock time | step 9, which builds the sweep, and step 8, which widens what the kill rule accepts |
+| An empty scored set as an answer | the selection refuses an empty candidate list, which clause 30 makes reachable through a killed Q beside an L with no ratio | step 8 |
+| `R` and `R_bench` under the reading fixed below, AND the calibrated demand `C` | the only identical-arms probe computes the absolute difference of two arms' medians, which is the right reduction, but takes ONE block of nine rounds at one width and one batch on the proxy, measures no bench context, and reports no distribution to calibrate against. A single block cannot estimate `R` and cannot produce `C` at all. Step 10 must run `m` independent complete blocks per context, at BOTH registered widths, for the step and for candidate L's bench, and report `R` as the median block contrast and `C` as the `ceil((m + 1)(1 - alpha))`-th smallest. `m` must be at least 19 for the registered `alpha` of 0.05 to be attainable at all, since `m` blocks can hold no rate below `1 / (m + 1)` | step 10, and step 11's addendum, which this amendment makes carry both floors and the demand where the plan still says "R, the one measured number" |
+| Clause 18's residue rejection below `-R` | the knob reading's blocker list does not enforce it, and a residue of -1 against an `R` of 0.05 returns a share with no blocker. It DOES already refuse a share of exactly 1, so that half needs no work in this module and step 8 needs it only where the selection reads a share directly | step 7 |
+| A TRUE in-step ablation for candidate L | there is none. Clause 18 credits a REWRITE with its slope plus its measured residue, and the residue is the fitted intercept minus the ablated step. The loss knob's ablated arm returns its SMALLEST DIAL SETTING instead of an ablation, so the residue it computes is `a - T(phi_min)`, which for a linear arm is `-b * phi_min` and is NEGATIVE by a quarter of the slope. Reproduced 2026-08-21 at an intercept of 100 and a slope of 40: the residue computes as -10.0, and clause 18 REJECTS a candidate whose residue is negative by more than `R`, so candidate L is rejected by its own residue check at every resolution floor below 10 ms, which is every plausible one. The three attention dials already do this correctly with a real ablation seam, so the pattern exists in the same module and the fix is to build the loss one the same way: something of the same output shape doing almost none of the work, with the tensors a lazy graph might drop kept alive | step 7 |
+
+The `R` and `R_bench` row is the one to settle first, because `R` is the input every threshold in this amendment is denominated in, and a probe computing a different statistic would put a wrong number under every gate at once.
+
+### What this amendment reverses, changes and leaves alone
+
+| Clause | What happens to it |
+|---|---|
+| 19 | REVERSED for candidate A only: no floor for candidate A exists anywhere, in the step or on a bench. Candidate Q keeps its in-step floor and candidate L keeps its written bench exception, both untouched |
+| 10 | REVERSED in its floor construction: its definition of `F` for candidate A loses its object because no floor exists. Its voiding of "times 3" and "twice the forward" STANDS, nothing is reinstated, and its call counts stand as clause 3 structural facts |
+| 18 | SCOPED and EXTENDED. Scoped: its exact-identity argument now governs candidates L and Q, the only candidates with a ratio, and candidate A keeps the `A = b + c` half of its row for the share while the `F` and `c_floor` half has no referent. Extended: its registered convention that a RESIDUE below the resolution floor is recorded as zero is extended by clause 26 to a scaffold SLOPE, which committed text does not cover. That extension is named as one rather than cited as an existing general rule, because committed clause 18 records the convention for residues alone |
+| Clause 21's statistics table, its "`R`" row | EXTENDED: that row reads "measured per width and per cell, never once and reused across either", and a third context joins the list, the bench arrangement of candidate L's floor, keyed the same way and measured by the same identical-arms construction. The prohibition on reuse is unchanged and is exactly what forces the third measurement rather than borrowing a step's value . CHANGED in one further respect: committed text admits an `R` of zero and this amendment refuses it. Every registered resolution floor, `R(w)` and `R_bench(w)` alike, must be POSITIVE and finite, because a floor of zero claims the machine can resolve any difference at all, which would let every positive slope clear `10R` and every strict excess clear clause 31's demand. An `R` measured at zero in any registered context REFUSES the addendum and no knob is dialled against it. Whether this machine can produce a median of exactly zero is a device question nobody has answered, so the refusal is registered rather than assumed unnecessary |
+| 9 | SCOPED and EXTENDED: `ratio_lo` has no referent for candidate A, and for candidates L and Q its CONSTRUCTION is unchanged while its INPUTS are now gated. Clause 26 requires the smallest credited numerator and the largest credited denominator it reduces to be positive and to clear the excursion condition, so a reading that returned a number under committed clause 9 can now return `missing_ratio` instead; the amendment's own worked example of per-round slopes `1e-12`, 20, 20, 20, 20 is exactly such a case |
+| Clause 21's statistics table, its "missing ratio" row | REVERSED for candidate A. That row reads "a missing ratio excludes that candidate from selection and does not refuse the whole selection", and it is reversed and it changes the answer on real inputs rather than only the wording. Under that row candidate A, having no ratio, is simply excluded and the winner selected; under clause 27 candidate A is excluded only by one of two registered routes and otherwise the profile returns UNRESOLVED. Reproduced 2026-08-20: with candidate A's share VALID AT BOTH WIDTHS and equal to 0.20 at each, the ceiling is 1.25 at both, and an L/Q winner scoring 1.15 neither clears the ceiling nor meets the `1/11` line, so the committed row SELECTS the winner and this amendment returns UNRESOLVED. Both widths have to be stated because they change the answer on the same quoted share: shares of 0.20 and 0.05 are excluded by route 1 at the short width, and a share of 0.20 beside a missing width is INCOMPLETE. The row stands unchanged for candidates L and Q, where clause 30 types it `missing_ratio` |
+| 15 | CHANGED: it gains a width and a place in the ordering, two readable-price conditions, a linearity precondition, and a resolution test on the price comparison under clause 31 that propagates through to the PRICE ITSELF. An earlier draft ran that test on the raw scaffold excursions instead, to avoid comparing a dimensionless price against a time-valued floor; that avoided the units error and introduced a worse one, because two dials with different knob slopes have excursion differences unrelated to their price order. Clause 31 now bounds the price directly from its operands, which commits no units error because nothing is compared against a time. This clause's own words are why: it says its price statistic is dimensionless, that its tie threshold is therefore dimensionless too, and that comparing the price against a time-valued `R` would be a units error letting a different normalisation pick a different dial. Reproduced 2026-08-21: scaffold slopes of 9.9 and 10.1 give a price gap of 0.0002 at a knob slope of 1000 and 0.0020 at a knob slope of 100, while their excursions differ by 0.15 ms at both, so only the slope test is normalisation-free. An earlier version of this row claimed those two prices straddle the 0.01 threshold and that the dial therefore flips; that reproduction was FALSE, because 0.01 is this clause's tie threshold BETWEEN two prices and a gap of 0.0002 is already a tie under committed text, so nothing flipped and the row is corrected rather than kept. Its statistic, its 0.01 tie threshold and its completeness tie-break are unchanged in value and meaning. Its final paragraph, the floor-on-a-different-dial escape hatch, is VOID because no floor for candidate A exists |
+| 14 | SCOPED: its scoring runs over candidates L and Q; candidate A never enters it and is disposed of by clause 27 |
+| 4 | CHANGED in two of its four replacement thresholds, by clause 32 and not by an edit to its own text. Its time row read a bare `R`, which now names two numbers because candidate L has a step context and a bench context, and it takes `R` in the context the time was measured in. Its ratio row read `R / F` and becomes the exact bound `(F * R_num + A * R_den) / (F * (F - R_den))`, computed from both the uncompiled and the compiled operands with the LARGER threshold binding. Its share row, its count row and its stands-as-written rule are untouched. An earlier version of this amendment made both changes by rewriting the committed rows in place; that was a process fault, the committed rows are restored verbatim, and this amendment's diff is now a pure insertion |
+| 16 | EXTENDED and SCOPED, and NOT reversed. Its per-width pairwise test over two candidates' gains, and its requirement that a pair separate at BOTH widths, stand exactly as committed and run unchanged at its own site. What clause 31 adds is a test on a DIFFERENT quantity: committed clause 16 never sees a clause 14 maximin score or a `U_min`, which are single numbers standing for two widths, and those are compared at the contexts that SET them. Reproduced 2026-08-21: candidate L at width gains 1.2 and 2.0 against candidate Q at 1.3 and 2.0001, with `T = 100` and `R = 0.1`, give per-width deltas of 6.41 ms and 0.0025 ms, so committed clause 16 calls the PAIR unresolvable on the long width while their scores of 1.2 and 1.3 are set entirely by the short width. Both readings are right about their own quantity. This clause is also EXTENDED by one thing committed text left untested, a resolution test on membership of the two-point band itself, whose unresolvable case is TIED and goes to section 4.3's registered tie-breaks, which is where committed clause 16 already sends an unresolvable pair. Two earlier drafts of clause 31 DID reverse this clause, once by terminating UNRESOLVED where committed text ties and once by claiming its both-widths quantifier as the rule for reduced scores; both are withdrawn and neither reversal is made |
+| 12 | SCOPED to the point of being UNREACHABLE. Candidate A never reaches the footprint tie-break, and with the scored set reduced to candidates L and Q every two-member tie band contains candidate L, which clause 12's own second condition already sends to table order. No band can reach the footprint comparison, so no peak-footprint delta is required for any candidate and the ceiling sweep does not measure one, which is a GPU window not spent on a number no rule can read. Clause 12 is not withdrawn: it keeps its source, its reduction and its sign for any later amendment that widens the scored set again |
+| 24 | SCOPED, CHANGED and now SUBJECT TO CLAUSE 31: its shipping-floor filter compares a score against 1.10 and did so without any resolution test, so a movement smaller than the bench can resolve could discard a candidate and change the terminal. Reproduced 2026-08-20: scores of 1.099 and 1.1013, 0.19 apart in a bench floor that cannot resolve 0.19, select candidate Q in one state and return UNRESOLVED in the other. Under clause 31 a candidate ships only where its credited saving exceeds `T/11` everywhere in its own measurements' box, and where it does not it is treated as BELOW the floor, which is the direction that makes shipping harder. Its value of 1.10 and its place before the band and the tie-breaks are unchanged, and this clause's own correction, that the floor applies to the SELECTED candidate rather than to the largest gain, is already landed in code |
+| 11 | REVERSED in part and EXTENDED. Its pass condition read "every knob's pooled fit clears clause 21's four limits at both widths" and is replaced by clause 26's four-row table, which exempts candidate A's dial at the short width, exempts candidate A entirely where clause 26 names no dial, and moves the L and Q FLOOR fits outside validation into clause 30's continuable `missing_ratio`. It is extended by the same fifth limit clause 26 adds. Its completeness demand gains clause 30's typed meaning and its refusal becomes the INCOMPLETE verdict, which is NOT the whole of its refusals: the trace counter, the spread gate and the context-equality demand still refuse the run outright, and a candidate A absent at one width can still end in SELECTED |
+| 6 | EXTENDED in reach, unchanged in content: its shape limits, the coefficient-of-determination floor and the residual limit, are now applied to a SCAFFOLD-only arm's own fit as well as to a knob's, per clause 26's second scaffold case. Their values and their meaning are untouched, and the gate's rejection of a non-positive slope is deliberately NOT carried across, because a scaffold slope of either sign is legal under clause 21's absolute-value treatment |
+| 21 | REVERSED in part, CHANGED and EXTENDED. Its coefficient-of-determination floor and its residual limit keep their values and their meaning, and clause 26 extends their REACH to a scaffold's own fit; its scaffold-offset limit is untouched in form and now needs `R_bench(w)` to run on candidate L's bench; its scaffold-slope limit is changed; and a fifth limit joins them. Reversed: its "before any knob is dialled" prohibited the proxy smokes that have already run, and its ordering now binds the recorded profile and the 4B validation stages only. Changed: its scaffold-slope limit is not binding where clause 26's clamp records that scaffold as zero. Extended: clause 26 adds a FIFTH limit, the `10 * R(w)` excursion, reaching every knob of every candidate and both partition regions, so a knob clearing all four committed limits can now be ineligible. The four committed limits keep their own numeric values and multipliers, which is not the same as being untouched |
+| 5 | CHANGED: its definition of the scaffold slope as "the fitted slope of a scaffold-only arm" is replaced by clause 26's three cases, which the body names as amending this clause. A scaffold arm whose observed range is strictly below `R(w)` has its slope recorded as zero; an arm whose range is at or above `R(w)` keeps its fitted slope only if its excursion also reaches `R(w)` and its own fit clears clause 6's two SHAPE limits, the coefficient-of-determination floor and the residual limit, and NOT clause 6's gate wholesale, which also rejects a non-positive slope that a scaffold is expressly allowed to have. Reproduced 2026-08-20: a scaffold at `phi` of 1, 0.75, 0.5 and 0.25 with times 70, 80, 90 and 100 fits a slope of -40 with a coefficient of determination of 1 and a negligible residual, which the body accepts and the full gate rejects; and an arm at or above `R(w)` meeting neither of those makes the dial ineligible at that width. The boundaries are as written: strictly below in the first case, at-or-above in the other two, so a range exactly equal to `R(w)` is not the first case. Its offset half is untouched in form and needs `R_bench(w)` before it can run on candidate L's bench |
+| 22 | CHANGED: its P2 dial is bound to clause 26's named dial and its test runs PER WIDTH, in three outcomes rather than two. Where the measured regions alone sum above one the width REJECTS, naming them, whether or not a region is absent, because shares are non-negative and a missing addend can only raise the sum. Where they do not and a region is absent, the test is NOT RUN with that reason and does not pass. Otherwise it passes as before. Its REJECT takes precedence over every terminal in clause 27's table, including INCOMPLETE, because a rejection is the profile saying its own measurements cannot be true rather than a ruling it reached; P2 absent at both widths with no such proof reaches INCOMPLETE through candidate A's own `missing_share`, not through this clause |
+| Amendment 5's share-validity domain | EXTENDED at its upper end, reversed nowhere. Committed `bench/profile_rules.py` accepts a share in the CLOSED interval `[0, 1]`; clause 27's ceiling needs `0 < f < 1` strictly, because at `f = 1` the ceiling divides by zero while the gain stays defined and returns `r`. Reproduced 2026-08-21: committed `gain(1.0, 3.0)` returns 3.0 and raises nothing, and a share of exactly 0 is unreachable through clause 26 because a zero slope fails the `10R` excursion at every positive `R`. A share of exactly 1 is a fault and joins the refusal class, which is an addition to what code checks today and an obligation on step 8, not a change to what committed code already refuses |
+| Amendment 5's treatment of non-finite readings | EXTENDED, reversing nothing, because committed text has no treatment to reverse. Every reading this amendment consumes must be FINITE: shares, ratios, gains, step totals, scaffold slopes and both resolution floors. Committed code catches SOME of this and the row says which, because a ledger that overstates a gap is as bad as one that hides it: `gain(nan, 3.0)` already raises, since a non-finite share fails the fraction check. What passes through is a non-finite RATIO and anything derived from one: reproduced 2026-08-21, `gain(0.5, nan)` and `ratio_lo([nan], [1])` both return `nan`, and a `nan` score satisfies neither `score >= 1.10` nor `score < 1.10`, so it matches no row of clause 27's terminal table and would leave the profile with no ruling at all. `gain(0.5, inf)` returns 2.0, which is the ceiling exactly and is precisely the value clause 27 says no finite ratio attains, so an infinite ratio would silently satisfy a rule written to exclude it. A non-finite reading is a FAULT and joins the refusal class beside the trace counter and the spread gate; it is not an absence, not a terminal, and step 8's rewrite carries the obligation for the ratio side and everything derived from it |
+| Clause 21's definition of `R`, and clause 16's `2 * R` | RESOLVED and CHANGED. Clause 21's wording parses two ways and clause 33 fixes the absolute difference of the two arms' MEDIANS, because nothing these rules consume is a single round: the registered slope is a median of per-round slopes and every fit runs over arm medians. An earlier draft of this amendment fixed the other reading and justified it with a claim that is arithmetically impossible, that of-medians can be large when the arms agree in every round; that claim is withdrawn. `R` additionally becomes a median over `m` INDEPENDENT blocks, because one block's contrast is a single draw whose relative spread is about 0.76 whatever the round count, simulated over 400000 nine-round blocks with a central 90% range of 0.09 to 2.91 times its own median. CHANGED, and this reaches committed clause 16: its `2 * R` is a false-separation RATE rather than a resolution test, and simulated under an ideal null with `R` at its true value a fresh null contrast exceeds it 17.7% of the time, about one pair in six. The judgement is replaced by a rate registered in advance, `alpha = 0.05`, and a critical value `C` measured at step 10 as the `ceil((m + 1)(1 - alpha))`-th smallest block contrast, which assumes nothing about the null's shape. `C` governs clause 31's seven selection sites; `R` continues to govern clause 21's `3 * R` and clause 26's `10 * R` readability gates unchanged, and the two are NOT interchangeable. No gate's strictness moves relative to any measurement, because `R` has never been measured at the target |
+| 23 | CHANGED in REACH, unchanged in value: its 1.10 and its all-but-one-shape fraction stand exactly as committed, and its comparison of a shape's credited ratio against 1.10 becomes subject to clause 31. An earlier draft of clause 31 excluded this clause, on the ground that taking the LARGEST per-round ratio is already conservative. That reason was refuted by reproduction 2026-08-20: shape maxima of 1, 1, 1, 1, 1.0999 and 2 kill candidate Q at five of six shapes and moving 1.0999 to 1.1001 keeps it at four of six, so the reduction makes the RATIO conservative and does nothing about the THRESHOLD it is compared against. A shape whose ratio the machine cannot resolvably place against 1.10 does NOT count toward the kill, which is the direction that makes killing candidate Q harder |
+| Section 4.3's retained order, and clause 24's restatement of it | CHANGED where and only where the two retained scores cannot be separated. Committed text keeps the top two "in score order" and makes that the Day 2 build order, which hands a build rank to a pair the machine may not be able to rank. Reproduced 2026-08-21: retained scores of 1.06 and 1.05 at `T = 100` convert to a gap of 0.8985 ms, which is below a demand of 1.00 ms, so score order gives Q then L while the pair is in truth unranked. An earlier version of this row gave that gap as 0.089 ms, which is wrong by a factor of ten; the conclusion survives the correction and the number did not. Under clause 31 an unresolvable retained pair is recorded as TIED and section 4.2's table order breaks it, which is the last-resort ordering section 4.3 already registers for ties elsewhere. Where the two scores ARE resolvable, score order stands exactly as committed |
+
+The addendum Amendment 5 reserved for `R` carries the same one KIND of quantity and nothing else, in every context registered for it: the step's resolution floor per cell and width, and now the bench's, keyed the same way.
+A one-value-per-cell-and-width schema cannot hold both and would silently overwrite one of them, so the schema is two context-keyed values wherever candidate L's bench exists, and clause 26 says so.
+Clause 26's two conditions and clause 27's dominance route consume `R` and do not set it.
+
+Nothing here touches the four cells, the model, the corpus, the two widths, the gain formula, the funnel, the held-out draw, the end-to-end measurement or the run discipline of section 3.4.
+Three things this sentence named in an earlier draft are no longer wholly untouched, and are listed rather than left inside a blanket claim: the two-point tie band keeps its width of two points and its tie-breaks and gains a resolution test on membership of the band itself; the kill rule keeps its 1.10 and its all-but-one-shape fraction and gains a resolution test on the comparison against 1.10; and the shipping floor keeps its registered value of 1.10 and gains the same test, so a candidate whose margin above it is not supported by its own measurements does not ship.
+An earlier draft claimed that raises a candidate-independent effective floor and gave its arithmetic; no such floor exists under propagation, and clause 31 records the withdrawal.
+All three are clause 31's, all three are recorded in the ledger above, and none of the three changes a registered number.
