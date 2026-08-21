@@ -870,20 +870,24 @@ def validate_plan(plan: Mapping[str, object]) -> dict:
 
 def decide(profile: Mapping[str, object],
            sweep: Mapping[str, object]) -> dict:
-    """Step 8's job, refused here rather than half-done.
+    """Step 9's floors, refused here rather than half-done.
 
-    The rule this used to apply reads one share per candidate at one width
-    against one credited ratio, and none of those three things survives
-    Amendment 7 unchanged: the selection takes the highest MINIMUM gain across
-    two widths, candidate A carries a share and no ratio at all, and the kill
-    rule no longer certifies. A `--decide` that ran the old arithmetic over a
-    schema-2 recording would produce a ruling with the right shape and the
-    wrong meaning, which is worse than none.
+    The selection rule is rewritten and lives in `profile_rules`, and it reads
+    a CREDITED SAVING per candidate per width. A saving is `M * (1 - F/N)`,
+    and `F` is the floor's credited denominator: candidate Q's dense fp16
+    comparison installed at the same seam as its dial, and candidate L's bench
+    arrangement under clause 19's written exception. Neither exists until the
+    ceiling sweep is built.
+
+    So this refuses on the input rather than on the arithmetic. A `--decide`
+    that supplied its own `F` would be inventing the one measurement the whole
+    credit rests on.
     """
+    del profile, sweep
     raise RunInvalid(
-        "the selection rule is being rewritten to Amendment 7's scope, and "
-        "no ruling is computed from a schema-2 recording until it is; the "
-        "recording is closed and hashed and loses nothing by waiting")
+        "no ceiling sweep exists yet, so no candidate has a credited "
+        "denominator and no saving can be computed; the recording is closed "
+        "and hashed and loses nothing by waiting for it")
 
 
 # ---------------------------------------------------------------------------

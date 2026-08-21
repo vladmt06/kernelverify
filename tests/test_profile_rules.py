@@ -16,27 +16,66 @@ from decode_rules import RunInvalid
 from profile_rules import (
     CANDIDATES,
     CELLS,
-    COMPILE_RATIO_BAND,
+    CandidateInput,
+    CeilingEntry,
     GAIN_FLOOR,
+    INCOMPLETE,
+    Interval,
     KILL_RATIO,
     KILL_SHAPES,
+    MISSING_RATIO,
+    MISSING_SHARE,
+    NO_SELECTION,
     PRIMARY_CELL,
-    RECONCILE_PCT,
+    SELECTED,
     SHAPES,
-    Reading,
+    ScoredEntry,
+    ShapeAtWidth,
+    WIDTH_ORDER,
     collapse_ratio_lo,
-    compile_transfer,
     gain,
     kill_q,
+    largest_round_ratio,
     ratio_lo,
-    reconciles,
     select_first_operation,
 )
 
 
-def _reading(candidate, share, ratio, footprint=0):
-    return Reading(candidate=candidate, share=share, ratio_lo=ratio,
-                   footprint_delta=footprint)
+def _iv(value, spread=0.0):
+    return Interval(value=value, low=value - spread, high=value + spread)
+
+
+def _scored(name, savings, *, total=100.0, spread=0.5, **over):
+    """One candidate L or Q, with a saving at each registered width.
+
+    The default spread is small against the savings below, so a test that
+    wants a comparison to fail the certified margin widens it deliberately
+    rather than relying on the numbers happening to overlap.
+    """
+    return CandidateInput(
+        candidate=name,
+        entries=tuple(ScoredEntry(width=width, step_total=_iv(total, spread),
+                                  saving=_iv(saving, spread))
+                      for width, saving in savings.items()), **over)
+
+
+def _ceiling(shares, *, total=100.0, spread=0.001):
+    return CandidateInput(
+        candidate="A",
+        entries=tuple(CeilingEntry(width=width, step_total=_iv(total, 0.5),
+                                   share=_iv(share, spread),
+                                   attributed=_iv(share * total,
+                                                  spread * total))
+                      for width, share in shares.items()))
+
+
+def _field(**over):
+    """The three registered candidates, all present and all scoreable."""
+    field = {"L": _scored("L", {"short": 25.0, "long": 24.0}),
+             "Q": _scored("Q", {"short": 12.0, "long": 11.0}),
+             "A": _ceiling({"long": 0.05})}
+    field.update(over)
+    return list(field.values())
 
 
 # ---------------------------------------------------------------------------
@@ -51,12 +90,36 @@ def test_the_cells_and_the_one_that_decides():
     assert PRIMARY_CELL == "B", "the case R18's arithmetic was budgeted against"
 
 
-def test_the_five_shapes_are_the_model_geometry():
+def test_the_six_shapes_are_the_model_geometry():
+    """Amendment 5 clause 7: section 3.2 listed five and the model has six.
+    The key and value projections are counted in candidate Q's share, so a
+    floor over five would credit a ratio measured on part of the operation."""
     assert SHAPES == {"S1": (4096, 2560), "S2": (2560, 4096),
                       "S3": (9728, 2560), "S4": (2560, 9728),
-                      "S5": (151936, 2560)}
-    assert len(SHAPES) == KILL_SHAPES + 1, (
-        "the kill rule needs 4 of 5; a sixth shape changes what it means")
+                      "S5": (151936, 2560), "S6": (1024, 2560)}
+
+
+def test_the_kill_count_is_all_but_one_and_moves_with_the_shape_count():
+    """Inheriting the number 4 once S6 exists would have loosened the rule
+    from four-fifths to two-thirds without saying so."""
+    assert KILL_SHAPES == len(SHAPES) - 1 == 5
+
+
+def test_the_certified_and_reported_sites_are_stated_rather_than_inferred():
+    assert len(profile_rules.CERTIFIED_SITES) == 3
+    assert len(profile_rules.REPORTED_SITES) == 4
+    assert not set(profile_rules.CERTIFIED_SITES) & set(
+        profile_rules.REPORTED_SITES)
+
+
+def test_the_rules_amendment_five_voided_are_gone_and_not_merely_unused():
+    """A voided rule that still answers is a rule someone can call and
+    believe, so the reconciliation, the compile transfer and the
+    instrument-cost band are removed rather than deprecated."""
+    for name in ("reconciles", "compile_transfer", "instrument_cost",
+                 "INSTRUMENT_COST_BAND", "RECONCILE_PCT",
+                 "COMPILE_RATIO_BAND", "Reading"):
+        assert not hasattr(profile_rules, name), name
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +127,7 @@ def test_the_five_shapes_are_the_model_geometry():
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("share,ratio,expected", [
     (0.0, 2.0, 1.0),      # accelerating nothing gains nothing
-    (1.0, 2.0, 2.0),      # accelerating everything gains the ratio
+      # accelerating everything gains the ratio
     (0.5, 2.0, 4 / 3),    # half the step, twice as fast
     (0.5, 1.0, 1.0),      # a ratio of one is no speedup at any share
 ])
@@ -105,168 +168,446 @@ def test_a_floor_of_zero_cannot_bound_a_ratio():
 
 
 # ---------------------------------------------------------------------------
-# The two guards, section 3.3 and Amendment 4
+# The kill rule, section 5 over Amendment 5's six shapes, REPORTED
 # ---------------------------------------------------------------------------
-def test_a_decomposition_that_accounts_for_the_step_reconciles():
-    got = reconciles({"loss": 30.0, "attention": 50.0}, remainder=20.0,
-                     step_total=100.0)
-    assert got["ok"] and got["gap_pct"] == pytest.approx(0.0)
+def _kill_shape(ratio):
+    """One shape at one width, with operands that place it either side of the
+    kill line at the same place the reported ratio does."""
+    return ShapeAtWidth(ratio=ratio, numerator_high=ratio,
+                        denominator_low=1.0)
 
 
-def test_a_decomposition_that_misses_the_step_by_more_than_two_percent_fails():
-    got = reconciles({"loss": 30.0}, remainder=20.0, step_total=100.0)
-    assert not got["ok"] and got["gap_pct"] == pytest.approx(50.0)
-    assert got["limit_pct"] == RECONCILE_PCT
+def _kill(**over):
+    """Every registered shape at both widths, clear of the ceiling by default."""
+    field = {name: {width: _kill_shape(2.0) for width in WIDTH_ORDER}
+             for name in SHAPES}
+    for name, value in over.items():
+        if isinstance(value, dict):
+            field[name] = {width: _kill_shape(one)
+                           for width, one in value.items()}
+        else:
+            field[name] = {width: _kill_shape(value) for width in WIDTH_ORDER}
+    return field
 
 
-def test_the_reconciliation_boundary_is_inclusive():
-    """A gap exactly at the limit reconciles; only past it is rejected."""
-    assert reconciles({"a": 98.0}, remainder=0.0, step_total=100.0)["ok"]
-    assert not reconciles({"a": 97.9}, remainder=0.0, step_total=100.0)["ok"]
+def test_q_is_at_the_ceiling_at_all_but_one_of_six_shapes():
+    got = kill_q(_kill(S1=1.02, S2=1.05, S3=1.02, S4=1.05, S5=1.02))
+    assert got["killed"]
+    assert got["at_ceiling"] == ["S1", "S2", "S3", "S4", "S5"]
 
 
-def test_the_compile_ratio_is_reported_and_never_applied():
-    got = compile_transfer(uncompiled_total=105.0, compiled_total=100.0)
-    assert got["ok"] and got["ratio"] == pytest.approx(1.05)
-    assert got["band"] == COMPILE_RATIO_BAND
+def test_four_shapes_at_the_ceiling_is_not_enough_over_six():
+    assert not kill_q(_kill(S1=1.02, S2=1.05, S3=1.02, S4=1.05))["killed"]
 
 
-@pytest.mark.parametrize("uncompiled", [85.0, 130.0])
-def test_a_step_that_moved_too_far_under_compile_rejects_the_profile(uncompiled):
-    assert not compile_transfer(uncompiled, 100.0)["ok"]
+def test_the_certified_kill_boundary_is_strict_where_the_bare_ratio_was_not():
+    """Clause 31 turns an inclusive threshold into a strict one: an action
+    supported exactly at the line is supported at no margin at all."""
+    assert not profile_rules.shape_counts_toward_kill(1.0, KILL_RATIO)
+    at_line = _kill(**{name: KILL_RATIO for name in list(SHAPES)[:5]})
+    assert not kill_q(at_line)["killed"]
+
+
+def test_headroom_at_either_width_keeps_the_candidate_alive():
+    """Clause 8's two-width reduction: a shape counts only where stock is
+    within the ceiling at BOTH widths."""
+    field = _kill(S1=1.02, S2=1.02, S3=1.02, S4=1.02)
+    field["S5"] = {"short": _kill_shape(1.02), "long": _kill_shape(2.0)}
+    got = kill_q(field)
+    assert not got["killed"]
+    assert got["shapes"]["S5"]["widths"]["short"]["counts"]
+    assert not got["shapes"]["S5"]["widths"]["long"]["counts"]
+
+
+def test_the_kill_verdict_says_in_writing_that_it_gates_nothing():
+    got = kill_q(_kill(S1=1.02, S2=1.02, S3=1.02, S4=1.02, S5=1.02))
+    assert got["certified"] is False
+    assert "removes no candidate" in got["gates_nothing"]
+
+
+def test_the_kill_rule_reads_every_registered_shape_or_refuses():
+    field = _kill()
+    del field["S6"]
+    with pytest.raises(RunInvalid, match="missing"):
+        kill_q(field)
+
+
+def test_the_kill_rule_reads_both_widths_at_every_shape_or_refuses():
+    field = _kill()
+    field["S3"] = {"short": _kill_shape(1.02)}
+    with pytest.raises(RunInvalid, match="both registered widths"):
+        kill_q(field)
+
+
+def test_a_shape_nobody_registered_cannot_reach_the_threshold():
+    field = _kill()
+    field["S7"] = {width: _kill_shape(1.0) for width in WIDTH_ORDER}
+    with pytest.raises(RunInvalid, match="not registered"):
+        kill_q(field)
+
+
+def test_the_ratio_a_shape_contributes_is_the_largest_of_its_rounds():
+    """The largest is the one furthest from the ceiling and so the least
+    likely to kill, which is the conservative direction for a rule whose
+    effect is to remove a candidate."""
+    assert largest_round_ratio([1.05, 1.20, 1.02]) == 1.20
+    with pytest.raises(RunInvalid, match="at least one round"):
+        largest_round_ratio([])
+    with pytest.raises(RunInvalid, match="not finite"):
+        largest_round_ratio([1.0, float("nan")])
 
 
 # ---------------------------------------------------------------------------
-# The kill rule, section 5
+# The selection rule, section 4.3 under Amendments 6 and 7
 # ---------------------------------------------------------------------------
-def _ceilings(**overrides):
-    ratios = {name: 2.0 for name in SHAPES}
-    ratios.update(overrides)
-    return ratios
-
-
-def test_q_dies_when_stock_is_already_at_the_ceiling_almost_everywhere():
-    got = kill_q(_ceilings(S1=1.02, S2=1.05, S3=1.09, S4=1.10))
-    assert got["killed"] and got["at_ceiling"] == ["S1", "S2", "S3", "S4"]
-
-
-def test_three_shapes_at_the_ceiling_is_not_enough():
-    assert not kill_q(_ceilings(S1=1.02, S2=1.05, S3=1.09))["killed"]
-
-
-def test_the_kill_line_is_inclusive_and_a_hair_past_it_is_headroom():
-    assert kill_q(_ceilings(S1=1.1, S2=1.1, S3=1.1, S4=1.1))["killed"]
-    assert not kill_q(_ceilings(S1=1.1, S2=1.1, S3=1.1, S4=1.1001))["killed"]
-
-
-def test_the_kill_rule_reads_every_shape_or_refuses():
-    with pytest.raises(RunInvalid):
-        kill_q({"S1": 1.0, "S2": 1.0})
-
-
-# ---------------------------------------------------------------------------
-# The selection rule, section 4.3
-# ---------------------------------------------------------------------------
-def test_the_largest_gain_selects():
-    got = select_first_operation([
-        _reading("L", share=0.30, ratio=2.0),
-        _reading("A", share=0.10, ratio=2.0),
-    ])
-    assert got["selected"] == "L" and got["verdict"] == "SELECTED"
-    assert [row["candidate"] for row in got["ranked"]] == ["L", "A"]
-
-
-def test_a_tie_goes_to_the_smaller_footprint_delta():
-    """Within two points of gain is a tie, and the first tie-break is the
-    measured peak-footprint delta, not the larger number."""
-    got = select_first_operation([
-        _reading("L", share=0.3000, ratio=2.0, footprint=900),
-        _reading("A", share=0.2999, ratio=2.0, footprint=100),
-    ])
-    assert got["selected"] == "A", "the hair-larger gain does not win a tie"
-    assert got["tied_with"] == ["L"]
-
-
-def test_a_remaining_tie_goes_to_the_earlier_row_in_the_table():
-    got = select_first_operation([
-        _reading("Q", share=0.30, ratio=2.0, footprint=100),
-        _reading("A", share=0.30, ratio=2.0, footprint=100),
-    ])
-    assert got["selected"] == "A", f"table order is {CANDIDATES}"
-
-
-def test_a_weak_profile_picks_nothing_and_keeps_the_top_two():
-    """Section 4.3's registered branch: below R10's floor the sprint records
-    the reading rather than making a hopeful pick."""
-    got = select_first_operation([
-        _reading("L", share=0.05, ratio=1.5),
-        _reading("A", share=0.04, ratio=1.5),
-        _reading("Q", share=0.01, ratio=1.2),
-    ])
-    assert got["selected"] is None
-    assert got["verdict"] == "NO SINGLE OPERATION REACHES THE FLOOR"
-    assert got["keep"] == ["L", "A"], "the top two, in gain order"
-    assert all(row["gain"] < GAIN_FLOOR for row in got["ranked"])
-
-
-def test_the_floor_boundary_selects_rather_than_refuses():
-    """gain == 1.10 is not below the floor. f and r chosen so the formula
-    lands exactly on it: 1/(1 - f(1 - 1/r)) = 1.1 at f = 1, r = 1.1."""
-    got = select_first_operation([_reading("L", share=1.0, ratio=GAIN_FLOOR)])
-    assert got["ranked"][0]["gain"] == pytest.approx(GAIN_FLOOR)
-    assert got["selected"] == "L"
-
-
-def test_the_footprint_tie_break_cannot_select_below_the_floor():
-    """Amendment 5 clause 24: the shipping floor applies to the SELECTED
-    candidate, not to the largest gain. Reproduced before the fix: a leader at
-    gain 1.105 pulls a 1.095 candidate into the tie band, and the smaller
-    footprint then hands SELECTED to a candidate below 1.10."""
-    got = select_first_operation([
-        _reading("L", share=2 * (1 - 1 / 1.105), ratio=2.0, footprint=900),
-        _reading("A", share=2 * (1 - 1 / 1.095), ratio=2.0, footprint=100),
-    ])
-    assert got["selected"] == "L", "a below-floor candidate must never ship"
-    assert got["tied_with"] == [], "below the floor is not tied, it is out"
-    assert [row["candidate"] for row in got["ranked"]] == ["L", "A"], \
-        "the below-floor candidate stays in the ranked evidence"
-
-
-def test_table_order_cannot_select_below_the_floor_either():
-    """The same hole through the other tie-break: an unmeasured footprint
-    sends the band to table order, and table order reads L before Q."""
-    got = select_first_operation([
-        _reading("Q", share=2 * (1 - 1 / 1.105), ratio=2.0, footprint=100),
-        _reading("L", share=2 * (1 - 1 / 1.095), ratio=2.0, footprint=None),
-    ])
-    assert got["selected"] == "Q", "a below-floor candidate must never ship"
-    assert got["tied_with"] == []
-    assert [row["candidate"] for row in got["ranked"]] == ["Q", "L"]
-
-
-def test_the_rule_refuses_a_candidate_it_never_registered():
-    with pytest.raises(RunInvalid):
-        select_first_operation([_reading("Z", share=0.3, ratio=2.0)])
-
-
-def test_the_rule_refuses_an_empty_field():
-    with pytest.raises(RunInvalid):
-        select_first_operation([])
-
-
-def test_the_rule_refuses_two_readings_of_one_candidate():
-    """A candidate has one share at the primary cell and one credited ratio.
-    Given two, the rule would silently rank the better of them and report a
-    table naming the same candidate twice, which reads as a comparison."""
-    with pytest.raises(RunInvalid, match="more than one reading"):
-        select_first_operation([_reading("L", share=0.5, ratio=2.0),
-                                _reading("L", share=0.1, ratio=1.1)])
-
-
-def test_one_reading_each_is_still_accepted():
-    ruling = select_first_operation([_reading("L", share=0.5, ratio=2.0),
-                                     _reading("A", share=0.1, ratio=1.1)])
+def test_the_certified_winner_is_selected_and_says_what_it_rested_on():
+    ruling = select_first_operation(_field())
+    assert ruling["verdict"] == SELECTED
     assert ruling["selected"] == "L"
+    assert ruling["band"] == ["L"]
+    assert set(ruling["certified_sites"]) == set(profile_rules.CERTIFIED_SITES)
+
+
+def test_the_score_is_the_candidate_s_gain_at_its_WORSE_width():
+    """Clause 14. A candidate strong at one width and weak at the other is
+    scored on the weak one, so a winner has to win where it is worst."""
+    ruling = select_first_operation(_field(
+        L=_scored("L", {"short": 40.0, "long": 12.0})))
+    row, = [one for one in ruling["scored"] if one["candidate"] == "L"]
+    assert row["worst_width"] == "long"
+    assert row["score"] == pytest.approx(1 / (1 - 0.12))
+
+
+def test_the_floor_is_certified_over_the_box_and_not_at_the_measured_value():
+    """A gain of 1.10 IS a saving of T/11, and clause 31 supports shipping
+    only where the saving beats it everywhere the measurements admit."""
+    tight = _scored("L", {"short": 9.5, "long": 9.5}, spread=0.2)
+    wide = _scored("L", {"short": 9.5, "long": 9.5}, spread=2.0)
+    assert select_first_operation(
+        _field(L=tight, Q=_scored("Q", {"short": 4.0, "long": 4.0}))
+    )["verdict"] == SELECTED
+    assert select_first_operation(
+        _field(L=wide, Q=_scored("Q", {"short": 4.0, "long": 4.0}))
+    )["verdict"] == NO_SELECTION
+
+
+def test_a_candidate_above_the_floor_at_one_width_only_does_not_ship():
+    ruling = select_first_operation(_field(
+        L=_scored("L", {"short": 25.0, "long": 5.0}),
+        Q=_scored("Q", {"short": 4.0, "long": 4.0})))
+    assert ruling["verdict"] == NO_SELECTION
+
+
+def test_every_score_below_the_floor_keeps_an_unordered_set_not_a_build_order():
+    """Clause 34 REVERSES the committed kept list. It used to be the top two
+    in score order, and section 4.3 makes that list the Day 2 build order, so
+    a quantity that certifies nothing arrived somewhere as an instruction."""
+    ruling = select_first_operation(_field(
+        L=_scored("L", {"short": 4.0, "long": 4.0}),
+        Q=_scored("Q", {"short": 6.0, "long": 6.0})))
+    assert ruling["verdict"] == NO_SELECTION
+    assert ruling["keep"] == ["L", "Q"], "section 4.2's table order"
+    assert ruling["score_order"] == ["Q", "L"], "evidence, not a build order"
+    assert "NOT a build order" in ruling["keep_is_unordered"]
+
+
+def test_no_scores_at_all_is_an_answer_rather_than_an_absence():
+    ruling = select_first_operation(_field(
+        L=CandidateInput("L", absence=MISSING_RATIO),
+        Q=CandidateInput("Q", absence=MISSING_RATIO)))
+    assert ruling["verdict"] == NO_SELECTION
+    assert ruling["keep"] == []
+    assert ruling["absences"] == {"L": MISSING_RATIO, "Q": MISSING_RATIO}
+
+
+@pytest.mark.parametrize("name", ["L", "Q"])
+def test_a_certified_candidate_missing_a_share_makes_the_profile_incomplete(
+        name):
+    """Clause 38's guard runs before the table: a required measurement does
+    not exist and no remaining score can substitute for it."""
+    ruling = select_first_operation(_field(
+        **{name: CandidateInput(name, absence=MISSING_SHARE)}))
+    assert ruling["verdict"] == INCOMPLETE
+    assert ruling["incomplete"] == [name]
+    assert ruling["selected"] is None
+
+
+def test_a_missing_ratio_leaves_a_candidate_excluded_and_continuable():
+    ruling = select_first_operation(_field(
+        L=CandidateInput("L", absence=MISSING_RATIO)))
+    assert ruling["verdict"] == SELECTED
+    assert ruling["selected"] == "Q"
+    assert ruling["absences"] == {"L": MISSING_RATIO}
+
+
+def test_a_killed_q_is_a_recorded_flag_and_removes_nothing():
+    """Amendment 7 clause 36 demotes the ACTION and keeps the MEASUREMENT."""
+    ruling = select_first_operation(_field(
+        L=_scored("L", {"short": 12.0, "long": 11.0}),
+        Q=_scored("Q", {"short": 25.0, "long": 24.0}, killed=True)))
+    assert ruling["verdict"] == SELECTED
+    assert ruling["selected"] == "Q"
+    assert ruling["kill"] == {"L": False, "Q": True}
+
+
+def test_a_kill_flag_on_a_candidate_the_rule_does_not_kill_refuses():
+    """Clause 23's rule reaches candidate Q alone, so a killed candidate L is
+    not a state this profile can be in, and an earlier enumeration that
+    invented one described 864 states as 1728."""
+    with pytest.raises(RunInvalid, match="reaches candidate Q alone"):
+        select_first_operation(_field(
+            L=_scored("L", {"short": 25.0, "long": 24.0}, killed=True)))
+
+
+def test_a_pair_inside_the_band_goes_to_the_registered_tie_breaks():
+    ruling = select_first_operation(_field(
+        L=_scored("L", {"short": 24.6, "long": 24.6}, spread=2.0),
+        Q=_scored("Q", {"short": 25.0, "long": 25.0}, spread=2.0)))
+    assert set(ruling["band"]) == {"L", "Q"}
+    assert ruling["anchor"] == "Q"
+    assert ruling["selected"] == "L", "section 4.2's table order"
+
+
+def test_both_tie_routes_are_unions_and_not_intersections():
+    """A candidate joins the band unless it is certified outside the two-point
+    band AND certified resolvably worse. An earlier draft used the second
+    route alone, which left a candidate inside the two-point band but
+    resolvably worse simultaneously in and out of it."""
+    ruling = select_first_operation(_field(
+        L=_scored("L", {"short": 24.0, "long": 24.0}, spread=0.05),
+        Q=_scored("Q", {"short": 25.0, "long": 25.0}, spread=0.05)))
+    evidence = ruling["band_evidence"]["L"]
+    assert evidence["certified_resolvably_worse"] is True
+    assert evidence["certified_outside_the_two_point_band"] is False
+    assert evidence["in_band"] is True
+    assert set(ruling["band"]) == {"L", "Q"}
+
+
+def test_a_candidate_both_outside_the_band_and_resolvably_worse_is_excluded():
+    ruling = select_first_operation(_field(
+        L=_scored("L", {"short": 10.0, "long": 10.0}, spread=0.05),
+        Q=_scored("Q", {"short": 30.0, "long": 30.0}, spread=0.05)))
+    evidence = ruling["band_evidence"]["L"]
+    assert evidence["certified_outside_the_two_point_band"]
+    assert evidence["certified_resolvably_worse"]
+    assert ruling["band"] == ["Q"]
+    assert ruling["selected"] == "Q"
+
+
+def test_a_pair_resolvable_at_one_width_only_is_not_resolvable():
+    """Clause 16 fixes the quantifier: a pair the machine can separate at one
+    width is not a pair the machine can separate."""
+    ruling = select_first_operation(_field(
+        L=_scored("L", {"short": 24.0, "long": 24.9}, spread=0.05),
+        Q=_scored("Q", {"short": 30.0, "long": 25.0}, spread=0.05)))
+    assert ruling["band_evidence"]["L"]["certified_resolvably_worse"] is False
+    assert set(ruling["band"]) == {"L", "Q"}
+
+
+def test_no_tie_break_of_any_kind_can_select_below_the_floor():
+    """The band is drawn only from candidates the floor already admitted."""
+    ruling = select_first_operation(_field(
+        L=_scored("L", {"short": 9.0, "long": 9.0}, footprint_delta=-1),
+        Q=_scored("Q", {"short": 25.0, "long": 24.0}, footprint_delta=99)))
+    assert ruling["selected"] == "Q"
+    assert "L" not in ruling["band"]
+
+
+# ---------------------------------------------------------------------------
+# Candidate A, which is measured, reported, and gates nothing
+# ---------------------------------------------------------------------------
+def test_candidate_a_never_scores_and_never_enters_the_band():
+    ruling = select_first_operation(_field())
+    assert [row["candidate"] for row in ruling["scored"]] == ["L", "Q"]
+    assert "A" not in ruling["band"]
+
+
+def test_a_low_ceiling_excludes_candidate_a_by_arithmetic_and_gates_nothing():
+    ruling = select_first_operation(_field(A=_ceiling({"long": 0.05})))
+    report = ruling["candidate_a"]
+    assert report["route_1_excludes"] == ["long"]
+    assert report["certified"] is False
+    assert ruling["verdict"] == SELECTED
+
+
+def test_a_high_ceiling_records_an_open_question_and_still_selects():
+    """Amendment 7 clause 35: the profile can no longer decline to name an
+    operation on the ground that candidate A might have been better."""
+    ruling = select_first_operation(_field(A=_ceiling({"long": 0.45})))
+    assert ruling["verdict"] == SELECTED
+    assert ruling["selected"] == "L"
+    question, = ruling["open_questions"]
+    assert question["u_min"] == pytest.approx(1 / (1 - 0.45))
+    assert question["set_by"] == ["long"]
+    assert question["shortfall"] > 0
+
+
+def test_a_winner_that_beats_the_ceiling_leaves_no_open_question():
+    ruling = select_first_operation(_field(
+        L=_scored("L", {"short": 40.0, "long": 40.0}),
+        A=_ceiling({"long": 0.20})))
+    assert ruling["candidate_a"]["route_2"]["excludes"] is True
+    assert ruling["open_questions"] == []
+
+
+def test_the_ceiling_is_read_against_the_SELECTED_candidate_not_the_top_score():
+    """Clause 27 registers the selected candidate, on the same principle
+    `ratio_lo` follows: each reduction is the one that makes its own action
+    harder to take, and exclusion is the only action this route takes."""
+    ruling = select_first_operation(_field(
+        L=_scored("L", {"short": 24.6, "long": 24.6}, spread=2.0),
+        Q=_scored("Q", {"short": 25.0, "long": 25.0}, spread=2.0),
+        A=_ceiling({"long": 0.248})))
+    assert ruling["anchor"] == "Q"
+    assert ruling["selected"] == "L"
+    assert ruling["candidate_a"]["route_2"]["against"] == "L"
+
+
+def test_a_ceiling_valid_at_one_width_narrows_rather_than_refusing():
+    ruling = select_first_operation(_field(A=_ceiling({"long": 0.05})))
+    assert ruling["candidate_a"]["valid_widths"] == ["long"]
+    assert ruling["candidate_a"]["u_min_set_by"] == ["long"]
+
+
+def test_candidate_a_absent_at_both_widths_is_never_incompleteness():
+    """REVERSED from Amendment 6, where a candidate A with no valid width
+    reached INCOMPLETE."""
+    ruling = select_first_operation(_field(
+        A=CandidateInput("A", absence=MISSING_SHARE)))
+    assert ruling["verdict"] == SELECTED
+    assert ruling["candidate_a"]["ceiling"] is None
+    assert ruling["open_questions"] == []
+
+
+def test_the_ceiling_carries_its_own_stated_bias_beside_the_number():
+    """With no action left, an inflated share only makes candidate A look
+    better in the report than it is, so the bias goes where the number is."""
+    report = select_first_operation(_field())["candidate_a"]
+    assert "inflated" in report["stated_bias"]
+
+
+# ---------------------------------------------------------------------------
+# The refusal class, which is not a terminal
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("share", [1.0, 1.01, 0.0, -0.1])
+def test_a_share_that_is_not_a_fraction_refuses_the_whole_profile(share):
+    """Clause 27: the sibling width is not used, because it came from the
+    same instrument, and a share of 1.401 is exactly what exposed the
+    instrument Amendment 5 exists to replace."""
+    with pytest.raises(RunInvalid, match="not a fraction"):
+        select_first_operation(_field(A=_ceiling({"long": share})))
+
+
+def test_a_non_finite_reading_refuses_before_any_rule_reads_it():
+    """A NaN satisfies neither branch of any test, so one of them makes the
+    terminal table neither total nor disjoint."""
+    with pytest.raises(RunInvalid, match="must be finite"):
+        Interval(value=float("nan"), low=0.0, high=1.0)
+    with pytest.raises(RunInvalid, match="must be finite"):
+        Interval(value=1.0, low=0.0, high=float("inf"))
+
+
+def test_the_saving_fraction_bounds_hold_at_every_corner_of_its_box():
+    """`K/T` is monotone in `T` for fixed `K`, and which corner of `T` gives
+    the extreme depends on the SIGN of `K`. Pairing the smallest saving with
+    the largest step unconditionally is right only while `K` is positive, and
+    a wide box is exactly where a saving reaches below zero and exactly where
+    the band test and route 2 read the low end."""
+    entry = ScoredEntry(width="short",
+                        step_total=Interval(100.0, 94.0, 106.0),
+                        saving=Interval(5.0, -1.0, 11.0))
+    fraction = profile_rules._fraction(entry)
+    for saving in (-1.0, 0.0, 5.0, 11.0):
+        for total in (94.0, 100.0, 106.0):
+            assert fraction.low - 1e-12 <= saving / total <= fraction.high + 1e-12
+    assert fraction.low == pytest.approx(-1.0 / 94.0)
+
+
+def test_candidate_a_is_never_typed_as_missing_a_ratio():
+    """Clause 30: for candidate A that is not an absence at all, it is the
+    amendment's permanent state, and typing it would discard the share the
+    ceiling is built from."""
+    with pytest.raises(RunInvalid, match="permanent state"):
+        select_first_operation(_field(
+            A=CandidateInput("A", absence=MISSING_RATIO)))
+
+
+def test_candidate_a_is_recorded_even_when_the_profile_is_incomplete():
+    """A reported quantity reaches no terminal and is still evidence."""
+    ruling = select_first_operation(_field(
+        L=CandidateInput("L", absence=MISSING_SHARE)))
+    assert ruling["verdict"] == INCOMPLETE
+    assert ruling["candidate_a"]["u_min"] == pytest.approx(1 / (1 - 0.05))
+
+
+def test_a_measured_value_outside_its_own_box_refuses():
+    with pytest.raises(RunInvalid, match="outside its own box"):
+        Interval(value=5.0, low=1.0, high=2.0)
+
+
+def test_a_step_with_no_measured_time_cannot_be_a_denominator():
+    with pytest.raises(RunInvalid, match="step with no measured time"):
+        select_first_operation(_field(
+            L=_scored("L", {"short": 25.0, "long": 24.0}, total=0.4,
+                      spread=0.5)))
+
+
+def test_the_gain_formula_is_strict_at_a_share_of_one():
+    """Committed code returned `r` there and raised nothing; clause 27 makes
+    it a fault and registers the fix as step 8's obligation."""
+    assert gain(0.5, 2.0) == pytest.approx(4 / 3)
+    with pytest.raises(RunInvalid, match="not a fraction"):
+        gain(1.0, 3.0)
+
+
+# ---------------------------------------------------------------------------
+# The input contract, clause 30
+# ---------------------------------------------------------------------------
+def test_the_rule_refuses_a_candidate_it_never_registered():
+    with pytest.raises(RunInvalid, match="not candidates"):
+        select_first_operation(_field() + [_scored("Z", {"short": 1.0})])
+
+
+def test_the_rule_refuses_a_candidate_simply_left_out():
+    """A candidate that could disappear between the profile and the ruling is
+    the fault clause 30 exists to make impossible."""
+    field = [one for one in _field() if one.candidate != "Q"]
+    with pytest.raises(RunInvalid, match="no state for"):
+        select_first_operation(field)
+
+
+def test_the_rule_refuses_two_states_for_one_candidate():
+    with pytest.raises(RunInvalid, match="more than one input"):
+        select_first_operation(_field() + [_scored("L", {"short": 1.0})])
+
+
+def test_the_rule_refuses_an_untyped_absence():
+    with pytest.raises(RunInvalid, match="untyped absence"):
+        select_first_operation(_field(
+            L=CandidateInput("L", absence="vanished")))
+
+
+def test_the_rule_refuses_a_candidate_that_is_both_present_and_absent():
+    with pytest.raises(RunInvalid, match="both a typed absence and readings"):
+        select_first_operation(_field(
+            L=_scored("L", {"short": 25.0, "long": 24.0},
+                      absence=MISSING_RATIO)))
+
+
+def test_the_rule_refuses_a_candidate_that_is_neither():
+    with pytest.raises(RunInvalid, match="neither readings nor"):
+        select_first_operation(_field(L=CandidateInput("L")))
+
+
+def test_a_scored_candidate_measured_at_one_width_has_no_worse_to_take():
+    with pytest.raises(RunInvalid, match="WORSE of both"):
+        select_first_operation(_field(L=_scored("L", {"short": 25.0})))
+
+
+def test_the_rule_refuses_a_width_nobody_registered():
+    with pytest.raises(RunInvalid, match="not registered"):
+        select_first_operation(_field(
+            L=_scored("L", {"short": 25.0, "medium": 24.0})))
 
 
 # ---------------------------------------------------------------------------
@@ -422,46 +763,209 @@ def test_the_kill_rule_counts_only_registered_shapes():
 
 
 # ---------------------------------------------------------------------------
-# The footprint tie-break needs every tied candidate measured (Amendment 5)
+# Clause 38's terminal table, verified by enumeration rather than by reading
 # ---------------------------------------------------------------------------
-def test_an_unmeasured_footprint_sends_the_whole_band_to_table_order():
-    """Ranking a measured delta against an unmeasured one would decide the
-    sprint on which candidate happened to get a number."""
-    ruling = select_first_operation([
-        Reading("A", 0.50, 2.0, footprint_delta=None),
-        Reading("L", 0.50, 2.0, footprint_delta=1),
-    ])
-    assert ruling["selected"] == "L"          # L is the earlier table row
+_STATES = ("scored", MISSING_SHARE, MISSING_RATIO)
+_CEILINGS = {"absent": None, "low": 0.05, "high": 0.45}
+
+
+def _enumerate():
+    """Every legal state of the reduced space, with its ruling.
+
+    The axes are clause 38's: each of candidates L and Q's three typed states,
+    candidate Q's kill flag, each scored candidate's shipping margin, whether
+    clause 16's pair test resolves, and candidate A's width states with both
+    readings of its exclusion.
+
+    A killed candidate L is NOT enumerated, because clause 23's rule reaches
+    candidate Q alone. An earlier draft of the amendment enumerated one and
+    described 864 states as 1728, half of them states no run can reach.
+    """
+    for l_state in _STATES:
+        for q_state in _STATES:
+            for l_ships in (True, False):
+                for q_ships in (True, False):
+                    for spread in (0.5, 6.0):
+                        for killed in (False, True):
+                            for a_state, share in _CEILINGS.items():
+                                field = {}
+                                for name, state, ships in (
+                                        ("L", l_state, l_ships),
+                                        ("Q", q_state, q_ships)):
+                                    if state != "scored":
+                                        field[name] = CandidateInput(
+                                            name, absence=state,
+                                            killed=killed and name == "Q")
+                                        continue
+                                    saving = 25.0 if ships else 5.0
+                                    if name == "Q":
+                                        saving -= 1.0
+                                    field[name] = _scored(
+                                        name, {"short": saving,
+                                               "long": saving},
+                                        spread=spread,
+                                        killed=killed and name == "Q")
+                                field["A"] = (
+                                    CandidateInput("A", absence=MISSING_SHARE)
+                                    if share is None
+                                    else _ceiling({"long": share}))
+                                key = (l_state, q_state, l_ships, q_ships,
+                                       spread, killed, a_state)
+                                yield key, select_first_operation(
+                                    list(field.values()))
+
+
+def _payload(ruling):
+    """What a terminal NAMES, not merely what it is labelled.
+
+    A table can hold its terminal invariant while the operation it names
+    moves, and a profile that names a different operation has made a different
+    ruling whatever its label says.
+    """
+    if ruling["verdict"] == SELECTED:
+        return ("ships", tuple(sorted([ruling["selected"]]
+                                      + ruling["tied_with"])))
+    if ruling["verdict"] == NO_SELECTION:
+        return ("keep", tuple(ruling["keep"]))
+    return ("incomplete", tuple(ruling["incomplete"]))
+
+
+def test_every_legal_state_lands_on_exactly_one_of_three_terminals():
+    seen, count = set(), 0
+    for _key, ruling in _enumerate():
+        assert ruling["verdict"] in (SELECTED, NO_SELECTION, INCOMPLETE)
+        seen.add(ruling["verdict"])
+        # Disjointness is structural: a verdict names a selection or it does
+        # not, and INCOMPLETE names neither a selection nor a kept list.
+        if ruling["verdict"] == SELECTED:
+            assert ruling["selected"] is not None
+            assert "keep" not in ruling and "incomplete" not in ruling
+        else:
+            assert ruling["selected"] is None
+        count += 1
+    assert count == 432
+    assert seen == {SELECTED, NO_SELECTION, INCOMPLETE}, (
+        "an enumeration that never reaches a terminal proves nothing about it")
+
+
+def test_no_state_s_terminal_or_payload_moves_with_candidate_a():
+    """Amendment 7 clause 35's assertion, checked on the pair of terminal AND
+    payload because an earlier draft compared bare labels."""
+    grouped = {}
+    for key, ruling in _enumerate():
+        without_a = key[:-1]
+        grouped.setdefault(without_a, set()).add(
+            (ruling["verdict"], _payload(ruling)))
+    moved = {key: values for key, values in grouped.items()
+             if len(values) > 1}
+    assert not moved, f"{len(moved)} states move with candidate A"
+
+
+def test_no_state_s_terminal_or_payload_moves_with_the_kill_reading():
+    """Amendment 7 clause 36's assertion, on the same stronger comparison."""
+    grouped = {}
+    for key, ruling in _enumerate():
+        without_kill = key[:5] + key[6:]
+        grouped.setdefault(without_kill, set()).add(
+            (ruling["verdict"], _payload(ruling)))
+    moved = {key: values for key, values in grouped.items()
+             if len(values) > 1}
+    assert not moved, f"{len(moved)} states move with the kill reading"
+
+
+def test_candidate_a_still_reaches_the_artifact_in_every_state_it_is_valid():
+    """Invariance is not silence: the ceiling and both routes are recorded
+    wherever candidate A has a valid share, and only the terminal is deaf."""
+    for key, ruling in _enumerate():
+        if key[-1] == "absent":
+            continue
+        report = ruling["candidate_a"]
+        assert report["u_min"] is not None
+        assert report["certified"] is False
+
+
+def test_the_worked_disagreement_with_amendment_six_reaches_SELECTED():
+    """Clause 38's own worked case: both candidates scoreable and above the
+    floor, candidate A valid and neither route excluding it. Amendment 6
+    returns UNRESOLVED and this amendment returns SELECTED."""
+    ruling = select_first_operation(_field(A=_ceiling({"long": 0.45})))
+    assert ruling["verdict"] == SELECTED
+    assert ruling["open_questions"], "the veto becomes a recorded risk"
+    assert not hasattr(profile_rules, "UNRESOLVED")
+
+
+# ---------------------------------------------------------------------------
+# Clause 12's footprint tie-break, which has TWO fall-through conditions
+# ---------------------------------------------------------------------------
+def _tied(**over):
+    """Two candidates inside the band, so a tie-break decides the winner."""
+    field = {"L": _scored("L", {"short": 24.6, "long": 24.6}, spread=2.0),
+             "Q": _scored("Q", {"short": 25.0, "long": 25.0}, spread=2.0),
+             "A": _ceiling({"long": 0.05})}
+    field.update(over)
+    return list(field.values())
+
+
+def test_candidate_l_in_the_band_sends_it_to_table_order_whatever_was_measured():
+    """Clause 12's SECOND condition, which committed code did not carry.
+    Candidate L's baseline is measured on the bench and the other two in the
+    step, so its delta is not comparable with theirs."""
+    ruling = select_first_operation(_tied(
+        L=_scored("L", {"short": 24.6, "long": 24.6}, spread=2.0,
+                  footprint_delta=99),
+        Q=_scored("Q", {"short": 25.0, "long": 25.0}, spread=2.0,
+                  footprint_delta=1)))
+    assert set(ruling["band"]) == {"L", "Q"}
     assert ruling["footprint_measured"] is False
-    assert "table order" in ruling["reason"]
+    assert ruling["selected"] == "L", "table order, not the smaller delta"
+    assert "not comparable" in ruling["reason"]
 
 
-def test_a_fully_measured_band_still_uses_the_footprint():
-    ruling = select_first_operation([
-        Reading("L", 0.50, 2.0, footprint_delta=9),
-        Reading("A", 0.50, 2.0, footprint_delta=1),
-    ])
-    assert ruling["selected"] == "A"
-    assert ruling["footprint_measured"] is True
-    assert "peak-footprint delta" in ruling["reason"]
+def _row(candidate, footprint):
+    return {"candidate": candidate, "footprint_delta": footprint}
 
 
-def test_an_unmeasured_footprint_outside_the_band_does_not_reach_the_rule():
-    """Only the tied band is tie-broken, so a distant candidate with no
-    footprint number cannot drag the winner to table order."""
-    ruling = select_first_operation([
-        Reading("L", 0.50, 4.0, footprint_delta=9),
-        Reading("A", 0.50, 4.0, footprint_delta=1),
-        Reading("Q", 0.01, 1.01, footprint_delta=None),
-    ])
-    assert ruling["selected"] == "A"
-    assert ruling["footprint_measured"] is True
+def test_an_unmeasured_delta_sends_the_whole_band_to_table_order():
+    """Clause 12's FIRST condition. Ranking a measured delta against an
+    unmeasured one would decide the sprint on which candidate happened to get
+    a number."""
+    tied, reason, measured = profile_rules.break_band(
+        [_row("Q", 5), _row("A", None)])
+    assert measured is False
+    assert "not measured for every candidate" in reason
+    assert [row["candidate"] for row in tied] == ["A", "Q"]
+
+
+def test_a_fully_measured_band_without_candidate_l_uses_the_footprint():
+    tied, reason, measured = profile_rules.break_band(
+        [_row("Q", 5), _row("A", 1)])
+    assert measured is True
+    assert "smaller peak-footprint delta" in reason
+    assert [row["candidate"] for row in tied] == ["A", "Q"]
+
+
+def test_the_tie_break_is_unreachable_under_this_manifest_and_says_so():
+    """Only candidates L and Q ever score, so any band with more than one
+    member contains candidate L and clause 12's second condition always fires.
+    The rule is carried anyway so a later amendment adding a scoreable
+    candidate gets it rather than a rediscovery."""
+    assert "unreachable in practice" in profile_rules.break_band.__doc__
+    _tied_rows, _reason, measured = profile_rules.break_band(
+        [_row("L", 1), _row("Q", 5)])
+    assert measured is False
+
+
+def test_a_band_of_one_needs_no_tie_break_at_all():
+    ruling = select_first_operation(_field())
+    assert ruling["band"] == ["L"]
+    assert ruling["tied_with"] == []
+    assert ruling["reason"].startswith("the largest certified score")
 
 
 def test_the_footprint_defaults_to_unmeasured():
-    """A reading that says nothing about footprint must not read as zero,
+    """A candidate that says nothing about footprint must not read as zero,
     which would silently win every tie-break."""
-    assert Reading("A", 0.5, 2.0).footprint_delta is None
+    assert _scored("L", {"short": 1.0}).footprint_delta is None
 
 
 # ---------------------------------------------------------------------------

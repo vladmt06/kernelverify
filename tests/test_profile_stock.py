@@ -949,10 +949,11 @@ def test_there_is_no_calibrate_mode_left_to_call():
 # ---------------------------------------------------------------------------
 # The ruling, which step 8 owns
 # ---------------------------------------------------------------------------
-def test_no_ruling_is_computed_from_a_schema_two_recording_yet():
-    """A `--decide` running the old arithmetic over a schema-2 recording would
-    produce a ruling with the right shape and the wrong meaning."""
-    with pytest.raises(RunInvalid, match="Amendment 7"):
+def test_no_ruling_is_computed_before_a_floor_exists():
+    """The selection rule reads a credited SAVING, and a saving needs the
+    floor's own denominator. A `--decide` that supplied its own would be
+    inventing the one measurement the whole credit rests on."""
+    with pytest.raises(RunInvalid, match="no ceiling sweep"):
         ps.decide({"binding": True}, {"binding": True})
 
 

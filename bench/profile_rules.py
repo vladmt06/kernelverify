@@ -6,8 +6,36 @@ and applies rules that were written down before the harness ran. That split is
 the point - the rules can be read, argued with and tested without a GPU, and
 the harness cannot quietly become the thing that decides.
 
+What this module certifies, and what it only reports
+----------------------------------------------------
+Amendment 6's clause 31 registered eight sites at which a rule takes an action,
+and each certified action costs a margin that has to survive the whole box its
+own measurements describe. Amendment 7 keeps three of them and demotes five,
+because only three bear on which operation the sprint builds first:
+
+  CERTIFIED   clause 24's shipping floor, clause 16's per-width pair, and
+              clause 16's two-point boundary. Every one of these reads
+              candidates L and Q and nothing else.
+  REPORTED    clause 27's two exclusion routes, clause 23's kill rule and
+              section 4.3's retained order. Each is still computed, still
+              recorded with the readings it rests on, and reaches no terminal.
+  RETIRED     clause 15's dial price, because clause 35 names the dial by rule
+              and there is no price comparison left to make.
+
+A REPORTED quantity is not a weaker certification and must never be written as
+one. It also is not harmless: it reaches no terminal and it can still REFUSE
+the run, because a share that is not a fraction proves the instrument is wrong
+whichever candidate it was measured on.
+
+Everything here works in the SAVING domain rather than the gain domain, which
+is clause 31's doing. A gain is a ratio of two uncertain numbers and its
+uncertainty is not a fraction of anything; a saving `K = M * (1 - F/N)` is a
+time, its bounds are exact over the box, and a gain of 1.10 IS a saving of
+`T/11`. Scores are still reported, because a score is what a reader wants, and
+no rule reads one.
+
 The document is docs/research/2026-08-19-metalrunner-sprint1-prereg.md,
-sections 3, 4 and 5, as amended by its Amendment 4.
+sections 3, 4 and 5, as amended by Amendments 4 through 9.
 """
 
 from __future__ import annotations
@@ -41,14 +69,20 @@ LORA_RANK = 8
 # layer would overstate every share built on one.
 LORA_LAYERS = 16
 
-# Section 3.2. The five distinct projection shapes the model contains,
-# as (d_out, d_in), with the token count M the cell produces.
+# Section 3.2 plus Amendment 5 clause 7. The SIX distinct projection shapes
+# the model contains, as (d_out, d_in). Section 3.2 listed five and the model
+# has six: the key and value projections at (1024, 2560), eight key-value
+# heads at head dimension 128, are counted in candidate Q's share and were
+# omitted from the registered list, so a floor over five shapes would credit a
+# ratio measured on part of the operation and divide it into a share measured
+# on all of it.
 SHAPES = {
     "S1": (4096, 2560),
     "S2": (2560, 4096),
     "S3": (9728, 2560),
     "S4": (2560, 9728),
     "S5": (151936, 2560),
+    "S6": (1024, 2560),
 }
 
 # Amendment 5 clause 14 and clause 20. TWO registered widths, both drawn from
@@ -76,13 +110,6 @@ WIDTHS = {
 # table is serialised in, so two artifacts can be compared row by row.
 WIDTH_ORDER = ("short", "long")
 
-# Section 3.3. The named regions plus one remainder must account for the step.
-RECONCILE_PCT = 2.0
-
-# Amendment 4. Declared uncalibrated: a judgement about how much redistribution
-# makes a share meaningless, not a measured limit.
-COMPILE_RATIO_BAND = (0.90, 1.10)
-
 # Section 4.3, which is R10's shipping floor read as a gain.
 GAIN_FLOOR = 1.10
 
@@ -96,28 +123,40 @@ CANDIDATES = ("L", "A", "Q")
 # backward call counts genuinely differ under LoRA.
 DIRECTIONS = ("forward", "backward")
 
-# Section 5. Q dies if stock is already this close to the dense ceiling at
-# this many of the five shapes.
+# Section 5 as restated by Amendment 5 clause 23. Q is at the ceiling if stock
+# is within this ratio of the dense fp16 ceiling at ALL BUT ONE shape.
+#
+# The count is 5 of 6 and not 4 of 6. Section 5 registered "4 of the 5 shapes",
+# which is all but one; inheriting the number 4 once S6 exists would have
+# loosened the rule from four-fifths to two-thirds without saying so, so the
+# FRACTION is what carries forward and the number moves with the shape count.
 KILL_RATIO = 1.10
-KILL_SHAPES = 4
+KILL_SHAPES = len(SHAPES) - 1
 
-
-@dataclass(frozen=True)
-class Reading:
-    """One candidate's inputs to the gain formula, and where they came from.
-
-    `footprint_delta` is bytes, the first tie-break in section 4.3, and it is
-    None when nothing measured it. The tie-break asks for the peak-footprint
-    delta of an implementation that does not exist yet, so what stands in for
-    it is the delta measured across that candidate's own floor arms, which is
-    a statement about the floor rather than about a kernel; Amendment 5 names
-    that substitution and requires it labelled wherever it is reported.
-    """
-
-    candidate: str
-    share: float                 # f, section 3.3
-    ratio_lo: float              # r_lo, section 4.2
-    footprint_delta: int | None = None
+# Amendment 7 clause 34. Which sites take a certified margin and which are
+# measured, published and consulted by no rule that reaches a terminal. Held
+# as data so the decision artifact can state it rather than a reader having to
+# infer it from which function was called.
+CERTIFIED_SITES = {
+    "clause 24, the shipping floor":
+        "it decides whether building anything at all is worth the sprint",
+    "clause 16, the per-width pair":
+        "this comparison IS the choice between candidates L and Q",
+    "clause 16, the two-point boundary":
+        "band membership is part of that same choice",
+}
+REPORTED_SITES = {
+    "clause 27, route 1":
+        "its only action was excluding candidate A, which clause 35 stops "
+        "gating",
+    "clause 27, route 2": "the same",
+    "clause 23, the kill rule":
+        "clause 36: its verdict removes no candidate, and a candidate Q at "
+        "the ceiling everywhere fails the shipping floor without it",
+    "section 4.3, the retained order":
+        "it sets the Day 3 build order of the candidates the sprint does not "
+        "build first, which no measurement this run takes has to settle",
+}
 
 
 def gain(share: float, ratio: float) -> float:
@@ -132,7 +171,14 @@ def gain(share: float, ratio: float) -> float:
     produce and which would otherwise come back as a negative gain that reads
     like a slowdown.
     """
-    if not 0.0 <= share <= 1.0:
+    # STRICT at the upper end, which committed code was not and clause 27
+    # registers as step 8's obligation. A share of exactly 1 is reachable
+    # through clause 26's conditions - a slope equal to the whole step clears
+    # every excursion condition - and it says the candidate is the entire step
+    # with nothing left for the adapters, the norms, the elementwise work and
+    # the optimizer, which no step can be. Committed code returned `r` there
+    # and raised nothing.
+    if not 0.0 <= share < 1.0:
         raise RunInvalid(f"share {share} is not a fraction of the step")
     if ratio <= 0.0:
         raise RunInvalid(f"ratio {ratio} is not a ratio")
@@ -253,102 +299,22 @@ def collapse_ratio_lo(per_shape: Mapping[str, Mapping[str, object]]) -> dict:
             "shapes": contributions}
 
 
-def reconciles(regions: Mapping[str, float], remainder: float,
-               step_total: float) -> dict[str, object]:
-    """Section 3.3: the decomposition must account for the step it describes.
-
-    Compared against the step timed WITHOUT the interior boundaries, per
-    Amendment 4, so what this catches is the boundaries moving the workload
-    they were inserted to describe.
-    """
-    if step_total <= 0.0:
-        raise RunInvalid("a step with no measured time cannot be reconciled")
-    accounted = sum(regions.values()) + remainder
-    gap_pct = 100.0 * abs(accounted - step_total) / step_total
-    return {"accounted": accounted, "step_total": step_total,
-            "gap_pct": gap_pct, "ok": gap_pct <= RECONCILE_PCT,
-            "limit_pct": RECONCILE_PCT}
-
-
-def compile_transfer(uncompiled_total: float,
-                     compiled_total: float) -> dict[str, object]:
-    """Amendment 4: what the shares transfer to, priced rather than assumed.
-
-    Nothing is scaled by this ratio. It is reported beside every share as the
-    stated bound on reading an uncompiled decomposition as a claim about the
-    compiled step the product actually runs.
-    """
-    if compiled_total <= 0.0:
-        raise RunInvalid("a compiled step with no measured time cannot bound a "
-                         "transfer")
-    ratio = uncompiled_total / compiled_total
-    low, high = COMPILE_RATIO_BAND
-    return {"ratio": ratio, "band": COMPILE_RATIO_BAND,
-            "ok": low <= ratio <= high,
-            "meaning": "uncompiled step total over compiled step total, on the "
-                       "same batch in the same run; a ratio far from 1 means "
-                       "the decomposition describes a workload the product "
-                       "does not run"}
-
-
-# Amendment 5. What the marks are allowed to cost, as a multiple of the same
-# step measured without them.
+# VOID, and removed rather than left callable.
 #
-# Deliberately unregistered until the calibration run fills it. Section 3.3
-# registered a 2% reconciliation limit, and every instrument that can actually
-# put a clock inside an MLX backward costs far more than that: marking a
-# synthetic six-region chain cost +40.5% and marking a real 0.6B training step
-# cost +110.8%, both measured 2026-08-20. A limit no working instrument can
-# meet rejects the instrument rather than the run, so the cost is measured
-# first at the real cell and the band is written here by amendment.
+# Three rules stood here and Amendment 5 voids all three. Section 3.3's
+# reconciliation is void by clause 2: there are no spans to sum and the check
+# it was written for cannot be posed. Amendment 4's compile transfer is void by
+# clause 4: the profile runs compiled, so there is no uncompiled total to
+# transfer to. The instrument-cost band is void because there is no timing
+# device inside the step left to price, and its `INSTRUMENT_COST_BAND` is gone
+# with it.
 #
-# While this is None a binding profile refuses. That is the point: a cost with
-# no registered limit is a number nobody agreed to accept, and accepting it
-# after seeing it is the one thing the pre-registration exists to prevent.
-INSTRUMENT_COST_BAND: tuple[float, float] | None = None
-
-
-def instrument_cost(instrumented_total: float, plain_total: float, *,
-                    band: Sequence[float] | None = None) -> dict[str, object]:
-    """Amendment 5: what the marks cost, against the limit registered for them.
-
-    The numerator and the denominator are the same step on the same batch in
-    the same child, one pass with the marks installed and one without, so the
-    ratio is the instrument and nothing else.
-
-    Nothing is scaled by it. A share already takes its denominator from the
-    plain pass, so the marks' cost does not enter the share arithmetic; this
-    ratio is the check that the marked pass still describes the workload the
-    plain one ran, which is the claim a share silently makes.
-
-    `band` overrides the registered limit so the rule is testable before the
-    amendment exists. Passing nothing reads `INSTRUMENT_COST_BAND`, and while
-    that is None the verdict is None rather than True: unregistered is not the
-    same as passed, and a caller that treats it as passed is refusing to see
-    the difference.
-    """
-    if plain_total <= 0.0:
-        raise RunInvalid("a plain step with no measured time cannot price the "
-                         "instrument")
-    if instrumented_total <= 0.0:
-        raise RunInvalid("an instrumented step with no measured time is not a "
-                         "measurement of anything")
-    ratio = instrumented_total / plain_total
-    limits = INSTRUMENT_COST_BAND if band is None else band
-    if limits is None:
-        return {"ratio": ratio, "band": None, "ok": None,
-                "meaning": "instrumented step total over plain step total, on "
-                           "the same batch in the same child",
-                "reason": "no band is registered: the calibration run measures "
-                          "this cost and Amendment 5 writes the limit before "
-                          "any binding profile may read it"}
-    low, high = limits
-    return {"ratio": ratio, "band": (float(low), float(high)),
-            "ok": low <= ratio <= high,
-            "meaning": "instrumented step total over plain step total, on the "
-                       "same batch in the same child",
-            "reason": "a ratio outside the band means the marked pass and the "
-                      "plain pass are not describing the same step"}
+# They are deleted rather than deprecated because each of them RETURNS A
+# VERDICT, and a voided rule that still answers is a rule someone can call and
+# believe. What replaces the reconciliation is clause 22's partition, which
+# lives in the harness because it reads shares the harness reduces; what
+# replaces the instrument band is the scaffold price, which lives in
+# `profile_knobs` beside the fit it guards.
 
 
 # Amendment 6 clause 33. The registered false-separation rate, fixed before
@@ -611,116 +577,694 @@ def round_is_eligible(samples: Sequence[float], limit_pct: float) -> bool:
     return spread_pct(samples) <= limit_pct
 
 
-def kill_q(ceiling_ratios: Mapping[str, float]) -> dict[str, object]:
-    """Section 5, computed at the primary cell's token count.
+@dataclass(frozen=True)
+class ShapeAtWidth:
+    """One shape's kill evidence at one width, already reduced per clause 8.
 
-    `ceiling_ratios` is stock's quantized matmul time over the dense fp16
-    ceiling at the same logical shape, per shape. A ratio at or below the kill
-    line means stock is already that close to a ceiling that does strictly
-    less work, so there is no headroom worth a sprint.
+    `ratio` is the LARGEST of the per-round ratios of summed costs, which is
+    the reduction clause 8 registers: the largest is the one furthest from the
+    ceiling and therefore the least likely to kill, which is the conservative
+    direction for a rule whose effect is to remove a candidate. That is
+    deliberately the opposite reduction from `ratio_lo`, which takes the worst
+    pairing because its effect is to CREDIT a candidate.
+
+    The two operands are what clause 31 reads instead of the ratio: stock's
+    summed cost at the top of its box and the floor's summed cost at the
+    bottom. Converting the ratio through a shape's stock slope would amplify
+    the floor's uncertainty by that slope over the round's own numerator,
+    which is the fault clause 31 exists to remove.
     """
-    missing = set(SHAPES) - set(ceiling_ratios)
+
+    ratio: float
+    numerator_high: float
+    denominator_low: float
+
+
+def largest_round_ratio(per_round: Sequence[float]) -> float:
+    """Clause 8's reduction over rounds, registered here rather than assumed.
+
+    The sums are taken WITHIN each round, giving one shape ratio per round,
+    and the ratio the kill rule reads is the largest of them. It is a named
+    function and not a bare `max` at a call site because a rule the harness
+    can forget to apply is a rule that decides nothing.
+    """
+    if not per_round:
+        raise RunInvalid("a shape's kill ratio needs at least one round")
+    if any(not math.isfinite(value) for value in per_round):
+        raise RunInvalid(
+            f"a per-round shape ratio is not finite: {list(per_round)}")
+    return max(per_round)
+
+
+def kill_q(per_shape: Mapping[str, Mapping[str, ShapeAtWidth]]
+           ) -> dict[str, object]:
+    """Section 5 over six shapes and two widths, REPORTED and never a gate.
+
+    `per_shape` is `{shape: {width: ShapeAtWidth}}`. A shape counts toward the
+    kill only where stock is within `KILL_RATIO` of the dense fp16 ceiling at
+    BOTH registered widths, so headroom at either width keeps the candidate
+    alive, and the verdict is `killed` at all but one shape.
+
+    Amendment 7 clause 36 demotes the ACTION and keeps the MEASUREMENT. The
+    verdict removes no candidate from scoring; it is recorded beside the
+    ruling and a reader who acts on it is acting outside this
+    pre-registration. What the demotion concedes is a real band and it is
+    named rather than waved past: a candidate Q with five shapes at the
+    ceiling and one with headroom can score well on the collapsed
+    `ratio_lo` while the per-shape evidence says the opposite and no rule
+    reads it. Measured over these six shapes, that band opens at a
+    concentration of 1.910199 when the fast shape's ratio is 4.0 and WIDENS as
+    that shape gets faster, reaching 1.297 at a ratio of 100.
+
+    What the demotion does not concede is a candidate Q that is dead
+    everywhere: the gain is increasing in the share with limit the ratio, so a
+    collapsed ratio at or below 1.10 forces a score below 1.10 at every valid
+    share, and the shipping floor removes it without the kill rule.
+    """
+    missing = sorted(set(SHAPES) - set(per_shape))
     if missing:
         raise RunInvalid(f"the kill rule reads all {len(SHAPES)} registered "
-                         f"shapes; missing {sorted(missing)}")
+                         f"shapes; missing {missing}")
     # Extra keys are refused, not ignored. Counting them would let shapes
     # nobody registered reach the kill threshold, and the verdict would then
-    # say "4 of 5 shapes" about a set that was never five.
-    extra = set(ceiling_ratios) - set(SHAPES)
+    # say "5 of 6 shapes" about a set that was never six.
+    extra = sorted(set(per_shape) - set(SHAPES))
     if extra:
         raise RunInvalid(
             f"the kill rule counts only registered shapes, and these are not "
-            f"registered: {sorted(extra)}; add them to SHAPES by amendment "
-            f"before they can decide anything")
-    at_ceiling = sorted(name for name, r in ceiling_ratios.items()
-                        if r <= KILL_RATIO)
+            f"registered: {extra}; add them to SHAPES by amendment before "
+            f"they can decide anything")
+
+    evidence = {}
+    at_ceiling = []
+    for shape in sorted(SHAPES):
+        widths = per_shape[shape]
+        absent = sorted(set(WIDTH_ORDER) - set(widths))
+        if absent:
+            raise RunInvalid(
+                f"shape {shape} was measured at {sorted(widths)} and the kill "
+                f"rule reads both registered widths; a shape measured at one "
+                f"cannot be shown within the ceiling at both")
+        unknown = sorted(set(widths) - set(WIDTH_ORDER))
+        if unknown:
+            raise RunInvalid(
+                f"shape {shape} names widths {unknown}, which are not "
+                f"registered")
+        per_width = {}
+        for width in WIDTH_ORDER:
+            entry = widths[width]
+            for name, value in (("ratio", entry.ratio),
+                                ("numerator_high", entry.numerator_high),
+                                ("denominator_low", entry.denominator_low)):
+                if not math.isfinite(value):
+                    raise RunInvalid(
+                        f"shape {shape} at the {width} width has a "
+                        f"non-finite {name}: {value}")
+            per_width[width] = {
+                "ratio": entry.ratio,
+                "counts": shape_counts_toward_kill(entry.denominator_low,
+                                                   entry.numerator_high),
+                "margin": (entry.denominator_low
+                           - entry.numerator_high / KILL_RATIO),
+            }
+        both = all(per_width[width]["counts"] for width in WIDTH_ORDER)
+        evidence[shape] = {"widths": per_width, "counts_toward_kill": both}
+        if both:
+            at_ceiling.append(shape)
+
     killed = len(at_ceiling) >= KILL_SHAPES
-    return {"killed": killed, "at_ceiling": at_ceiling,
-            "needed": KILL_SHAPES, "limit": KILL_RATIO,
-            "reason": (f"stock is within {KILL_RATIO} of the dense fp16 "
-                       f"ceiling at {len(at_ceiling)} of {len(SHAPES)} shapes")
-            if killed else
-            (f"stock is within {KILL_RATIO} of the ceiling at only "
-             f"{len(at_ceiling)} of {len(SHAPES)} shapes")}
+    return {
+        "killed": killed,
+        "certified": False,
+        "at_ceiling": at_ceiling,
+        "needed": KILL_SHAPES,
+        "limit": KILL_RATIO,
+        "shapes": evidence,
+        "reads": "all but one of the six registered shapes, within "
+                 f"{KILL_RATIO} of the dense fp16 ceiling at BOTH widths",
+        "gates_nothing": (
+            "Amendment 7 clause 36: this verdict is reported and removes no "
+            "candidate from scoring. A candidate Q at the ceiling everywhere "
+            "fails the shipping floor without it, and one at the ceiling at "
+            "five shapes with headroom at the sixth can still be selected"),
+        "reason": (
+            f"stock is within {KILL_RATIO} of the dense fp16 ceiling at "
+            f"{len(at_ceiling)} of {len(SHAPES)} shapes, at both widths"),
+    }
 
 
-def select_first_operation(readings: Sequence[Reading]) -> dict[str, object]:
-    """Section 4.3. The rule picks, and no argument may substitute for it.
+# Clause 30's typed absences, after the per-width reduction that clause fixes.
+# `killed` was a third type under Amendment 6 and is DEMOTED by Amendment 7 to
+# a recorded flag, so the precedence is these two and nothing else.
+MISSING_SHARE = "missing_share"
+MISSING_RATIO = "missing_ratio"
+ABSENCES = (MISSING_SHARE, MISSING_RATIO)
 
-    Returns the ruling with everything it rested on, including the branch
-    where no single operation reaches R10's floor: that branch does not pick
-    one, it records the reading and keeps the top two in gain order, so a weak
-    profile produces an honest plan rather than a hopeful pick.
+# Amendment 7 clause 38's three terminals. UNRESOLVED is RETIRED, and the word
+# is used because states that reached it now reach SELECTED or the
+# no-selection record instead.
+SELECTED = "SELECTED"
+NO_SELECTION = "NO SINGLE OPERATION REACHES THE FLOOR"
+INCOMPLETE = "INCOMPLETE"
+
+
+@dataclass(frozen=True)
+class Interval:
+    """A measured value with the range clause 31 propagates its rule over.
+
+    Every rule below acts on the bound that makes its own action hardest to
+    take, so the two ends are not decoration: an action supported at the
+    measured value and not across the box is an action the measurements do not
+    support. The measured value travels with them because a score is what a
+    reader wants and no rule reads one.
     """
-    if not readings:
-        raise RunInvalid("the selection rule needs at least one candidate")
-    unknown = [r.candidate for r in readings if r.candidate not in CANDIDATES]
-    if unknown:
-        raise RunInvalid(f"not candidates of this pre-registration: {unknown}")
-    # One reading per candidate, by construction: a candidate has one share at
-    # the primary cell and one credited ratio. Two readings for one candidate
-    # means a harness produced a duplicate, and the rule would then silently
-    # rank the better of them and report a table with the same name twice.
-    seen = [r.candidate for r in readings]
-    duplicated = sorted({name for name in seen if seen.count(name) > 1})
+
+    value: float
+    low: float
+    high: float
+
+    def __post_init__(self):
+        for name, one in (("value", self.value), ("low", self.low),
+                          ("high", self.high)):
+            if not isinstance(one, (int, float)) or isinstance(one, bool) \
+                    or not math.isfinite(one):
+                raise RunInvalid(
+                    f"the interval's {name} is {one!r}; every reading these "
+                    f"rules consume must be finite, because a NaN satisfies "
+                    f"neither branch of any test and makes the terminal table "
+                    f"neither total nor disjoint")
+        if not self.low <= self.value <= self.high:
+            raise RunInvalid(
+                f"the measured value {self.value} is outside its own box "
+                f"[{self.low}, {self.high}]")
+
+
+@dataclass(frozen=True)
+class ScoredEntry:
+    """Candidate L or Q at one width: a step total and a credited saving.
+
+    The saving is clause 31's `K = M * (1 - F/N)`, already reduced from that
+    width's own samples, and it is a TIME. Nothing here divides two uncertain
+    numbers to make a gain and then tries to bound the result.
+    """
+
+    width: str
+    step_total: Interval
+    saving: Interval
+
+
+@dataclass(frozen=True)
+class CeilingEntry:
+    """Candidate A at one width: a share, a step total, and never a ratio.
+
+    `attributed` is `M`, the credited numerator the share is built from, and
+    it is carried apart from the share because clause 27's route 1 takes its
+    margin on the COST rather than on the fraction: converting through the
+    step total would amplify the step's uncertainty into a test about the
+    operation.
+    """
+
+    width: str
+    step_total: Interval
+    share: Interval
+    attributed: Interval
+
+
+@dataclass(frozen=True)
+class CandidateInput:
+    """One candidate as the selection rule receives it, clause 30's shape.
+
+    A candidate is present with its numbers or absent with ONE typed reason,
+    never both and never neither, and never simply missing from the input. A
+    candidate that could disappear between the profile and the ruling is the
+    fault clause 30 exists to make impossible.
+    """
+
+    candidate: str
+    entries: tuple = ()
+    absence: str | None = None
+    killed: bool = False
+    footprint_delta: int | None = None
+
+
+def _fraction(entry: ScoredEntry) -> Interval:
+    """`E = K/T`, the saving as a fraction of the step it was measured in.
+
+    `K/T` is increasing in `K` and monotone in `T` for fixed `K`, so the
+    extremes sit at corners in `K` and at whichever `T` corner the sign of `K`
+    selects. Pairing the smallest saving with the largest step unconditionally
+    is right only while `K` is positive: at a saving box reaching -1 over a
+    step box of [94, 106] it returns -0.0094 where the true minimum is
+    -0.0106, which is the LESS conservative end, and the fraction's low is
+    what clause 16's band test and clause 27's route 2 read to decide whether
+    a candidate is certified better. A wide box is exactly where a saving
+    reaches below zero, and a wide box is exactly where these tests matter.
+    """
+    corners = (entry.step_total.low, entry.step_total.high)
+    return Interval(value=entry.saving.value / entry.step_total.value,
+                    low=min(entry.saving.low / one for one in corners),
+                    high=max(entry.saving.high / one for one in corners))
+
+
+def _score(fraction: Interval) -> float:
+    """`S = 1/(1 - E)`, the registered gain written in the saving domain."""
+    if fraction.value >= 1.0:
+        raise RunInvalid(
+            f"a credited saving of {fraction.value:.4f} of the step leaves "
+            f"nothing for the adapters, the norms, the elementwise work and "
+            f"the optimizer, which no step can be")
+    return 1.0 / (1.0 - fraction.value)
+
+
+def _refuse_bad_readings(candidate: CandidateInput) -> None:
+    """Clause 27's refusal class, which is not a terminal and takes no margin.
+
+    A share at or above one or at or below zero, at ANY width and for ANY
+    candidate, refuses the profile outright. The sibling width is not used,
+    because it came from the same instrument and the same machinery: a share
+    of 1.401 is exactly what exposed the instrument Amendment 5 exists to
+    replace, and continuing on its other reading would be believing the same
+    instrument twice.
+    """
+    for entry in candidate.entries:
+        if entry.step_total.low <= 0.0:
+            raise RunInvalid(
+                f"candidate {candidate.candidate} at the {entry.width} width "
+                f"has a step total reaching {entry.step_total.low}, and a "
+                f"step with no measured time cannot be a denominator")
+        share = getattr(entry, "share", None)
+        if share is None:
+            continue
+        for name, value in (("measured", share.value), ("low", share.low),
+                            ("high", share.high)):
+            if not 0.0 < value < 1.0:
+                raise RunInvalid(
+                    f"candidate {candidate.candidate} at the {entry.width} "
+                    f"width has a {name} share of {value}, which is not a "
+                    f"fraction of a step; this is an instrument fault and no "
+                    f"reading from the same instrument is used instead")
+
+
+def _validate(candidates: Sequence[CandidateInput]) -> dict:
+    """Clause 30: exactly the registered candidates, each typed exactly once."""
+    if not candidates:
+        raise RunInvalid("the selection rule needs the registered candidates")
+    names = [one.candidate for one in candidates]
+    duplicated = sorted({name for name in names if names.count(name) > 1})
     if duplicated:
         raise RunInvalid(
-            f"more than one reading for {duplicated}: a candidate has one "
-            f"share and one credited ratio, so the rule cannot say which of "
-            f"two readings is the one it was asked about")
+            f"more than one input for {duplicated}: a candidate has one state "
+            f"after clause 30's reduction, so the rule cannot say which of "
+            f"two is the one it was asked about")
+    unknown = sorted(set(names) - set(CANDIDATES))
+    if unknown:
+        raise RunInvalid(f"not candidates of this pre-registration: {unknown}")
+    absent = sorted(set(CANDIDATES) - set(names))
+    if absent:
+        raise RunInvalid(
+            f"the input names no state for {absent}; a candidate is present "
+            f"with its numbers or absent with a typed reason, and never "
+            f"simply unmentioned")
 
-    scored = sorted(
-        ({"candidate": r.candidate, "gain": gain(r.share, r.ratio_lo),
-          "share": r.share, "ratio_lo": r.ratio_lo,
-          "footprint_delta": r.footprint_delta} for r in readings),
-        key=lambda row: (-row["gain"], CANDIDATES.index(row["candidate"])),
-    )
-    largest = scored[0]["gain"]
+    by_name = {}
+    for one in candidates:
+        if one.absence is not None and one.absence not in ABSENCES:
+            raise RunInvalid(
+                f"candidate {one.candidate} carries the untyped absence "
+                f"{one.absence!r}; clause 30 registers {list(ABSENCES)}")
+        if (one.absence is None) == (not one.entries):
+            fault = ("both a typed absence and readings" if one.absence
+                     else "neither readings nor a typed absence")
+            raise RunInvalid(f"candidate {one.candidate} carries {fault}")
+        widths = [entry.width for entry in one.entries]
+        if len(set(widths)) != len(widths):
+            raise RunInvalid(
+                f"candidate {one.candidate} carries two readings at one width")
+        stray = sorted(set(widths) - set(WIDTH_ORDER))
+        if stray:
+            raise RunInvalid(
+                f"candidate {one.candidate} names widths {stray}, which are "
+                f"not registered")
+        if one.candidate == "A" and one.absence == MISSING_RATIO:
+            raise RunInvalid(
+                "candidate A is typed `missing_ratio`, and clause 30 records "
+                "that for candidate A this is not an absence at all: it is "
+                "the amendment's permanent state, and typing it here would "
+                "discard the share the ceiling is built from")
+        if one.killed and one.candidate != "Q":
+            raise RunInvalid(
+                f"candidate {one.candidate} carries a kill flag, and clause "
+                f"23's rule reaches candidate Q alone; a killed candidate "
+                f"{one.candidate} is not a state this profile can be in")
+        _refuse_bad_readings(one)
+        by_name[one.candidate] = one
 
-    if largest < GAIN_FLOOR:
-        return {
-            "selected": None, "ranked": scored, "floor": GAIN_FLOOR,
-            "verdict": "NO SINGLE OPERATION REACHES THE FLOOR",
-            "keep": [row["candidate"] for row in scored[:2]],
-            "reason": (f"the largest gain at cell {PRIMARY_CELL} is "
-                       f"{largest:.4f}, below {GAIN_FLOOR}; the sprint keeps "
-                       f"the top two and builds them in gain order"),
+    for name in ("L", "Q"):
+        one = by_name[name]
+        if one.absence is None and set(entry.width for entry in one.entries) \
+                != set(WIDTH_ORDER):
+            raise RunInvalid(
+                f"candidate {name} is scored at "
+                f"{sorted(entry.width for entry in one.entries)} and clause "
+                f"14 takes its gain at the WORSE of both registered widths, "
+                f"so a candidate measured at one has no worse to take")
+    return by_name
+
+
+def _ceiling(entry: CeilingEntry) -> Interval:
+    """`U = 1/(1 - f)`, the best score any positive finite ratio could earn.
+
+    Clause 27: `gain = 1/(1 - f*(1 - 1/r))` is increasing in `r` over positive
+    finite `r` with supremum `1/(1 - f)`, attained at no finite ratio. Its
+    bounds are monotone in `f`, which validity has already put strictly inside
+    (0, 1), so the low end of the share gives the low end of the ceiling.
+    """
+    return Interval(value=1.0 / (1.0 - entry.share.value),
+                    low=1.0 / (1.0 - entry.share.low),
+                    high=1.0 / (1.0 - entry.share.high))
+
+
+def candidate_a_report(entry_by_width: Mapping[str, CeilingEntry],
+                       winner: Mapping[str, object] | None) -> dict:
+    """Clause 27's ceiling and both exclusion routes, REPORTED and not a gate.
+
+    Every construction is clause 27's, unchanged. What Amendment 7 clause 35
+    changes is where the answers go: neither route reaches a terminal, and a
+    winner that fails to beat the ceiling produces an OPEN QUESTION recorded
+    against it rather than a refusal to select.
+
+    The bias is stated where the number appears rather than in a footnote.
+    While exclusion was the only action, an inflated share made exclusion
+    harder, which was the safe direction. With no action left, the same
+    inflation only makes candidate A look BETTER in the report than it is.
+    """
+    if not entry_by_width:
+        return {"certified": False, "ceiling": None, "u_min": None,
+                "valid_widths": [], "route_1": None, "route_2": None,
+                "reason": "candidate A has no valid share at either width, so "
+                          "no ceiling was available and none is reported"}
+
+    ceilings = {width: _ceiling(entry)
+                for width, entry in sorted(entry_by_width.items())}
+    lowest = min(ceilings[width].value for width in ceilings)
+    setters = sorted(width for width in ceilings
+                     if ceilings[width].value == lowest)
+    u_min = ceilings[setters[0]]
+
+    route_1 = {}
+    for width, entry in sorted(entry_by_width.items()):
+        route_1[width] = {
+            "excludes": excluded_by_arithmetic(
+                share_high=entry.share.high,
+                step_total_low=entry.step_total.low,
+                median_numerator_high=entry.attributed.high),
+            "share": entry.share.value,
+            "margin_ms": (entry.step_total.low / 11.0
+                          - entry.attributed.high),
+        }
+    excluded_1 = sorted(w for w, one in route_1.items() if one["excludes"])
+
+    route_2 = None
+    if winner is not None:
+        # The excess converts to a time at the width that SETS `U_min`, and
+        # the conversion is monotone in the fraction difference, so the sign
+        # of the certified excess is the sign of `E_winner_low - f_A_high`.
+        # Clause 27 registers the SELECTED candidate rather than the top
+        # scorer, on the same principle `ratio_lo` follows: each reduction is
+        # the one that makes its own action harder to take.
+        setter = entry_by_width[setters[0]]
+        difference = winner["fraction_low"] - setter.share.high
+        route_2 = {
+            "excludes": difference > 0.0,
+            "against": winner["candidate"],
+            "u_min": u_min.value,
+            "set_by": setters,
+            "winner_score": winner["score"],
+            "excess_ms": (setter.step_total.value
+                          * (winner["fraction_value"] - setter.share.value)),
         }
 
-    # The tie rule is not a sort key. Gain decides only where the candidates
-    # differ by two points or more; inside that band the reading is not
-    # precise enough to order them, so the registered tie-breaks do it and a
-    # hair more gain wins nothing.
-    #
-    # Amendment 5 clause 24: the shipping floor applies to the SELECTED
-    # candidate, not to the largest gain. The band is therefore drawn only
-    # from candidates at or above the floor, because a tie-break must never
-    # hand SELECTED to a candidate the floor already ruled out. Below-floor
-    # candidates stay in the ranked evidence.
-    band = [row for row in scored
-            if row["gain"] >= GAIN_FLOOR and largest - row["gain"] < TIE_GAIN]
-
-    # The footprint tie-break needs every tied candidate measured. Ranking a
-    # measured delta against an unmeasured one would decide the sprint on
-    # which candidate happened to get a number, so an unmeasured member sends
-    # the whole band to table order and the ruling says that is what happened.
-    measured = all(row["footprint_delta"] is not None for row in band)
-    if measured:
-        tied = sorted(band, key=lambda row: (row["footprint_delta"],
-                                             CANDIDATES.index(row["candidate"])))
-        broken_by = ("smaller peak-footprint delta then table order")
-    else:
-        tied = sorted(band, key=lambda row: CANDIDATES.index(row["candidate"]))
-        broken_by = ("table order, because the peak-footprint delta is not "
-                     "measured for every tied candidate")
-    winner = tied[0]
     return {
-        "selected": winner["candidate"], "ranked": scored, "floor": GAIN_FLOOR,
-        "verdict": "SELECTED",
-        "tied_with": [row["candidate"] for row in tied[1:]],
-        "footprint_measured": measured,
-        "reason": (f"largest gain at cell {PRIMARY_CELL}"
-                   if len(tied) == 1 else
-                   f"tied within {TIE_GAIN} of the largest gain, broken by "
-                   f"{broken_by}"),
+        "certified": False,
+        "ceiling": {width: one.value for width, one in ceilings.items()},
+        "u_min": u_min.value,
+        "u_min_set_by": setters,
+        "valid_widths": sorted(entry_by_width),
+        "route_1": route_1,
+        "route_1_excludes": excluded_1,
+        "route_2": route_2,
+        "gates_nothing": (
+            "Amendment 7 clause 35: candidate A's share and ceiling are "
+            "computed and recorded, both exclusion routes are evaluated, and "
+            "neither reaches a terminal. Candidate A could not be ruled IN "
+            "under Amendment 6 either, so what was removed is a veto and not "
+            "a candidate"),
+        "stated_bias": (
+            "the named dial's scaffold is the most expensive of the three at "
+            "the long width, so this share reads high and this ceiling is "
+            "inflated. While exclusion was an action that was the safe "
+            "direction; with no action left it only makes candidate A look "
+            "better here than it is"),
     }
+
+
+def break_band(band: Sequence[Mapping[str, object]]
+               ) -> tuple[list, str, bool]:
+    """Clause 12's tie-break, with BOTH of its fall-through conditions.
+
+    Committed code carried one of the two. A band is decided on footprint only
+    where every member has a measured delta AND candidate L is not in it
+    against another candidate: candidate L's baseline is measured on the bench
+    and the other two in the step, so its delta is not comparable with theirs.
+
+    It is a rule of its own rather than a branch inside the selection because
+    both of its conditions are registered text, and today only one of them can
+    ever fire. Candidates L and Q are the only ones that score, so any band
+    with more than one member contains candidate L, the second condition
+    always fires, and the tie-break is unreachable in practice - which is what
+    the Amendment 7 ledger records about clause 12. A later amendment that
+    adds a scoreable candidate gets the rule rather than a rediscovery.
+    """
+    measured = all(row["footprint_delta"] is not None for row in band)
+    l_against_others = (len(band) > 1
+                        and any(row["candidate"] == "L" for row in band))
+    if measured and not l_against_others:
+        return (sorted(band, key=lambda row: (row["footprint_delta"],
+                                              CANDIDATES.index(
+                                                  row["candidate"]))),
+                "smaller peak-footprint delta then table order", True)
+    return (sorted(band, key=lambda row: CANDIDATES.index(row["candidate"])),
+            "table order, because candidate L's peak-footprint delta is "
+            "measured on the bench and the others' in the step, so they are "
+            "not comparable" if l_against_others else
+            "table order, because the peak-footprint delta is not measured "
+            "for every candidate in the band",
+            False)
+
+
+def select_first_operation(candidates: Sequence[CandidateInput]
+                           ) -> dict[str, object]:
+    """Section 4.3 under Amendments 6 and 7. The rule picks and no argument may
+    substitute for it.
+
+    Three terminals, and the precedence is INCOMPLETE first:
+
+      INCOMPLETE     candidate L or candidate Q reduces to `missing_share`, so
+                     a required measurement does not exist and no remaining
+                     score can substitute for it.
+      SELECTED       a winner whose credited saving exceeds `T/11` everywhere
+                     in its own box, with candidate A's ceiling and candidate
+                     Q's kill verdict recorded beside it.
+      NO SELECTION   every score below the floor, or no scores at all.
+
+    `missing_ratio` leaves a candidate excluded, visible and continuable, and
+    a `killed` candidate Q is neither: Amendment 7 demotes the kill rule to a
+    recorded flag, so it removes nothing from scoring.
+
+    Every comparison here is certified over the box: the floor, the pair test
+    and the band all act only where they hold at every point the measurements
+    admit. A gain of 1.10 IS a saving of `T/11`, and at a shared width the
+    sign of a gain difference is the sign of a saving difference, which is
+    what lets the whole rule run without ever bounding a ratio of two
+    uncertain numbers.
+    """
+    by_name = _validate(candidates)
+
+    incomplete = [name for name in ("L", "Q")
+                  if by_name[name].absence == MISSING_SHARE]
+    if incomplete:
+        return {
+            "verdict": INCOMPLETE, "selected": None,
+            "incomplete": incomplete,
+            "absences": {name: by_name[name].absence for name in CANDIDATES
+                         if by_name[name].absence is not None},
+            # Recorded even here. A reported quantity reaches no terminal and
+            # is still evidence, and a run that measured candidate A and then
+            # failed on candidate L has no reason to throw the measurement
+            # away.
+            "candidate_a": candidate_a_report(
+                {entry.width: entry for entry in by_name["A"].entries}, None),
+            "certified_sites": dict(CERTIFIED_SITES),
+            "reason": (
+                f"candidate {' and '.join(incomplete)} has no valid share at "
+                f"a width the rule needs, so the profile refuses SELECTED "
+                f"whatever the remaining scores say"),
+        }
+
+    scored = []
+    for name in ("L", "Q"):
+        one = by_name[name]
+        if one.absence is not None:
+            continue
+        by_width = {entry.width: entry for entry in one.entries}
+        fractions = {width: _fraction(entry)
+                     for width, entry in by_width.items()}
+        # Clause 14: the score is the candidate's gain at its WORSE of the two
+        # widths, so the reduced fraction is the smallest of them.
+        worst = min(WIDTH_ORDER, key=lambda w: fractions[w].value)
+        scored.append({
+            "candidate": name,
+            "score": _score(fractions[worst]),
+            "fraction_value": fractions[worst].value,
+            "fraction_low": fractions[worst].low,
+            "fraction_high": fractions[worst].high,
+            "worst_width": worst,
+            "per_width": {w: {"saving_ms": by_width[w].saving.value,
+                              "step_total_ms": by_width[w].step_total.value,
+                              "fraction": fractions[w].value,
+                              "score": _score(fractions[w])}
+                          for w in sorted(by_width)},
+            "ships": all(ships_above_floor(by_width[w].saving.low,
+                                           by_width[w].step_total.high)
+                         for w in WIDTH_ORDER),
+            "floor_margin_ms": {
+                w: by_width[w].saving.low - by_width[w].step_total.high / 11.0
+                for w in WIDTH_ORDER},
+            "killed": one.killed,
+            "footprint_delta": one.footprint_delta,
+            "_by_width": by_width,
+        })
+
+    ceiling_entries = {entry.width: entry
+                       for entry in by_name["A"].entries}
+    score_order = sorted(scored, key=lambda row: (-row["score"],
+                                                  CANDIDATES.index(
+                                                      row["candidate"])))
+    absences = {name: by_name[name].absence for name in CANDIDATES
+                if by_name[name].absence is not None}
+    above = [row for row in scored if row["ships"]]
+
+    if not above:
+        # Clause 34 REVERSES the committed kept list. It used to be the top
+        # two in score order, and section 4.3 makes that list the Day 2 build
+        # order, so a quantity that certifies nothing arrived somewhere as an
+        # instruction: flipping which candidate scored higher flipped the
+        # payload while the terminal label never moved. It is now the whole
+        # scored set, unordered, presented in section 4.2's table order, with
+        # the score order beside it as evidence and explicitly not a build
+        # order.
+        return {
+            "verdict": NO_SELECTION, "selected": None,
+            "floor": GAIN_FLOOR,
+            "keep": sorted((row["candidate"] for row in scored),
+                           key=CANDIDATES.index),
+            "keep_is_unordered": (
+                "an unordered set in section 4.2's table order; the score "
+                "order below is evidence and is NOT a build order, and where "
+                "a build order is needed section 4.2's table order supplies "
+                "it"),
+            "score_order": [row["candidate"] for row in score_order],
+            "scored": [_public(row) for row in score_order],
+            "absences": absences,
+            "candidate_a": candidate_a_report(ceiling_entries, None),
+            "certified_sites": dict(CERTIFIED_SITES),
+            "reason": (
+                f"no candidate's credited saving exceeds T/11 everywhere in "
+                f"its own box at both widths, so none reaches the "
+                f"{GAIN_FLOOR} floor" if scored else
+                "no candidate has a score at all, which is an answer rather "
+                "than an absence: every scored candidate is excluded by type"),
+        }
+
+    # Clause 24: the floor is applied FIRST and the band is drawn only from
+    # what survives it, because a tie-break must never hand SELECTED to a
+    # candidate the floor already ruled out.
+    #
+    # Clause 16's anchor is the highest-scoring survivor, and where two share
+    # the highest score exactly the anchor is the earlier of them in section
+    # 4.2's table. Without that, two candidates on an identical score give two
+    # different anchors and two different bands.
+    ranked = sorted(above, key=lambda row: (-row["score"],
+                                            CANDIDATES.index(row["candidate"])))
+    anchor = ranked[0]
+    band, band_evidence = [anchor], {}
+    for row in ranked[1:]:
+        # Both tie routes are UNIONS: a candidate joins the band unless it is
+        # certified outside the two-point band AND certified resolvably worse.
+        # An earlier draft used the second route alone, which left a candidate
+        # inside the two-point band but resolvably worse simultaneously in and
+        # out of it.
+        outside = outside_band(anchor["fraction_low"], row["fraction_high"])
+        resolvable = all(
+            separable(anchor["_by_width"][w].saving.low,
+                      row["_by_width"][w].saving.high)
+            for w in WIDTH_ORDER)
+        band_evidence[row["candidate"]] = {
+            "certified_outside_the_two_point_band": outside,
+            "certified_resolvably_worse": resolvable,
+            "in_band": not (outside and resolvable),
+        }
+        if not (outside and resolvable):
+            band.append(row)
+
+    tied, broken_by, measured = break_band(band)
+    winner = tied[0]
+
+    candidate_a = candidate_a_report(ceiling_entries, winner)
+    open_questions = []
+    if candidate_a["u_min"] is not None:
+        route_2 = candidate_a["route_2"]
+        if not candidate_a["route_1_excludes"] and not route_2["excludes"]:
+            open_questions.append({
+                "question": "candidate A's ceiling is not resolvably below "
+                            "the selected candidate's score",
+                "u_min": candidate_a["u_min"],
+                "set_by": candidate_a["u_min_set_by"],
+                "winner_score": winner["score"],
+                "shortfall": candidate_a["u_min"] - winner["score"],
+                "carried": "a known risk carried into Day 2 rather than a "
+                           "refusal to start it",
+            })
+
+    return {
+        "verdict": SELECTED, "selected": winner["candidate"],
+        "floor": GAIN_FLOOR,
+        "tied_with": [row["candidate"] for row in tied[1:]],
+        "band": [row["candidate"] for row in band],
+        "band_evidence": band_evidence,
+        "anchor": anchor["candidate"],
+        "footprint_measured": measured,
+        "scored": [_public(row) for row in score_order],
+        "score_order": [row["candidate"] for row in score_order],
+        "absences": absences,
+        "kill": {row["candidate"]: row["killed"] for row in scored},
+        "candidate_a": candidate_a,
+        "open_questions": open_questions,
+        "certified_sites": dict(CERTIFIED_SITES),
+        "reason": (
+            f"the largest certified score at cell {PRIMARY_CELL}"
+            if len(tied) == 1 else
+            f"inside clause 16's band around {anchor['candidate']}, broken by "
+            f"{broken_by}"),
+    }
+
+
+def _public(row: Mapping[str, object]) -> dict:
+    """One scored candidate as the artifact carries it, without the operands.
+
+    The `_by_width` entries are the rule's own working and are dropped here
+    rather than serialised, because a reader who wants them wants the arms the
+    recording already holds, not a second copy the ruling could disagree with.
+    """
+    return {key: value for key, value in row.items()
+            if not key.startswith("_")}
