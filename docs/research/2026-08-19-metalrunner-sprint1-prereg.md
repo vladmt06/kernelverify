@@ -2743,3 +2743,100 @@ It is NOT dropped: section 3's "exactly three warm-up passes per arm" is committ
 | 37, its pilot of 20 blocks at five rounds | REDUCED to 5 at two rounds in clause 57's lean branch only. The pilot carries no rate, its scale is pooled across blocks AND rounds by clause 37's own wording, and 5 blocks at two rounds still pools about 45 samples per group. Its 20 at five rounds stands wherever the lean branch is not taken |
 | 39, its ordering | UNCHANGED and load-bearing. It is why clause 53 declines the one arrangement that would make reuse sound |
 | Nothing in the document | REGISTERS AN EXPLORATORY RUN. Clause 57 is a new registration and reverses nothing: every prior run either binds or refuses, and a pass that reads a margin to size a schedule is neither |
+
+## Amendment 14, 2026-08-21: what the exploratory pass reads, constructed rather than named
+
+Clause 57 registered an exploratory pass and a branch rule that sizes a 43-hour calibration from what the pass reads.
+Writing the reader against that text found that the branch reads two quantities the clause names and does not construct, and that the pass as priced cannot produce the margin the branch consumes.
+None of this is a change of intent and none of it moves a rate.
+It is the difference between a rule a reader can follow and a rule a reader has to guess at, and clause 57's own reason for registering the branch before the pass runs applies with equal force to registering how its terms are built.
+
+Every figure below is reproduced by execution before it is written, and the one that is an upper bound rather than a measurement says so where it appears.
+
+### Clause 58. The window-separated contrast is CONSTRUCTED here, and clause 57's count of six is corrected
+
+Clause 57 gives each pass two additional identical-arm pairs and says the pass reads "the identical-arms contrast six times, of which three are separated by a whole pass and three sit inside one".
+Read against the manifest that produces them, the second half of that sentence describes nothing.
+
+`profile_knobs.timed_rounds` takes a width's WHOLE manifest and times every arm inside every round, rotating the starting arm, and clause 55 registers that arrangement as what makes two compared arms share their rounds.
+The four pair arms are arms of that manifest.
+So all four are timed inside every round of every pass, every contrast between two of them sits inside one time window by construction, and the count of contrasts the manifest can produce is six within-pass readings per width and zero window-separated ones.
+
+A window-separated draw therefore has to be built ACROSS passes, which clause 57 names and does not build, and the branch rule reads "the largest of the three window-separated pair contrasts".
+As committed, that rule has no referent.
+
+**Registered.**
+At each width, and for each of the three unordered pairs of passes, the window-separated contrast is the MAXIMUM, over the four identical-arm labels, of the absolute difference between that label's median in one pass and its median in the other.
+Three passes give three pairs of passes, so this is exactly three readings per width, which is the number clause 57's branch already names.
+
+The maximum over the four labels rather than one designated label, for one reason.
+The branch's denominator is what a margin has to clear, clearing it takes the LEAN schedule, and the lean schedule is the cheaper one, so a larger denominator is the conservative direction.
+Designating one label of four would leave the branch movable by which label was designated, and that choice would be made after the numbers exist.
+
+Clause 57's "six times, of which three are separated by a whole pass and three sit inside one" is CORRECTED to nine readings per width in two families: six within-pass contrasts, two per pass, and three window-separated ones.
+Its branch rule's wording is untouched and now has exactly three referents.
+What the within-pass six are for is untouched as well: clause 57 registers that two pairs inside one pass share a time window and count as evidence about leaf spread rather than as two blocks, and that reason is why they cannot be the branch's denominator and are reported beside it instead.
+
+### Clause 59. The branch is evaluated inside a width and never across two
+
+Clause 57's branch reads "the smaller of the two widths' margins is at least 8 times the largest of the three window-separated pair contrasts" and names no width for the contrast.
+Taken literally, one width's margin can be placed against the other width's contrast.
+
+That reading is not available and the document already says why twice.
+Clause 21 forbids reusing one context's resolution floor in another, and the addendum keys a context by cell, width and arrangement, so the two widths are two contexts.
+Clause 31 exists because a difference is only comparable to a floor converted with its OWN step total.
+A branch that compared a long-width margin against a short-width null would be the same fault in a place no gate looks.
+
+**Registered.**
+The ratio is formed INSIDE a width: at each width, the margin at that width over the largest of that width's own three window-separated contrasts.
+The branch clears when the smaller of the two per-width ratios is at least 8.
+
+This preserves clause 57's own phrasing rather than replacing it, because under a per-width ratio "the smaller of the two widths' margins" is the tighter width governing, which is what the clause was saying.
+What it is NOT is recorded so the difference is not rediscovered later: taking the smaller margin over the largest contrast at EITHER width is a stricter rule and a different one, and it is refused for crossing contexts rather than for being strict.
+
+### Clause 60. The exploratory pass carries its own sweep, and the sweep carries no floors
+
+Clause 57 prices the pass at "56.20 minutes a pass and 15.49 minutes for the extra pairs across the three", which is 3.07 hours, and both figures come from clause 45's binding pass over the step manifest.
+The ceiling sweep is not in either of them.
+
+The margin the pass exists to read is the difference of two credited savings, and a credited saving is `M * (1 - F/N)` where `F` is the floor's credited denominator.
+Candidate L's `F` comes from its bench, which clause 19 puts outside the step and which only the ceiling sweep runs.
+So a pass without a sweep produces no candidate L saving, no margin, and nothing for the branch to read.
+
+**Registered.**
+Each of the three passes carries its own sweep, run against that pass's own profile recording so the bench's supervised counts and its cell are the ones the step measured.
+Three and not one, because clause 57 reads the margin three times for the stated reason that a margin read once has unknown stability, and three margins sharing one denominator would vary in less than the margin does.
+
+Priced over clause 52's corrected bench arms of 72.2 and 2107.5 milliseconds, nine bench arms at two widths behind three warm-ups and five rounds, plus Amendment 10's kill bench at 40.4 seconds:
+
+| Item | Cost |
+|---|---|
+| candidate L's bench, both widths | 156.94 s |
+| the kill bench | 40.40 s |
+| one sweep | 3.29 min |
+| three sweeps | 9.87 min |
+| clause 57's pass, corrected | 3.23 h |
+
+That is an ESTIMATE rather than a measurement, and its construction is stated rather than absorbed: it prices all nine bench arms at one arm's measured time, while three of the nine are knob arms dialled to three quarters, one half and one quarter of the arithmetic and cost less, and four are scaffold arms that run at full vocabulary and carry a discarded slice on top, so they cost slightly more.
+The three dialled arms are the larger effect, so the figure overstates, which is the direction clause 46's window rule wants because a budget that overstates refuses early.
+
+An exploratory sweep carries no `floors_ms` and no `addendum_sha256`, for exactly the reason clause 57 gives for the exploratory profile: the pass runs before any addendum exists, a stage that could carry its own floor could choose it after seeing what it needed to clear, and the defence is that the recording can never bind whatever floor its reduction used.
+Its recording carries a blocker no gate clears, the same unclearable ground clause 57 puts on the profile.
+
+### Ledger: what Amendment 14 does to committed text
+
+| Clause | What happens to it |
+|---|---|
+| 57, its count of six identical-arm contrasts | CORRECTED to nine per width in two families. Every one of its six sits inside a pass, because all four pair arms are arms of a manifest `timed_rounds` interleaves inside every round, so its "three separated by a whole pass" described nothing the manifest produces |
+| 57, its branch rule's denominator | CONSTRUCTED by clause 58 and otherwise untouched. Its "the largest of the three window-separated pair contrasts" is unchanged wording that had no referent and now has exactly three |
+| 57, its branch rule's widths | SCOPED by clause 59 to a per-width ratio. Its "the smaller of the two widths' margins" is preserved as the tighter width governing, and the cross-width reading its wording admitted is refused |
+| 57, its multiplier of 8 | UNCHANGED, and so is its refusal to let that multiplier substitute for a calibrated demand. Clause 58 changes what the multiplier is applied TO and nothing about what clearing it means |
+| 57, its price of 3.07 hours | CORRECTED to 3.23 by clause 60. Its own arithmetic is untouched and reproduces 3.068 hours exactly on the items it counted; what moved is that it counted the profile and not the sweep |
+| 57, its three passes | UNCHANGED in number and now three sweeps as well as three profiles, for the reason clause 57 already gives for reading the margin three times |
+| 57, its lean and its ruled branches | UNCHANGED. Clause 58 and clause 59 make the branch computable and neither moves which schedule follows from a given reading |
+| 55, its interleaving | UNCHANGED and load-bearing. It is the whole of clause 58's argument that no pair contrast in the manifest is window-separated |
+| 21, its prohibition on reusing `R` across contexts | UNCHANGED and load-bearing. It is why clause 59 refuses a cross-width ratio, in a place that takes no `R` at all |
+| 31, its conversion | UNCHANGED and cited rather than extended. Clause 59 applies its reason to a cost branch, which certifies nothing, so no certified margin is created here |
+| 19, its bench exception | UNCHANGED. Clause 60 changes how many times the bench runs and nothing about what it computes |
+| 33, its `alpha`, its estimator and its block count | UNCHANGED and untouched. Nothing in this amendment reaches the calibration's rate, its demand or its schedule |
+| 46, its outstanding reserve for idle refusals | STILL OUTSTANDING and named again. Clause 60 adds 9.87 minutes to a pass budget and registers no reserve, and step 10 still cannot be armed until one exists |
