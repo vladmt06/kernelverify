@@ -57,6 +57,7 @@ from typing import Mapping, Sequence
 
 import profile_rules as rules
 import profile_stock as ps
+import memory_guard
 from ceiling_sweep import sweep_path
 from decode_rules import RunInvalid
 
@@ -362,6 +363,29 @@ def run_passes(*, plan: Path, sweep_plan: Path, results_dir: Path,
     return outcomes
 
 
+# The refusals the detached runner treats as "come back when the machine is
+# free" rather than as a failed run. A pass that refuses on one of these has
+# spent no arms, and the runner skips whatever already landed, so propagating
+# the code is what makes a five-hour job resumable across quiet windows
+# instead of one that has to be re-armed by hand.
+RETRYABLE = (memory_guard.EXIT_NOT_IDLE, memory_guard.EXIT_LOCK_HELD,
+             memory_guard.EXIT_LOW_MEMORY)
+
+
+def exit_code(outcomes: Sequence[Mapping[str, object]]) -> int:
+    """The run's own code, keeping a child's refusal rather than flattening it."""
+    codes = [one[key] for one in outcomes
+             for key in ("profile_exit", "sweep_exit")
+             if isinstance(one.get(key), int)]
+    for code in codes:
+        if code in RETRYABLE:
+            return code
+    ran = [one for one in outcomes if "skipped" not in one]
+    if not ran:
+        return 0
+    return 0 if all(one.get("sweep_exit") == 0 for one in ran) else 1
+
+
 def _today():
     from datetime import date
 
@@ -413,8 +437,7 @@ def main(argv=None) -> int:
     outcomes = run_passes(plan=args.plan, sweep_plan=args.sweep_plan,
                           results_dir=args.results)
     print(json.dumps({"passes": outcomes}, indent=2))
-    ran = [one for one in outcomes if "skipped" not in one]
-    return 0 if all(one.get("sweep_exit") == 0 for one in ran) else 1
+    return exit_code(outcomes)
 
 
 if __name__ == "__main__":

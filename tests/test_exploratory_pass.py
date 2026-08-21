@@ -429,3 +429,21 @@ def test_a_half_finished_pass_reruns_only_the_stage_it_is_missing(tmp_path):
                   passes=1)
     assert len(calls) == 1
     assert calls[0][0].endswith("ceiling_sweep.py")
+
+
+def test_a_child_refusing_on_a_busy_machine_keeps_its_own_exit_code():
+    """The detached runner reads these as "come back", not as a failed run.
+
+    A pass that refuses on idle has spent no arms and the runner skips what
+    already landed, so keeping the code is what makes five hours resumable
+    across quiet windows rather than something to re-arm by hand.
+    """
+    import memory_guard
+
+    assert ep.exit_code([{"pass": 1, "profile_exit": 0, "sweep_exit": 0},
+                         {"pass": 2, "profile_exit": memory_guard.EXIT_NOT_IDLE,
+                          "sweep_exit": None}]) == memory_guard.EXIT_NOT_IDLE
+    assert ep.exit_code([{"pass": 1, "profile_exit": 0, "sweep_exit": 0}]) == 0
+    assert ep.exit_code([{"pass": 1, "profile_exit": 0, "sweep_exit": 1}]) == 1
+    assert ep.exit_code([{"pass": 1, "skipped": "both recordings already "
+                                                "exist"}]) == 0
