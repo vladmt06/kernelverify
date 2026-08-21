@@ -1235,14 +1235,9 @@ def test_a_half_pair_is_refused_rather_than_read_as_a_zero_contrast():
 def test_the_margin_is_the_saving_difference_and_carries_no_verdict():
     """Clause 57 reads a time, and clause 16's conversion makes that time the
     difference of the two credited savings outright."""
-    readings = {w: ps.width_reading(_width(w, exploratory=True),
-                                    resolution_floor_ms=R, exploratory=True)
-                for w in rules.WIDTH_ORDER}
-    profile = {"profile_matrix": ps.profile_matrix(readings),
-               "cells": {rules.PRIMARY_CELL: {"readings": readings}}}
-    bench = {w: {"per_round_slopes_ms": [1.0, 1.2, 1.1, 1.05, 1.15]}
-             for w in rules.WIDTH_ORDER}
-    out = ps.exploratory_margins(profile, {"loss_bench": {"readings": bench}})
+    profile, sweep = _margin_inputs()
+    readings = profile["cells"][rules.PRIMARY_CELL]["readings"]
+    out = ps.exploratory_margins(profile, sweep)
 
     assert out["binds"] is False
     # Checked over KEYS rather than over the rendered text, because the words
@@ -1268,13 +1263,66 @@ def test_the_margin_is_the_saving_difference_and_carries_no_verdict():
 
 
 def test_a_candidate_typed_absent_leaves_no_margin_rather_than_a_zero():
-    readings = {w: ps.width_reading(_width(w, exploratory=True),
-                                    resolution_floor_ms=R, exploratory=True)
-                for w in rules.WIDTH_ORDER}
-    profile = {"profile_matrix": ps.profile_matrix(readings),
-               "cells": {rules.PRIMARY_CELL: {"readings": readings}}}
-    out = ps.exploratory_margins(profile, {"loss_bench": {"readings": {}}})
+    profile, sweep = _margin_inputs(bench={})
+    out = ps.exploratory_margins(profile, sweep)
     for width in rules.WIDTH_ORDER:
         assert out["widths"][width]["margin_ms"] is None
         assert any("no bench" in one for one in
                    out["widths"][width]["no_margin_because"])
+
+
+@pytest.mark.parametrize("rounds", [0, -3, False, True, 2.5, "5"])
+def test_the_round_count_guard_reaches_the_exploratory_branch_too(rounds):
+    """The gate existed and the exploratory branch returned before it.
+
+    A round count is what makes five samples repeats of one measurement, and
+    an exploratory pass that took zero rounds would leave every arm with no
+    samples and every fit undefined. A bool is refused for the reason the
+    seed guard refuses one: it is an int in Python and `True` would register
+    as one round without saying so.
+    """
+    for resolution in ({"exploratory": True},
+                       {"floors_ms": {w: R for w in rules.WIDTH_ORDER},
+                        "addendum_sha256": "addendum-sha"}):
+        with pytest.raises(RunInvalid, match="round count"):
+            ps.validate_plan(_plan(rounds=rounds, resolution=resolution))
+
+
+def _margin_inputs(width_kwargs=None, *, bench=None):
+    readings = {w: ps.width_reading(_width(w, exploratory=True,
+                                           **(width_kwargs or {})),
+                                    resolution_floor_ms=R, exploratory=True)
+                for w in rules.WIDTH_ORDER}
+    profile = {"kind": "exploratory",
+               "profile_matrix": ps.profile_matrix(readings),
+               "cells": {rules.PRIMARY_CELL: {
+                   "readings": readings,
+                   "widths": {w: {"context": _context(rules.PRIMARY_CELL, w)}
+                              for w in rules.WIDTH_ORDER}}}}
+    sweep = {"kind": "exploratory",
+             "contexts": {w: _context(rules.PRIMARY_CELL, w)
+                          for w in rules.WIDTH_ORDER},
+             "loss_bench": {"readings": bench if bench is not None else {
+                 w: {"per_round_slopes_ms": [1.0, 1.2, 1.1, 1.05, 1.15]}
+                 for w in rules.WIDTH_ORDER}}}
+    return profile, sweep
+
+
+def test_a_sweep_from_another_profile_is_refused_rather_than_paired():
+    """The join `cell_context` exists to make, made.
+
+    A floor slope and a share are two measurements, and pairing them is only
+    meaningful when both describe one workload. Nothing compared them, so any
+    sweep could be reported as any profile's margin.
+    """
+    profile, sweep = _margin_inputs()
+    sweep["contexts"]["long"] = dict(sweep["contexts"]["long"], supervised=17)
+    with pytest.raises(RunInvalid, match="long"):
+        ps.exploratory_margins(profile, sweep)
+
+
+def test_a_sweep_that_carries_no_contexts_at_all_is_refused():
+    profile, sweep = _margin_inputs()
+    del sweep["contexts"]
+    with pytest.raises(RunInvalid, match="context"):
+        ps.exploratory_margins(profile, sweep)

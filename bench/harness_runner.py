@@ -490,9 +490,24 @@ def _check_child_inputs(task: Mapping[str, object], observed_stack: dict) -> Non
         raise PreconditionFailed("child model artifact manifest changed")
     if model_manifest.get("model.safetensors") != base.get("sha256"):
         raise PreconditionFailed("child base model sha256 differs from preflight")
-    observed_data = _data_record(Path(plan["data"]))
-    if observed_data != provenance.get("data"):
-        raise PreconditionFailed("child training data differs from preflight")
+    # One caller pins one dataset and one pins two, exactly as the parent's
+    # preflight above records them. The child rechecked only the first shape,
+    # so every two-band child raised `KeyError` here before it loaded a model
+    # and the parent read the traceback as an unexplained child death.
+    if "data" in plan:
+        if _data_record(Path(plan["data"])) != provenance.get("data"):
+            raise PreconditionFailed(
+                "child training data differs from preflight")
+    elif "bands" in plan:
+        observed = {name: _data_record(Path(directory))
+                    for name, directory in sorted(plan["bands"].items())}
+        if observed != provenance.get("data_bands"):
+            raise PreconditionFailed(
+                "child training data differs from preflight in one or more "
+                "bands")
+    else:
+        raise PreconditionFailed(
+            "child run plan pins no training data, by `data` or by `bands`")
     if _wrapper_sha256(ROOT / "metalrunner") != provenance.get(
             "wrapper_sha256"):
         raise PreconditionFailed("child wrapper hash differs from preflight")

@@ -1036,3 +1036,29 @@ def test_the_benches_interleave_their_arms_instead_of_running_each_to_completion
 def test_a_round_over_no_arms_is_refused():
     with pytest.raises(RunInvalid, match="times nothing"):
         cs._timed_rounds({}, warmups=1, rounds=1)
+
+
+def test_a_sweep_that_opens_on_a_busy_machine_refuses_before_timing(
+        tmp_path, monkeypatch):
+    """The profile refuses at its opening gate and the sweep recorded and read on.
+
+    `run_profile` returns EXIT_NOT_IDLE before it measures anything, so no
+    profile recording can carry a busy opening. The sweep sampled the same
+    gate, stored the answer and never looked at it, so a sweep whose arms ran
+    against a competing process landed as a usable recording.
+    """
+    import machine_state
+
+    observed = {}
+    _fake_sweep_runtime(monkeypatch, observed)
+    monkeypatch.setattr(
+        machine_state, "idle_check",
+        lambda _cores: {"idle": False,
+                        "blockers": ["Xcode at 400% CPU competing for the GPU"]})
+
+    with pytest.raises(cs.NotIdle, match="competing"):
+        cs.run_sweep(_plan(), _contexts(), structural=_structural(),
+                     results_dir=tmp_path)
+    assert "loss" not in observed
+    assert "recording" not in observed
+    assert observed["lock_released"] is True

@@ -933,6 +933,19 @@ def validate_plan(plan: Mapping[str, object]) -> dict:
             f"different batch every call and the width's fixed batch is not "
             f"fixed at all. A positive integer is required")
 
+    # Hoisted above the exploratory branch, which returned before the check
+    # that used to sit at the end and so accepted 0, -3 and False where the
+    # binding path refused all three. A bool is refused for the reason the
+    # seed guard refuses one: it is an int in Python, and `True` would
+    # register as one round without ever saying so.
+    rounds = plan.get("rounds", ROUNDS)
+    if (not isinstance(rounds, int) or isinstance(rounds, bool)
+            or rounds < 1):
+        raise RunInvalid(
+            f"the plan registers a round count of {rounds!r}; a round count "
+            f"below one measures nothing and one that is not an integer is "
+            f"not a number of repeats")
+
     # A stock profile installs nothing. A plan that could name a kept kernel
     # could produce a profile of somebody's kernel labelled as stock, so the
     # key is refused outright rather than defaulted to empty.
@@ -993,7 +1006,7 @@ def validate_plan(plan: Mapping[str, object]) -> dict:
         fixed["cells"] = cells
         fixed["kept_candidates"] = []
         fixed["measurement_module"] = STOCK_MEASUREMENT_MODULE
-        fixed["rounds"] = int(plan.get("rounds", ROUNDS))
+        fixed["rounds"] = rounds
         fixed["bands"] = bands
         fixed["widths"] = {cell: list(widths_for(cell)) for cell in cells}
         fixed["exploratory"] = True
@@ -1018,9 +1031,7 @@ def validate_plan(plan: Mapping[str, object]) -> dict:
     fixed["cells"] = cells
     fixed["kept_candidates"] = []
     fixed["measurement_module"] = STOCK_MEASUREMENT_MODULE
-    fixed["rounds"] = int(plan.get("rounds", ROUNDS))
-    if fixed["rounds"] < 1:
-        raise RunInvalid("a round count below one measures nothing")
+    fixed["rounds"] = rounds
     fixed["bands"] = bands
     fixed["widths"] = {cell: list(widths_for(cell)) for cell in cells}
     fixed["resolution"] = dict(resolution, floors_ms=floors)
@@ -1074,6 +1085,26 @@ def exploratory_margins(profile: Mapping[str, object],
             "deciding cell and there is no L versus Q margin in it")
     readings = profile["cells"][rules.PRIMARY_CELL]["readings"]
     bench = sweep.get("loss_bench", {}).get("readings", {})
+
+    # `cell_context` exists to be CHECKED "wherever a number from one
+    # measurement meets a number from another ... across harnesses when the
+    # floor sweep's samples meet this profile's shares", and this is that
+    # meeting point. Nothing compared them, so any sweep could be paired with
+    # any profile and reported as its margin, including one measured on a
+    # different batch or a different supervised count.
+    sweep_contexts = sweep.get("contexts")
+    if not isinstance(sweep_contexts, Mapping):
+        raise RunInvalid(
+            "the sweep recording carries no per-width context, so nothing "
+            "says the floor it measured and the share it will divide "
+            "describe one workload")
+    for width in rules.WIDTH_ORDER:
+        theirs, ours = sweep_contexts.get(width), readings[width]["context"]
+        if theirs != ours:
+            raise RunInvalid(
+                f"the sweep's {width} context is not the profile's: a floor "
+                f"measured on one workload cannot be credited against a "
+                f"share measured on another")
     out = {}
     for width in rules.WIDTH_ORDER:
         row = {"pair_contrasts_ms": readings[width]["pair_contrasts_ms"]}

@@ -327,3 +327,40 @@ def test_a_bench_run_without_a_supervised_count_refuses_before_timing():
     with pytest.raises(RunInvalid, match="no supervised count"):
         cs.run_loss_bench({}, width="short", hidden=PROXY["hidden"],
                           vocab=PROXY["vocab"], rounds=2, warmups=1)
+
+
+@requires_metal
+def test_no_timed_call_of_the_loss_bench_builds_an_operand():
+    """Every operand is materialised before the clock starts, at every role.
+
+    The bench fits a slope against the dial, so anything inside the timed
+    callable whose SIZE moves with the dial enters that slope. The cotangent
+    was built there, at the kept vocabulary, which is the dial itself: at the
+    long width's registered supervised count a full-vocabulary cotangent is
+    1.12 GB of random generation charged to candidate L's floor.
+
+    Asserted over the arms rather than over one, because the knob arm is the
+    one whose cotangent moves and the reference arm is the one it is measured
+    against.
+    """
+    import mlx.core as mx
+
+    import profile_knobs as pk
+
+    hidden, vocab, supervised = 64, 256, 8
+    operands = cs._loss_operands(WIDTH, hidden=hidden, vocab=vocab,
+                                 supervised=supervised)
+    real = mx.random.normal
+    for role in cs.LOSS_ROLES:
+        for kept in (vocab, vocab // 4):
+            arm = cs._loss_arm(operands, kept, role=role)
+            calls = []
+            mx.random.normal = lambda *a, **k: (calls.append(a)
+                                                or real(*a, **k))
+            try:
+                mx.eval(arm())
+            finally:
+                mx.random.normal = real
+            assert calls == [], (
+                f"the {role} arm at kept={kept} generated {len(calls)} "
+                f"random tensors inside the timed call")

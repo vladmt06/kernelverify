@@ -131,6 +131,10 @@ class LockHeld(RuntimeError):
     """The machine-wide measurement lock has another live holder."""
 
 
+class NotIdle(RuntimeError):
+    """The machine was busy when the sweep opened, so it never timed an arm."""
+
+
 @dataclass(frozen=True)
 class KillArm:
     """One timed arm of the kill bench, before anything has run.
@@ -722,7 +726,14 @@ def _loss_arm(operands, kept: int, *, role: str):
         labels = mx.minimum(targets, kept - 1)
     else:
         weight, labels = full_weight, targets
-    mx.eval(weight, labels)
+    # The cotangent is an OPERAND and is materialised here with the rest of
+    # them. It was built inside the timed call, at the kept vocabulary, which
+    # is the dial: the fit then charged candidate L's floor for generating a
+    # tensor whose size moved with the very quantity the slope measures, and
+    # at the long width's registered supervised count that tensor is 1.12 GB.
+    cotangent = mx.random.normal(
+        (operands["supervised"], weight.shape[0])).astype(mx.float16)
+    mx.eval(weight, labels, cotangent)
 
     def run():
         if role == pk.SCAFFOLD:
@@ -733,8 +744,6 @@ def _loss_arm(operands, kept: int, *, role: str):
             return nn.losses.cross_entropy(logits, labels, reduction="mean")
 
         _value, grads = mx.vjp(loss, [rows], [mx.array(1.0)])
-        cotangent = mx.random.normal(
-            (operands["supervised"], weight.shape[0])).astype(mx.float16)
         return grads + [cotangent @ weight]
 
     return run
@@ -1035,6 +1044,14 @@ def run_sweep(plan: Mapping[str, object],
     try:
         fingerprint = machine_state.fingerprint()
         before = machine_state.idle_check(fingerprint["cores"])
+        # `run_profile` returns EXIT_NOT_IDLE here rather than measuring, and
+        # the sweep sampled the same gate, stored the answer and read on. A
+        # recording is refused for a machine that went busy DURING the run,
+        # so one that was busy before it started must not be made at all.
+        if not before.get("idle"):
+            raise NotIdle(
+                f"the machine was not idle when the sweep opened: "
+                f"{before.get('blockers')}")
         kill_samples = run_kill_bench(rounds=rounds, warmups=warmups,
                                       batch=batch)
         loss_samples, loss_roles = {}, {}
@@ -1164,6 +1181,9 @@ def main(argv=None) -> int:
     except LockHeld as error:
         ps._print_refusal(error)
         return ps.EXIT_LOCK_HELD
+    except NotIdle as error:
+        ps._print_refusal(error)
+        return ps.EXIT_NOT_IDLE
     except (PreconditionFailed, RunInvalid) as error:
         ps._print_refusal(error)
         return ps.EXIT_PRECONDITION

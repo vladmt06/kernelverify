@@ -301,6 +301,8 @@ def _real_pass(shift):
                "cells": {rules.PRIMARY_CELL: {"widths": widths,
                                               "readings": readings}}}
     sweep = {"kind": "exploratory",
+             "contexts": {width: widths[width]["context"]
+                          for width in WIDTHS},
              "loss_bench": {"readings": {
                  width: {"per_round_slopes_ms": [1.0, 1.2, 1.1, 1.05, 1.15]}
                  for width in WIDTHS}}}

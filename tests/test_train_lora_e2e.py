@@ -1668,3 +1668,65 @@ def test_the_wrapper_hash_ignores_interpreter_caches(tmp_path):
     assert harness._wrapper_sha256(tmp_path) == before
     (tmp_path / "real.py").write_text("x = 2\n")
     assert harness._wrapper_sha256(tmp_path) != before
+
+
+def _bands_fixture(tmp_path):
+    """The profile's shape: two bands of one corpus and no `data` key at all.
+
+    The end-to-end harness pins one dataset and the profile pins two, and
+    `preflight_inputs` has always accepted both. Nothing has ever driven the
+    two-band plan across the parent-to-child boundary, which is where it
+    fails.
+    """
+    root, plan, machine, packages, digest = _write_preflight_fixture(tmp_path)
+    short = tmp_path / "ultrachat-64"
+    long = tmp_path / "ultrachat-1056"
+    for band, row in ((short, "short"), (long, "long")):
+        band.mkdir()
+        (band / "train.jsonl").write_text(
+            '{"prompt":"p","completion":"%s"}\n' % row)
+    plan.pop("data")
+    plan["bands"] = {"short": str(short), "long": str(long)}
+    return root, plan, machine, packages, (short, long)
+
+
+def test_a_two_band_plan_crosses_the_parent_to_child_boundary(tmp_path):
+    """The profile's own plan shape, driven parent to child.
+
+    The parent records `data: None` and pins each band separately, so a child
+    recheck that reads `plan["data"]` raises `KeyError` before the model is
+    loaded and the whole cell is lost as an unexplained child death. Every
+    profile child took that path.
+    """
+    root, plan, machine, packages, _ = _bands_fixture(tmp_path)
+    provenance = runner.preflight_inputs(
+        plan, root=root, machine=machine, package_records=packages,
+        find_module=lambda name: object())
+    assert provenance["data"] is None
+    assert sorted(provenance["data_bands"]) == ["long", "short"]
+
+    monkey = runner._wrapper_sha256
+    runner._wrapper_sha256 = lambda path: provenance["wrapper_sha256"]
+    try:
+        runner._check_child_inputs({"plan": plan, "provenance": provenance},
+                                   provenance["stack"])
+    finally:
+        runner._wrapper_sha256 = monkey
+
+
+def test_a_band_changing_under_the_child_is_refused_band_by_band(tmp_path):
+    """The check the two-band path exists to make, per band rather than pooled."""
+    root, plan, machine, packages, bands = _bands_fixture(tmp_path)
+    provenance = runner.preflight_inputs(
+        plan, root=root, machine=machine, package_records=packages,
+        find_module=lambda name: object())
+    (bands[1] / "train.jsonl").write_text('{"prompt":"p","completion":"x"}\n')
+
+    monkey = runner._wrapper_sha256
+    runner._wrapper_sha256 = lambda path: provenance["wrapper_sha256"]
+    try:
+        with pytest.raises(PreconditionFailed, match="training data"):
+            runner._check_child_inputs(
+                {"plan": plan, "provenance": provenance}, provenance["stack"])
+    finally:
+        runner._wrapper_sha256 = monkey
