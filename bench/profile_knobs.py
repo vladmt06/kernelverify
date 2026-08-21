@@ -667,6 +667,165 @@ def timed_rounds(arms: Sequence[CompiledArm], batch, *,
     return samples
 
 
+STOCK, KNOB, SCAFFOLD, ABLATION = "stock", "knob", "scaffold", "ablation"
+ROLES = (STOCK, KNOB, SCAFFOLD, ABLATION)
+
+
+@dataclass(frozen=True)
+class ArmRole:
+    """What one timed label WAS, for the reducer that reads its samples.
+
+    Kept apart from `Arm`, which describes what to install while an arm
+    traces. By the time samples exist the seams are long gone, and what the
+    reducer needs is the label's role and the fraction the dial ACTUALLY
+    placed, which is not always the fraction that was asked for.
+    """
+
+    label: str
+    candidate: str
+    role: str
+    phi: float | None = None
+
+    def __post_init__(self):
+        if self.role not in ROLES:
+            raise RunInvalid(
+                f"arm {self.label!r} has role {self.role!r}, which is none of "
+                f"{ROLES}")
+        if self.role in (KNOB, SCAFFOLD) and self.phi is None:
+            raise RunInvalid(
+                f"arm {self.label!r} is a {self.role} arm and carries no "
+                f"actual fraction, so it cannot enter a fit")
+
+
+def kind_of(candidate: str) -> str:
+    """Whether section 4.2's own names make this candidate a retune.
+
+    Looked up rather than defaulted, because clause 18 credits a retune with
+    its slope and a rewrite with its slope PLUS a residue, so a guess here is
+    a credit nobody registered. Candidate A lives in the dial registry rather
+    than in `KNOBS`, since which dial IS candidate A was a measurement.
+    """
+    if candidate in KNOBS:
+        return KNOBS[candidate].kind
+    for knob in ATTENTION_KNOBS.values():
+        if knob.candidate == candidate:
+            return knob.kind
+    raise RunInvalid(
+        f"candidate {candidate!r} is in no knob registry, so nothing says "
+        f"whether section 4.2 names it a retune or a rewrite, and the two "
+        f"are credited differently")
+
+
+def reduce_width(samples: Mapping[str, Sequence[float]],
+                 roles: Sequence[ArmRole], *,
+                 resolution_floor: float,
+                 rounds: int = ROUNDS) -> dict[str, KnobReading]:
+    """One width's raw arm samples, reduced to one reading per candidate.
+
+    Pure: it takes times and returns readings, so every rule downstream of it
+    is testable without a device. Two quantities are computed HERE rather
+    than taken from a caller, because both have a wrong version that looks
+    right:
+
+    the SPAN is the distance between the highest and lowest ACTUAL realisable
+    fractions, not the nominal ladder's, since a dial that cannot place the
+    setting it was asked for still gets fitted at the one it did place;
+
+    the scaffold's observed RANGE is taken over its ARM MEDIANS, the same
+    reduction the pooled fit uses, and not over the raw rounds, because four
+    arm medians all equal to 100 can sit on rounds spanning 99 to 101 and the
+    two readings disagree about whether the arm moved at all.
+    """
+    if resolution_floor is None or not resolution_floor > 0.0:
+        raise RunInvalid(
+            f"the resolution floor is {resolution_floor!r}; clause 26 needs a "
+            f"positive one, because a floor of zero claims the machine can "
+            f"resolve any difference at all")
+
+    seen: set[str] = set()
+    for role in roles:
+        if role.label in seen:
+            raise RunInvalid(
+                f"two arms were recorded under the label {role.label!r}, so "
+                f"one of them silently overwrote the other's samples")
+        seen.add(role.label)
+        if role.label not in samples:
+            raise RunInvalid(
+                f"the manifest names arm {role.label!r} and the recording "
+                f"holds no samples for it, which is a hole and not an absence")
+        if len(samples[role.label]) != rounds:
+            raise RunInvalid(
+                f"arm {role.label!r} carries {len(samples[role.label])} "
+                f"samples against {rounds} rounds, so the rounds are not the "
+                f"repeats the spread gate reads")
+    extra = sorted(set(samples) - seen)
+    if extra:
+        raise RunInvalid(
+            f"the recording holds samples for {extra}, which the manifest "
+            f"does not name; an arm nobody registered cannot enter a fit")
+
+    stock = [r for r in roles if r.role == STOCK]
+    if len(stock) != 1:
+        raise RunInvalid(
+            f"a width needs exactly one stock arm and this one names "
+            f"{len(stock)}; the share's denominator is stock's own time")
+    stock_median = statistics.median(samples[stock[0].label])
+
+    by_candidate: dict[str, dict[str, list[ArmRole]]] = {}
+    for role in roles:
+        if role.role == STOCK:
+            continue
+        by_candidate.setdefault(role.candidate, {}).setdefault(
+            role.role, []).append(role)
+
+    readings = {}
+    for candidate in sorted(by_candidate):
+        parts = by_candidate[candidate]
+        knob = parts.get(KNOB, [])
+        scaffold = parts.get(SCAFFOLD, [])
+        ablation = parts.get(ABLATION, [])
+        knob_phis = {r.label: r.phi for r in knob}
+        scaffold_phis = {r.label: r.phi for r in scaffold}
+        if len(set(knob_phis.values())) < MIN_DIAL_SETTINGS:
+            raise RunInvalid(
+                f"candidate {candidate} placed "
+                f"{len(set(knob_phis.values()))} distinct actual settings and "
+                f"a dial needs {MIN_DIAL_SETTINGS} to be shown linear; two "
+                f"nominal settings that round to one size are one setting")
+        if set(scaffold_phis.values()) != set(knob_phis.values()):
+            raise RunInvalid(
+                f"candidate {candidate}'s scaffold was placed at "
+                f"{sorted(set(scaffold_phis.values()))} and its knob at "
+                f"{sorted(set(knob_phis.values()))}; a scaffold measured at "
+                f"different settings prices a different arm")
+        if len(ablation) > 1:
+            raise RunInvalid(
+                f"candidate {candidate} carries {len(ablation)} ablated arms "
+                f"and clause 18 credits one residue")
+
+        actual = sorted(knob_phis.values())
+        span = actual[-1] - actual[0]
+        scaffold_medians = {label: statistics.median(samples[label])
+                            for label in scaffold_phis}
+        full = max(scaffold_phis, key=lambda label: scaffold_phis[label])
+        readings[candidate] = KnobReading(
+            candidate=candidate,
+            kind=kind_of(candidate),
+            stock_median=stock_median,
+            per_round=tuple(per_round_fits(samples, knob_phis, rounds)),
+            pooled=pooled_fit(samples, knob_phis),
+            scaffold=pooled_fit(samples, scaffold_phis),
+            scaffold_offset=scaffold_medians[full] - stock_median,
+            ablated_median=(statistics.median(samples[ablation[0].label])
+                            if ablation else None),
+            resolution_floor=resolution_floor,
+            span=span,
+            scaffold_range=max(scaffold_medians.values())
+            - min(scaffold_medians.values()),
+        )
+    return readings
+
+
 def per_round_fits(samples: Mapping[str, Sequence[float]],
                    phis: Mapping[str, float],
                    rounds: int = ROUNDS) -> list[Fit]:

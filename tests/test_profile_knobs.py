@@ -329,6 +329,160 @@ def test_a_span_that_was_never_recorded_blocks_rather_than_passes():
     assert any("actual span was" in p for p in problems)
 
 
+# --- the width reducer ------------------------------------------------------
+
+
+def _width(*, knob_phis=(1.0, 0.75, 0.5, 0.25), scaffold_phis=None,
+           slope=14.0, intercept=50.0, stock=64.0, scaffold_times=None,
+           ablation=None, rounds=5, candidate="Q"):
+    """One width's raw samples and the manifest that says what each label was."""
+    scaffold_phis = knob_phis if scaffold_phis is None else scaffold_phis
+    samples, roles = {}, [pk.ArmRole("stock", "stock", pk.STOCK)]
+    samples["stock"] = [stock] * rounds
+    for phi in knob_phis:
+        label = f"{candidate}@{phi}"
+        samples[label] = [intercept + slope * phi] * rounds
+        roles.append(pk.ArmRole(label, candidate, pk.KNOB, phi))
+    for index, phi in enumerate(scaffold_phis):
+        label = f"{candidate}~{phi}"
+        time = (scaffold_times[index] if scaffold_times is not None
+                else stock + 0.01)
+        samples[label] = [time] * rounds
+        roles.append(pk.ArmRole(label, candidate, pk.SCAFFOLD, phi))
+    if ablation is not None:
+        samples[f"{candidate}!"] = [ablation] * rounds
+        roles.append(pk.ArmRole(f"{candidate}!", candidate, pk.ABLATION))
+    return samples, roles
+
+
+def test_a_width_reduces_to_one_reading_per_candidate():
+    samples, roles = _width()
+    readings = pk.reduce_width(samples, roles, resolution_floor=0.05)
+    assert sorted(readings) == ["Q"]
+    reading = readings["Q"]
+    assert reading.kind == pk.RETUNE
+    assert reading.stock_median == pytest.approx(64.0)
+    assert reading.pooled.slope == pytest.approx(14.0)
+    assert reading.span == pytest.approx(0.75)
+    assert reading.blockers() == []
+
+
+def test_the_scaffold_range_is_taken_over_arm_medians_not_raw_rounds():
+    """Clause 26 says which reduction, and the two disagree.
+
+    Four arm medians all equal to 100 can sit on rounds spanning 99 to 101,
+    giving a range of 0 against a range of 2, and only the first says whether
+    the ARM moved.
+    """
+    samples, roles = _width(scaffold_times=[100.0] * 4)
+    for role in roles:
+        if role.role == pk.SCAFFOLD:
+            samples[role.label] = [99.0, 101.0, 100.0, 99.0, 101.0]
+    reading = pk.reduce_width(samples, roles, resolution_floor=0.05)["Q"]
+    assert reading.scaffold_range == pytest.approx(0.0)
+    assert reading.scaffold_case == "clamped"
+
+
+def test_the_span_is_the_actual_realisable_one_and_it_changes_the_verdict():
+    """Clause 33's obligation, on its own numbers.
+
+    A ladder returns the fractions it was ASKED for, and a quantized operand
+    cannot always place them. At a slope of 14 the nominal span of 0.75 gives
+    an excursion of 10.5, which clears a demand of 10, while the realisable
+    span of 0.667 gives 9.33, which does not.
+    """
+    samples, roles = _width(knob_phis=(1.0, 0.75, 0.5, 1.0 / 3.0), slope=14.0)
+    reading = pk.reduce_width(samples, roles, resolution_floor=1.0)["Q"]
+    assert reading.span == pytest.approx(2.0 / 3.0)
+    assert reading.pooled.slope * 0.75 == pytest.approx(10.5)
+    assert reading.pooled.slope * reading.span == pytest.approx(9.333, abs=1e-3)
+    assert any("excursion" in p for p in reading.blockers())
+
+
+def test_a_manifest_naming_an_arm_with_no_samples_refuses():
+    samples, roles = _width()
+    del samples["Q@0.5"]
+    with pytest.raises(RunInvalid, match="hole and not an absence"):
+        pk.reduce_width(samples, roles, resolution_floor=0.05)
+
+
+def test_samples_no_arm_in_the_manifest_claims_refuse():
+    samples, roles = _width()
+    samples["mystery"] = [1.0] * 5
+    with pytest.raises(RunInvalid, match="does not name"):
+        pk.reduce_width(samples, roles, resolution_floor=0.05)
+
+
+def test_two_arms_under_one_label_refuse():
+    samples, roles = _width()
+    roles.append(pk.ArmRole("Q@0.5", "Q", pk.KNOB, 0.5))
+    with pytest.raises(RunInvalid, match="silently overwrote"):
+        pk.reduce_width(samples, roles, resolution_floor=0.05)
+
+
+def test_an_arm_short_of_a_round_refuses():
+    samples, roles = _width()
+    samples["Q@0.5"] = samples["Q@0.5"][:-1]
+    with pytest.raises(RunInvalid, match="against 5 rounds"):
+        pk.reduce_width(samples, roles, resolution_floor=0.05)
+
+
+def test_settings_that_placed_the_same_size_do_not_count_twice():
+    """A ladder asks for four fractions; a quantized operand may place two.
+
+    The labels stay distinct because the arms really did run, and what
+    collapses is the ACTUAL fraction each one placed, so a four-arm ladder
+    can be a two-point line and no count of labels would say so.
+    """
+    samples, roles = {}, [pk.ArmRole("stock", "stock", pk.STOCK)]
+    samples["stock"] = [64.0] * 5
+    nominal_to_actual = {1.0: 1.0, 0.75: 1.0, 0.5: 0.5, 0.25: 0.5}
+    for nominal, actual in nominal_to_actual.items():
+        for role, prefix, time in ((pk.KNOB, "Q@", 50.0 + 14.0 * actual),
+                                   (pk.SCAFFOLD, "Q~", 64.01)):
+            label = f"{prefix}{nominal}"
+            samples[label] = [time] * 5
+            roles.append(pk.ArmRole(label, "Q", role, actual))
+    with pytest.raises(RunInvalid, match="round to one size are one setting"):
+        pk.reduce_width(samples, roles, resolution_floor=0.05)
+
+
+def test_a_scaffold_placed_at_other_settings_than_the_knob_refuses():
+    samples, roles = _width(scaffold_phis=(1.0, 0.75, 0.5, 0.125))
+    with pytest.raises(RunInvalid, match="prices a different arm"):
+        pk.reduce_width(samples, roles, resolution_floor=0.05)
+
+
+def test_a_width_without_exactly_one_stock_arm_refuses():
+    samples, roles = _width()
+    roles = [r for r in roles if r.role != pk.STOCK]
+    del samples["stock"]
+    with pytest.raises(RunInvalid, match="exactly one stock arm"):
+        pk.reduce_width(samples, roles, resolution_floor=0.05)
+
+
+def test_a_resolution_floor_of_zero_refuses_the_reduction():
+    samples, roles = _width()
+    with pytest.raises(RunInvalid, match="needs a positive one"):
+        pk.reduce_width(samples, roles, resolution_floor=0.0)
+
+
+def test_a_rewrite_carries_its_ablated_arm_and_a_retune_may_not():
+    samples, roles = _width(candidate="L", ablation=49.5)
+    reading = pk.reduce_width(samples, roles, resolution_floor=0.05)["L"]
+    assert reading.kind == pk.REWRITE
+    assert reading.residue == pytest.approx(0.5)
+    samples, roles = _width(candidate="Q", ablation=49.5)
+    with pytest.raises(RunInvalid, match="nothing may use"):
+        pk.reduce_width(samples, roles, resolution_floor=0.05)
+
+
+def test_a_candidate_in_no_registry_refuses_rather_than_defaulting_its_kind():
+    samples, roles = _width(candidate="Z")
+    with pytest.raises(RunInvalid, match="in no knob registry"):
+        pk.reduce_width(samples, roles, resolution_floor=0.05)
+
+
 # --- the credited ratio ----------------------------------------------------
 
 
