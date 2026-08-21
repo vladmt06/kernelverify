@@ -77,7 +77,8 @@ def _arm_time(spec, *, slopes, residues, stock_ms, intercept_ms,
 def _width(width="short", *, cell="B", slopes=None, residues=None,
            scaffold_slopes=None, stock_ms=STOCK_MS,
            intercept_ms=INTERCEPT_MS, rounds=ps.ROUNDS, jitter=None,
-           context=None, actual=None, peak_gb=12.0, references=None):
+           context=None, actual=None, peak_gb=12.0, references=None,
+           exploratory=False):
     """One width's raw arms, in the shape the child records them.
 
     Every arm is a clean line by default, so a test that wants to fail one
@@ -92,7 +93,7 @@ def _width(width="short", *, cell="B", slopes=None, residues=None,
     actual = dict(actual or {})
     context = _context(cell, width) if context is None else context
     arms = {}
-    for spec in ps.arm_manifest(width):
+    for spec in ps.arm_manifest(width, exploratory=exploratory):
         base = _arm_time(spec, slopes=slopes, residues=residues,
                          stock_ms=stock_ms, intercept_ms=intercept_ms,
                          scaffold_slopes=scaffold_slopes,
@@ -1092,3 +1093,60 @@ def test_a_model_running_a_shape_amendment_five_never_registered_blocks():
 
 def test_a_model_running_only_registered_shapes_does_not_block():
     assert ps.binding_blockers(_record()) == []
+
+
+# ---------------------------------------------------------------------------
+# Amendment 13 clause 57: the exploratory pass
+# ---------------------------------------------------------------------------
+def test_the_exploratory_manifest_adds_pairs_and_leaves_the_certified_one_alone():
+    for width in rules.WIDTH_ORDER:
+        certified = ps.arm_manifest(width)
+        explored = ps.arm_manifest(width, exploratory=True)
+        assert explored[:len(certified)] == certified
+        extra = [spec.label for spec in explored[len(certified):]]
+        assert extra == ["pair0:a", "pair0:b", "pair1:a", "pair1:b"]
+        assert all(spec.role == pk.STOCK
+                   for spec in explored[len(certified):])
+
+
+def test_an_exploratory_plan_needs_no_floors_and_may_not_carry_any():
+    """Clause 57. The defence against a self-chosen floor is that an
+    exploratory recording can never bind, so it is given none to choose."""
+    plan = _plan(resolution={"exploratory": True})
+    fixed = ps.validate_plan(plan)
+    assert fixed["exploratory"] is True
+    assert set(fixed["resolution"]["floors_ms"]) == {"short", "long"}
+    for smuggled in ({"floors_ms": {"short": R, "long": R}},
+                     {"addendum_sha256": "addendum-sha"}):
+        with pytest.raises(RunInvalid, match="could have chosen them"):
+            ps.validate_plan(_plan(
+                resolution=dict({"exploratory": True}, **smuggled)))
+
+
+def test_an_exploratory_recording_can_never_bind():
+    record = {"plan": {"exploratory": True}, "closing_idle": {"idle": True},
+              "cells": {}}
+    blockers = ps.binding_blockers(record)
+    assert any("exploratory" in one for one in blockers)
+    assert not ps.binding_blockers(
+        {"plan": {}, "closing_idle": {"idle": True}, "cells": {}})
+
+
+def test_the_pairs_are_read_beside_the_reduction_and_never_inside_it():
+    """They are stock arms, and `reduce_width` refuses a width holding more
+    than one, so a pair that reached the reduction would refuse the run."""
+    measured = _width("short", exploratory=True,
+                      jitter={"pair0:a": [100.0] * ps.ROUNDS,
+                              "pair0:b": [100.4] * ps.ROUNDS,
+                              "pair1:a": [100.0] * ps.ROUNDS,
+                              "pair1:b": [99.75] * ps.ROUNDS})
+    reading = ps.width_reading(measured, resolution_floor_ms=R,
+                               exploratory=True)
+    assert reading["pair_contrasts_ms"] == pytest.approx(
+        {"pair0": 0.4, "pair1": 0.25})
+    assert set(reading["entries"]) == set(ps.CANDIDATES_AT_WIDTH["short"])
+
+
+def test_a_half_pair_is_refused_rather_than_read_as_a_zero_contrast():
+    with pytest.raises(RunInvalid, match="needs two arms"):
+        ps.pair_contrasts({"pair0:a": [1.0, 2.0]})

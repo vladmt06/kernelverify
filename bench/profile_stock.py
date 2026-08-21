@@ -236,7 +236,20 @@ def widths_for(cell: str) -> tuple[str, ...]:
             else (rules.WIDTH_ORDER[0],))
 
 
-def arm_manifest(width: str) -> tuple[ArmSpec, ...]:
+# Amendment 13 clause 57: the exploratory pass carries two identical-arm
+# pairs beside the manifest so the same rounds that read a margin also read
+# the machine's null. They are stock arms with no seam, distinct from the
+# certified stock arm, and they are ADDITIONAL: the certified manifest is
+# what it was, and nothing reads these four except the exploratory reader.
+EXPLORATORY_PAIRS = 2
+PAIR_PREFIX = "pair"
+# Arbitrary BY CONSTRUCTION: an exploratory recording carries a blocker no
+# gate can clear, so no choice of floor makes it bind and there is nothing to
+# choose it for.
+EXPLORATORY_FLOOR_MS = 1.0
+
+
+def arm_manifest(width: str, *, exploratory: bool = False) -> tuple[ArmSpec, ...]:
     """Amendment 8's arms for one width, in build and record order.
 
     One stock arm, then each candidate's knob ladder, its scaffold ladder at
@@ -268,6 +281,12 @@ def arm_manifest(width: str) -> tuple[ArmSpec, ...]:
         if candidate in NEEDS_REFERENCE:
             arms.append(ArmSpec(label=f"{candidate}:{pk.REFERENCE}",
                                 candidate=candidate, role=pk.REFERENCE))
+    if exploratory:
+        for index in range(EXPLORATORY_PAIRS):
+            for side in ("a", "b"):
+                arms.append(ArmSpec(
+                    label=f"{PAIR_PREFIX}{index}:{side}",
+                    candidate="stock", role=pk.STOCK))
     labels = [arm.label for arm in arms]
     if len(set(labels)) != len(labels):
         raise RunInvalid(
@@ -511,9 +530,34 @@ def partition(entries: Mapping[str, Mapping[str, object]]) -> dict:
                      "partition region is a region and not a candidate"}
 
 
+def pair_contrasts(pairs: Mapping[str, Sequence[float]]) -> dict:
+    """Clause 57's identical-arm pairs, reduced the way clause 33 reduces one.
+
+    A block contrast is the absolute difference of the two arms' MEDIANS,
+    which clause 33 fixes against the per-round paired reading, so that is
+    what this takes. Two pairs inside ONE pass share a time window and are not
+    two blocks, which is why clause 57 counts them as evidence about leaf
+    spread and takes its window-separated draws from separate passes.
+    """
+    contrasts = {}
+    for label in sorted(pairs):
+        index, side = label.split(":")
+        if side != "a":
+            continue
+        other = f"{index}:b"
+        if other not in pairs:
+            raise RunInvalid(
+                f"pair {index} carries only one side, and a null contrast "
+                f"needs two arms that ought to agree")
+        contrasts[index] = abs(statistics.median(pairs[label])
+                               - statistics.median(pairs[other]))
+    return contrasts
+
+
 def width_reading(measured: Mapping[str, object], *,
                   resolution_floor_ms: float,
-                  spread_limit_pct: float = machine_state.MAX_SPREAD_PCT
+                  spread_limit_pct: float = machine_state.MAX_SPREAD_PCT,
+                  exploratory: bool = False
                   ) -> dict:
     """One width of one cell, reduced from raw arm samples to typed entries.
 
@@ -524,7 +568,7 @@ def width_reading(measured: Mapping[str, object], *,
     """
     width = measured["width"]
     arms = measured["arms"]
-    manifest = arm_manifest(width)
+    manifest = arm_manifest(width, exploratory=exploratory)
     expected = {arm.label for arm in manifest}
     if set(arms) != expected:
         raise RunInvalid(
@@ -540,6 +584,12 @@ def width_reading(measured: Mapping[str, object], *,
                 f"different workloads")
 
     samples = {label: list(arms[label]["samples_ms"]) for label in arms}
+    # Amendment 13 clause 57's identical-arm pairs are timed inside the same
+    # rounds and read by nothing downstream: they carry no dial, they are not
+    # a candidate, and `reduce_width` refuses a width holding more than one
+    # stock arm, so they leave the reduction before it runs.
+    pairs = {label: samples.pop(label) for label in sorted(samples)
+             if label.startswith(PAIR_PREFIX)}
     counted = {len(values) for values in samples.values()}
     if len(counted) != 1:
         raise RunInvalid(
@@ -549,7 +599,7 @@ def width_reading(measured: Mapping[str, object], *,
     roles = tuple(pk.ArmRole(label=label, candidate=arms[label]["candidate"],
                              role=arms[label]["role"],
                              phi=arms[label]["actual_phi"])
-                  for label in sorted(arms))
+                  for label in sorted(samples))
     readings = pk.reduce_width(samples, roles,
                                resolution_floor=resolution_floor_ms,
                                rounds=counted.pop())
@@ -596,6 +646,7 @@ def width_reading(measured: Mapping[str, object], *,
         "peak_gb": measured["peak_gb"],
         "entries": entries,
         "partition": partition(entries),
+        "pair_contrasts_ms": pair_contrasts(pairs),
         "actual_settings": {
             label: {"nominal_phi": arms[label]["nominal_phi"],
                     "actual_phi": arms[label]["actual_phi"],
@@ -735,6 +786,15 @@ def binding_blockers(record: Mapping[str, object]) -> list[str]:
     they fail is a gate the ruling would have rested on.
     """
     blockers = []
+    # Amendment 13 clause 57. This is not a gate an exploratory run might
+    # pass: it is what makes the pass structurally incapable of binding, so
+    # that the floor its reduction used cannot have been chosen for what it
+    # would clear.
+    if record.get("plan", {}).get("exploratory"):
+        blockers.append(
+            "this recording is exploratory: clause 57 gives it no resolution "
+            "floor, its reduction ran on a sentinel, and it exists to size a "
+            "schedule rather than to name an operation")
     if not record.get("closing_idle", {}).get("idle"):
         blockers.append("the machine was not idle at the closing gate")
     for cell, cell_record in sorted(record.get("cells", {}).items()):
@@ -894,8 +954,35 @@ def validate_plan(plan: Mapping[str, object]) -> dict:
     # is named. The harness reads `R` and never measures it: a run that could
     # set its own floor could set it after seeing what it needed to clear.
     resolution = plan["resolution"]
-    floors = dict(resolution.get("floors_ms", {}))
     needed = sorted({width for cell in cells for width in widths_for(cell)})
+    # Amendment 13 clause 57's exploratory pass runs before any addendum
+    # exists, so it declares that it has no floors rather than inventing
+    # some. It may not carry any either: a run that could set its own floor
+    # could set it after seeing what it needed to clear, and the defence
+    # against that is that an exploratory recording can NEVER bind, whatever
+    # floor its reduction used. The sentinel below is arbitrary for exactly
+    # that reason, and the exploratory reader re-reduces from raw samples.
+    if resolution.get("exploratory"):
+        smuggled = sorted({"floors_ms", "addendum_sha256"} & set(resolution))
+        if smuggled:
+            raise RunInvalid(
+                f"an exploratory plan carries {smuggled}, and clause 57 gives "
+                f"it no floors at all: a pass that binds nothing has nothing "
+                f"to trace a floor to, and one that carried floors could have "
+                f"chosen them")
+        fixed = dict(plan)
+        fixed["cells"] = cells
+        fixed["kept_candidates"] = []
+        fixed["measurement_module"] = STOCK_MEASUREMENT_MODULE
+        fixed["rounds"] = int(plan.get("rounds", ROUNDS))
+        fixed["bands"] = bands
+        fixed["widths"] = {cell: list(widths_for(cell)) for cell in cells}
+        fixed["exploratory"] = True
+        fixed["resolution"] = dict(
+            resolution,
+            floors_ms={width: EXPLORATORY_FLOOR_MS for width in needed})
+        return fixed
+    floors = dict(resolution.get("floors_ms", {}))
     for width in needed:
         value = floors.get(width)
         if not isinstance(value, (int, float)) or not value > 0.0:
@@ -1222,7 +1309,8 @@ def _actual_settings(candidate: str, prepared: Mapping[str, object]) -> dict:
     return settings
 
 
-def _build_width(target, batch, width: str, guard: _ChildGuard) -> dict:
+def _build_width(target, batch, width: str, guard: _ChildGuard, *,
+                 exploratory: bool = False) -> dict:
     """Every arm of one width, prepared, built, traced and warmed.
 
     The ordering is the whole point and it is not an implementation detail.
@@ -1242,7 +1330,7 @@ def _build_width(target, batch, width: str, guard: _ChildGuard) -> dict:
         settings[candidate] = _actual_settings(candidate, prepared[candidate])
 
     compiled, roles = [], {}
-    for spec in arm_manifest(width):
+    for spec in arm_manifest(width, exploratory=exploratory):
         guard.check(f"{width}: build {spec.label}")
         if spec.role == pk.STOCK:
             seams_map, actual = {}, None
@@ -1302,7 +1390,8 @@ def _profile_child(task: Mapping[str, object], guard: _ChildGuard) -> dict:
             checked["counts"],
             expected_counts(target.depth, target.adapted, sorted(pi.REGIONS)))
         structural[width] = checked
-        built = _build_width(target, batch, width, guard)
+        built = _build_width(target, batch, width, guard,
+                             exploratory=bool(plan.get("exploratory")))
         guard.check(f"{cell} {width}: {len(built['compiled'])} arms timed")
         # Seconds become milliseconds HERE and nowhere else. Amendment 6
         # clause 33 puts every rule's input in milliseconds, and one artifact
@@ -1551,15 +1640,16 @@ def run_profile(plan: Mapping[str, object], runtime, *,
         try:
             for name, one in sorted(cells.items()):
                 one["readings"] = {
-                    width: width_reading(measured,
-                                         resolution_floor_ms=floors[width])
+                    width: width_reading(
+                        measured, resolution_floor_ms=floors[width],
+                        exploratory=bool(fixed.get("exploratory")))
                     for width, measured in sorted(one["widths"].items())}
         except (RunInvalid, KeyError) as error:
             _print_refusal(error)
             return EXIT_PRECONDITION
         record = {
             "schema_version": 2,
-            "kind": "binding",
+            "kind": "exploratory" if fixed.get("exploratory") else "binding",
             "units": {"time": "ms", "fraction": "dimensionless"},
             "plan": fixed,
             "provenance": provenance,
@@ -1580,7 +1670,8 @@ def run_profile(plan: Mapping[str, object], runtime, *,
                 return EXIT_PRECONDITION
         record["binding_blockers"] = binding_blockers(record)
         record["binding"] = not record["binding_blockers"]
-        path = recording_path(results_dir, runtime.today(), kind="binding",
+        path = recording_path(results_dir, runtime.today(),
+                              kind=record["kind"],
                               binding=record["binding"])
         try:
             runtime.write_record(path, record)
