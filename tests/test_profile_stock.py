@@ -789,6 +789,21 @@ def test_the_fixed_plan_says_in_writing_that_nothing_was_installed():
     assert fixed["widths"] == {"B": ["short", "long"]}
 
 
+def test_a_seed_mlx_lm_will_not_honour_is_refused():
+    """mlx-lm guards its own seeding with `if seed:`, and 0 is falsy.
+
+    Measured on the short band 2026-08-21: six draws at seed 0 gave 116, 109,
+    114, 130, 114 and 121 supervised rows and six at seed 7 gave 91 every
+    time. The width's batch is supposed to be fixed, and candidate L's floor
+    is defined on its supervised rows, so an unhonoured seed moves the
+    workload underneath both.
+    """
+    for bad in (0, -1, 1.5, True, "7"):
+        with pytest.raises(RunInvalid, match="seeds"):
+            ps.validate_plan(_plan(seed=bad))
+    assert ps.validate_plan(_plan(seed=7))["seed"] == 7
+
+
 def test_schema_one_is_refused_rather_than_read_as_schema_two():
     with pytest.raises(RunInvalid, match="unknown plan schema"):
         ps.validate_plan(_plan(schema_version=1))

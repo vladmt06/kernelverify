@@ -839,6 +839,21 @@ def validate_plan(plan: Mapping[str, object]) -> dict:
             f"unknown plan schema {plan['schema_version']!r}; schema 1 named "
             f"marked modes and one dataset, and this harness measures knob "
             f"arms at two registered widths")
+    # mlx-lm seeds its batch permutation behind `if seed:`, so a seed of 0
+    # leaves numpy unseeded and draws a fresh permutation on every call.
+    # Measured 2026-08-21 on the short band: six draws at seed 0 gave 116,
+    # 109, 114, 130, 114 and 121 supervised rows, and six at seed 7 gave 91
+    # every time. The fixed batch is what makes five rounds repeats of one
+    # measurement, and candidate L's floor is DEFINED on the supervised rows,
+    # so an unseeded draw silently moves both.
+    seed = plan["seed"]
+    if not isinstance(seed, int) or isinstance(seed, bool) or seed <= 0:
+        raise RunInvalid(
+            f"the plan registers seed {seed!r}; mlx-lm's own iterator seeds "
+            f"itself only when the seed is truthy, so a seed of 0 draws a "
+            f"different batch every call and the width's fixed batch is not "
+            f"fixed at all. A positive integer is required")
+
     # A stock profile installs nothing. A plan that could name a kept kernel
     # could produce a profile of somebody's kernel labelled as stock, so the
     # key is refused outright rather than defaulted to empty.
