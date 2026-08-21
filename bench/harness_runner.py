@@ -362,14 +362,71 @@ def _signal_child(proc, signum: int) -> None:
         pass
 
 
-def _reap(proc) -> None:
-    if proc.poll() is not None:
-        return
-    _signal_child(proc, signal.SIGTERM)
+def write_recording_once(path, record: Mapping[str, object]) -> None:
+    """Serialise first, publish atomically, and never overwrite.
+
+    Exclusive create is not the same as atomic create. The final path used to
+    be opened before the record was serialised, so a failure during
+    publication left a zero-byte file no later attempt could tell from a
+    recording somebody meant to keep, and a multi-pass runner that skips a
+    pass whose recordings exist would skip a pass that never ran.
+
+    `os.link` gives both properties at once: it fails if the name is taken and
+    it makes the name appear complete or not at all.
+    """
+    path = Path(path)
+    text = json.dumps(record, indent=2, sort_keys=True) + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
+    temporary.write_text(text)
     try:
-        proc.wait(timeout=5.0)
-    except subprocess.TimeoutExpired:
-        _signal_child(proc, signal.SIGKILL)
+        os.link(temporary, path)
+    except FileExistsError as error:
+        raise PreconditionFailed(
+            f"{path} already exists and a recording is never overwritten"
+        ) from error
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _kill_group_survivors(pid: int) -> None:
+    """A dead leader is not an empty group.
+
+    Every child is spawned with `start_new_session=True`, so its process group
+    id IS its pid and that group outlives the leader while any member is
+    alive. `_reap` used to return as soon as the leader had exited, which left
+    a grandchild running while the parent moved on and released the
+    machine-wide lock, so the next stage of a multi-pass run overlapped it.
+
+    Probed with signal 0 first, so a group that is genuinely empty is never
+    signalled. The residual risk is that the leader's pid has been recycled
+    into another group between its reaping and this probe, which is why the
+    probe runs here rather than later.
+    """
+    try:
+        os.killpg(pid, 0)
+    except (ProcessLookupError, PermissionError):
+        return
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _reap(proc) -> None:
+    if proc.poll() is None:
+        _signal_child(proc, signal.SIGTERM)
+        try:
+            proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            _signal_child(proc, signal.SIGKILL)
+            # Waited for, because escalating and walking away leaves a zombie
+            # this process still owns while it releases the machine lock.
+            try:
+                proc.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                pass
+    _kill_group_survivors(proc.pid)
 
 
 def spawn_child(task: Mapping[str, object], work_dir: str | Path, *,

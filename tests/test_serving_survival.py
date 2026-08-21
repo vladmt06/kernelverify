@@ -1523,3 +1523,110 @@ def test_the_spike_refuses_a_median_over_samples_that_disagree():
     assert verdict_at is not None and gated_at < verdict_at, (
         "the dispersion gate runs after the verdict is chosen, so a verdict "
         "exists for samples the gate would have refused")
+
+
+def test_a_metadata_failure_after_flock_does_not_leak_the_machine_lock(
+        tmp_path, monkeypatch):
+    """The lock is OWNED the moment flock returns, and must be releasable then.
+
+    `flock` succeeds and the diagnostic note is written after it. Until
+    2026-08-21 the descriptor was stored only once all three of truncate,
+    write and fsync had succeeded, so a failure in any of them left this
+    process holding the machine-wide lock with no object able to release it,
+    and every later harness refused for the life of the process. A five-hour
+    run spawns six such harnesses.
+    """
+    import os
+
+    import machine_state
+
+    path = tmp_path / "lock"
+    real = os.fsync
+    monkeypatch.setattr(os, "fsync",
+                        lambda fd: (_ for _ in ()).throw(
+                            OSError("injected fsync failure")))
+    first = machine_state.MeasurementLock("first", path)
+    with pytest.raises(OSError, match="injected"):
+        first.acquire()
+    monkeypatch.setattr(os, "fsync", real)
+
+    first.release()
+    acquired, detail = machine_state.MeasurementLock("second", path).acquire()
+    assert acquired, detail
+
+
+def test_a_group_member_outliving_its_leader_is_still_reaped(tmp_path):
+    """A dead leader is not an empty group, and the lock is released after this.
+
+    `_reap` returned as soon as the leader had exited, so a grandchild kept
+    running while the parent moved on and freed the machine-wide lock, and the
+    next stage of a multi-pass run overlapped it.
+    """
+    import os
+    import subprocess
+    import sys
+    import time
+
+    import harness_runner as runner
+
+    marker = tmp_path / "alive"
+    grandchild = tmp_path / "grandchild.py"
+    grandchild.write_text(
+        "import sys, time\n"
+        "from pathlib import Path\n"
+        "target = Path(sys.argv[1])\n"
+        "for tick in range(400):\n"
+        "    target.write_text(str(tick))\n"
+        "    time.sleep(0.05)\n")
+    leader = tmp_path / "leader.py"
+    leader.write_text(
+        "import subprocess, sys\n"
+        "subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])\n")
+
+    proc = subprocess.Popen(
+        [sys.executable, str(leader), str(grandchild), str(marker)],
+        start_new_session=True)
+    proc.wait(timeout=10)
+    assert proc.poll() is not None
+    time.sleep(0.5)
+    assert marker.exists(), "the grandchild never started"
+    moving = marker.read_text()
+    time.sleep(0.3)
+    assert marker.read_text() != moving, "the grandchild was not still running"
+
+    runner._reap(proc)
+    time.sleep(0.3)
+    stopped = marker.read_text()
+    time.sleep(0.4)
+    assert marker.read_text() == stopped, (
+        "the grandchild was still writing after the group was reaped")
+
+
+def test_a_leader_that_ignores_sigterm_is_waited_for_after_the_kill(tmp_path):
+    """Escalating to SIGKILL and not waiting leaves a zombie the parent owns.
+
+    The parent then releases the machine lock with an unreaped child still on
+    its books, which is the state the process-group discipline exists to make
+    impossible.
+    """
+    import subprocess
+    import sys
+
+    import harness_runner as runner
+
+    stubborn = tmp_path / "stubborn.py"
+    stubborn.write_text(
+        "import signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "time.sleep(120)\n")
+    proc = subprocess.Popen([sys.executable, str(stubborn)],
+                            start_new_session=True)
+    try:
+        runner._reap(proc)
+        assert proc.poll() is not None, (
+            "the reaper escalated to SIGKILL and never waited, so the child "
+            "is a zombie this process still owns")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)

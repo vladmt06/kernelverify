@@ -1392,3 +1392,25 @@ def test_a_candidate_never_measured_at_a_width_is_still_a_typed_absence():
     assert out["widths"]["short"]["margin_ms"] is None
     assert any("not_measured_at_this_width" in one
                for one in out["widths"]["short"]["no_margin_because"])
+
+
+def test_a_recording_that_cannot_be_serialised_leaves_no_path_behind(tmp_path):
+    """Exclusive create is not the same as atomic create.
+
+    The final path was opened before the record was serialised, so a failure
+    during publication left a zero-byte file that the next attempt could not
+    tell from a recording somebody meant to keep. Worse for a multi-pass run:
+    the runner skips a pass whose recordings exist, so a poisoned empty file
+    would make it skip a pass that never ran.
+    """
+    path = tmp_path / "profile-stock-exploratory-2026-08-21.REFUSED.json"
+    runtime = ps.SystemRuntime()
+    with pytest.raises(TypeError):
+        runtime.write_record(path, {"unserialisable": object()})
+    assert not path.exists()
+    assert list(tmp_path.iterdir()) == []
+
+    runtime.write_record(path, {"kind": "exploratory"})
+    assert json.loads(path.read_text()) == {"kind": "exploratory"}
+    with pytest.raises(PreconditionFailed, match="never overwritten"):
+        runtime.write_record(path, {"kind": "exploratory"})

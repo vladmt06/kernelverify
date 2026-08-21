@@ -104,7 +104,7 @@ import profile_knobs as pk
 import profile_rules as rules
 import profile_stock as ps
 from decode_rules import RunInvalid
-from harness_runner import PreconditionFailed
+from harness_runner import PreconditionFailed, write_recording_once
 
 FORWARD, BACKWARD = "forward", "backward"
 DIRECTIONS = (FORWARD, BACKWARD)
@@ -1078,19 +1078,11 @@ def run_sweep(plan: Mapping[str, object],
     destination = sweep_path(
         results_dir, date.today(), refused=bool(blockers),
         pass_index=pass_index)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-
-    # Exclusive create: a recording is written once. A sweep that could
-    # overwrite its own earlier run is a sweep that can be run until it says
-    # what somebody wanted.
-    try:
-        with destination.open("x") as handle:
-            handle.write(json.dumps(record, indent=2, sort_keys=True))
-            handle.write("\n")
-    except FileExistsError as error:
-        raise PreconditionFailed(
-            f"{destination} already exists and a recording is never "
-            f"overwritten") from error
+    # Exclusive create AND atomic, shared with the profile rather than copied:
+    # a recording is written once, and a failure during publication must not
+    # leave a name behind that a later attempt cannot tell from a recording
+    # somebody meant to keep.
+    write_recording_once(destination, record)
     print(json.dumps({"recording": str(destination),
                       "binding": not blockers,
                       "blockers": blockers}, indent=2), flush=True)

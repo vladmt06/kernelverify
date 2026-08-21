@@ -103,10 +103,16 @@ class MeasurementLock:
             holder = self._holder_note()
             os.close(fd)
             return False, holder
+        # Stored HERE, before the note is written. The lock is owned the
+        # moment `flock` returns, and until 2026-08-21 the descriptor was kept
+        # only once truncate, write and fsync had all succeeded, so a failure
+        # in any of them left this process holding the machine-wide lock with
+        # no object able to release it. The note is diagnostics; the flock is
+        # the lock.
+        self._fd = fd
         os.ftruncate(fd, 0)
         os.write(fd, f"pid {os.getpid()} ({self.owner})".encode())
         os.fsync(fd)
-        self._fd = fd
         return True, f"acquired by pid {os.getpid()} ({self.owner})"
 
     def release(self) -> None:

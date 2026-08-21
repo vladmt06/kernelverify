@@ -138,6 +138,7 @@ from harness_runner import (
     preflight_inputs,
     spawn_child,
     stack_record,
+    write_recording_once,
 )
 from machine_state import MeasurementLock
 from memory_guard import (
@@ -1731,15 +1732,7 @@ class SystemRuntime:
         would show it. The ruling is written by `--decide` into a separate
         artifact for the same reason.
         """
-        path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with path.open("x") as handle:
-                handle.write(json.dumps(record, indent=2, sort_keys=True))
-                handle.write("\n")
-        except FileExistsError as error:
-            raise PreconditionFailed(
-                f"{path} already exists and a recording is never overwritten"
-            ) from error
+        write_recording_once(path, record)
 
     def today(self) -> date:
         return date.today()
