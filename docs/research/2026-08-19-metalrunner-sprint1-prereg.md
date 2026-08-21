@@ -2047,3 +2047,249 @@ It is registered as evidence that the residue needs a measured floor before it c
 | 26, its third scaffold case | RESOLVED, not changed. Its three cases keep their conditions and their boundaries; what is fixed is that the third takes everything at or above `R(w)` the second does not, which is what its own exhaustiveness claim and its own worked example both require |
 | 18, its residue | UNCHANGED. Its clamp below `R` and clause 33's fault below `-R` both stand exactly as written, and clause 42 supplies the ablated arm they read rather than altering what they do with it |
 | 33, its step 7 ablation obligation | DISCHARGED, with its stated method corrected. Its instruction to build candidate L's ablation the way candidate A's is built does not transfer, because the loss is the root of the backward and the head's output shape is itself the cost being removed |
+
+## Amendment 10, 2026-08-21: what the ceiling sweep measures, and the arms step 9 owes
+
+Clause 37 recorded that the 8.58-hour calibration covers the STEP context alone, that candidate L's bench and candidate Q's sweep are two further contexts whose arms are not among the eighteen, and that step 9 must produce those counts before step 10's window can be budgeted.
+Building the sweep discharges that obligation and finds four places where this document's own clauses cannot all be satisfied at once.
+Three of them come from one cause: Amendment 5 moved the floor into the real step at clause 19 and left standing, in the same amendment, a construction that only a bench floor can produce.
+The fourth is a machine limit that no clause has ever priced.
+
+**This section was rewritten after an adversarial round returned eleven defects, every one reproduced by execution before it was admitted.**
+Three claims the first draft rested on were wrong and are named here rather than quietly replaced: an identity between two statistics that do not agree, an impossibility that is not impossible, and an authority in clause 31 that clause 31 does not grant.
+Every arm count and every hour in the first draft moved as a result.
+What survives unchanged is clause 45's conclusion that candidate Q's floor shares the step context, and the direction of every correction: more arms, fewer calibrated contexts, a longer calibration.
+
+### Clause 43. The credited denominator is an in-step slope, and the cross-shape collapse has no consumer
+
+Clause 18 fixes `F` for candidate Q as `d`, the floor's fitted slope.
+Clause 9 fixes `ratio_lo` as the smallest per-round `A` over the largest per-round `F`, "from the same dial at the same settings in the same rounds".
+Clause 19 fixes where: inside the real training step, at the same seam the knob uses, because "`f` is measured inside the real training step, so `F` must be too, or the ratio is a claim about a bench and the share is a claim about a step".
+
+Those three are consistent with each other and none of them is per-shape.
+A separate call-count-weighted collapse over shapes exists in committed code as `collapse_ratio_lo`, and clause 36 calls it "clause 8's collapse".
+That attribution is loose and is corrected here: clause 8's own text registers the WITHIN-shape sum over directions and the largest per-round shape ratio, and it says nothing about combining shapes.
+The cross-shape statistic is registered by clause 36's sentence and by the code, and it is what this clause retires.
+Reproduced 2026-08-21: `collapse_ratio_lo` has no caller outside its own tests.
+
+**An earlier draft claimed the two statistics are the same quantity, then claimed they share a weighting and differ only in a reduction, and both claims are WITHDRAWN.**
+They differ in two independent ways, and the first is the one that matters.
+
+The per-shape QUANTITY is different.
+A fitted slope is the part of a cost that moves with the dial, and a per-call cost is the whole of it.
+Where a call has any fixed cost the two are not proportional, so the ratios built from them do not agree.
+Reproduced 2026-08-21 through the committed `fit` and the committed `collapse_ratio_lo`, on one shape, one call, four exact settings and no cross-shape interaction: stock at `T(phi) = 1 + 9*phi` and floor at `T(phi) = 1 + 3*phi` give a slope ratio of 3.000000 and a full-cost collapse of 2.500000, at a coefficient of determination of exactly 1 on both fits.
+This is not a corner case.
+A fixed per-call cost is real here and was measured before this amendment, though not in this document: the knob probe of 2026-08-20 found that on the smallest projection only 78 percent of a matmul's time moves with the dial, so 22 percent does not, falling to under 1 percent on the output head.
+That figure is proxy evidence and it binds nothing, and it is cited only to show the gap is not a corner case: at a 22 percent fixed cost a floor twice as fast on the scaling part reads 2.0000 as a slope ratio and 1.6393 as a full-cost ratio.
+
+The REDUCTION is different too.
+Clause 9 takes the smallest per-round numerator over the largest per-round denominator, which is a minimum of sums.
+The collapse takes the worst pairing per shape and per direction and then sums, which is a sum of minima, and a sum of minima is never larger.
+Reproduced over 200000 random six-shape five-round draws: the collapse exceeded the slope ratio in 0 of them and was smaller by up to 1.1749, and on a two-shape worked case with numerators 10 and 12 in one round and 12 and 10 in the other the collapse returns 2.0 against 2.2.
+
+**The direction of the disagreement is stated because it is not the safe one.**
+A floor cannot make a call's dispatch cost disappear, so the fixed part sits in both slopes' intercepts and in neither slope, which makes the slope ratio the LARGER of the two wherever fixed cost is real.
+A larger `r` is a smaller `F` against `N`, a larger credited saving and a larger score, so registering the slope ratio credits candidate Q MORE than the collapse would.
+That is not a reason to prefer the collapse: the slope pairing is the one under which the registered gain formula is literally correct, which is Amendment 5's whole argument, since `f` is itself a slope-derived share.
+It is a reason to say plainly that the retirement moves a number in the candidate's favour, so a later reader does not discover it.
+
+**Clause 36's concession tables do not move, and the reason is about the tables and not about the statistics.**
+Those tables carry one abstract cost per shape and read a ratio of sums over them.
+A ratio of sums is invariant to which quantity fills the per-shape slot, so the same arithmetic serves either reading, and every figure was re-derived through the committed collapse on 2026-08-21:
+
+| The fast shape's ratio | Concentration at which a killed candidate Q first ships |
+|---|---|
+| 1.5 | 10.6036 |
+| 2.0 | 3.7596 |
+| 3.0 | 2.2848 |
+| 4.0 | 1.9102 |
+| 6.0 | 1.6411 |
+| 10.0 | 1.4749 |
+| 100.0 | 1.2975 |
+
+The crossing at a fast-shape ratio of 4.0 is 1.910199, and clause 36's five concession rows return 1.1971 and 1.0660, 1.2654 and 1.0856, 1.3047 and 1.0963, 1.3303 and 1.1030, 1.4514 and 1.1324, each matching the committed text.
+
+**An earlier draft said clause 31 REQUIRES the retirement, and that is WITHDRAWN.**
+Clause 31 governs how an uncertainty box is built around reducers that are already registered, and it explicitly preserves the median, the smallest and the largest, requiring only that all three be recomputed from the shared source samples.
+Clause 9 itself pairs a smallest numerator with a largest denominator that need not come from one round, so selecting extrema across rounds is a thing this document does deliberately rather than a thing clause 31 forbids.
+The retirement rests on clauses 9, 18 and 19 alone, which is the reason given first and needs no second.
+
+### Clause 44. The kill rule takes its own bench arms, and an earlier draft called that forced when it is chosen
+
+Clause 36 states that "the kill rule takes no additional ARMS, because it reads the same sweep candidate Q's credited ratio already needs".
+That is not true, and the correction stands even though the reasoning the first draft gave for it does not.
+
+Clause 8 requires a shape's ratio to be a ratio of costs SUMMED OVER DIRECTIONS, with the call counts supplied per direction by clause 3's structural pass.
+The credited denominator is now an in-step slope over every shape at once, by clause 43, so nothing in the certified vector produces a per-shape number in either direction.
+The kill rule therefore has no arms of its own in the manifest as Amendment 7 left it.
+
+**An earlier draft said no registered instrument COULD produce those numbers, and that is WITHDRAWN.**
+Clause 8 consumes one scalar per shape, the ratio of the two summed costs, and never the individual directional costs after they are summed.
+Reproduced 2026-08-21: with counts 36 forward and 16 backward, per-call stock costs of 2 and 5 and of 3 and 2.75 both sum to 152, and floor costs of 1 and 2 and of 1.5 and 0.875 both sum to 68, so the directions are unidentifiable while the ratio is identified at 2.235294 either way.
+Identifying the SUM does not require identifying its terms, and the first draft confused the two.
+
+An in-step construction that produces those sums exists and uses only mechanisms this document permits.
+Time the stock step; time a step where every live call at one shape uses the dense floor; time a step where those same calls are ablated.
+Each difference against the common ablated arm is that shape's full aggregate cost, forward and backward together, at the real call counts, which is exactly clause 8's numerator and denominator.
+
+The bench is chosen over it, and the reasons are recorded so the choice is not read as a necessity.
+The in-step construction needs six floor arms and six ablated arms per width inside the binding pass, twelve at each width and twenty-four in all, which the binding pass would carry for a quantity that certifies nothing.
+An ablated arm changes the graph rather than the work, which is the objection this document already records against ablation as a definition and accepts only as a residue, and here it would sit underneath the kill rule's whole numerator rather than beside it.
+And a bench costs the binding pass nothing at all, because it runs outside it.
+
+**The bench is 48 timed arms, not the 24 an earlier draft counted.**
+Six shapes at two widths, and at each of those twelve a stock forward, a stock gradient, a dense forward and a dense gradient, because a ceiling needs both implementations and a backward is read as a gradient against its own forward.
+The first draft counted shapes, directions and widths and dropped the implementation, which is the one dimension a ceiling comparison cannot do without.
+
+**Every backward arm is driven by a DENSE cotangent, and that is a registration rather than an implementation detail.**
+A backward timed by differentiating a `sum()` is fed a BROADCAST scalar one, which MLX exploits, and the result is not the cost a real loss produces.
+Reproduced 2026-08-21 at shape S5 and the long width: the same backward reads 1925.36 ms driven by a `sum()` and 2512.74 ms driven by a dense cotangent, and at shape S6 it reads 0.02 ms against 4.19 ms, which is a factor of about two hundred.
+The dense-cotangent reading is the one that matches the primitive MLX actually issues: read off the built graph, a quantized matmul's backward is a single `QuantizedMatmul`, and a direct call to it on the same dense cotangent agrees with the vjp to within a few percent at every shape and width tried.
+A real loss produces a dense cotangent, so the dense construction is registered and the `sum()` construction is refused.
+
+**The unregistered block-group method is named, its arithmetic is CORRECTED, and it is still declined.**
+Under LoRA only the last `LORA_LAYERS` blocks have a backward at all, so a dial restricted to the blocks below the first adapted one moves forward work only, while the same dial over every block moves both.
+An earlier draft said the DIFFERENCE between the two slopes is a backward cost, and that is wrong.
+With `U` the slope over the 20 unadapted blocks and `A` the slope over all 36, and assuming a call costs the same in both groups, `U = 20f` and `A = 36f + B`, so `B = A - (36/20)U` and not `A - U`.
+Reproduced 2026-08-21 at `f = 1` and `B = 32`: the naive difference returns 48, overstating the backward by the 16 adapted blocks' own forward, and the corrected form returns 32 exactly.
+It is declined anyway: it assumes an equal per-call forward cost across the two groups that nothing has measured, it does not reach shape S5 at all because the tied head sits outside the blocks, and it costs 84 primary arms per width before any scaffold or reference control against the bench's 48 in total.
+
+**The bench takes no calibrated context, and that REVERSES committed text rather than following from it.**
+Clause 36 states that the kill rule takes "a separate resolution context per shape and per direction, because it places each shape's ratio against 1.10 on its own", and Amendment 7's ledger row for clause 23 states that Amendment 6's resolution test on it is "unchanged and all still computed".
+Both are reversed here.
+A reported quantity reaches no terminal, so its verdict carries no certified margin, and clause 37 already registers what a reported quantity carries instead: its own observed per-round samples and their observed range, labelled as an observed spread and NOT as a bound at any registered rate.
+The kill report therefore carries point estimates and an observed spread, and clause 21's prohibition on reusing `R` has nothing to reach because no `R` is claimed.
+The bench remains a measurement ARRANGEMENT, and what it stops being is a CALIBRATED context.
+
+The bench's own run is priced and it is small.
+Over the arm times this pricing measured, one round of all 48 arms is 5.05 seconds, so five rounds behind three warm-ups is 40.4 seconds, which is 0.67 minutes.
+
+### Clause 45. Candidate Q's floor shares the step context, needs its own reference arm, and cannot hold a dense weight per call site
+
+Clause 37 lists "candidate Q's sweep arms" among the contexts whose arms are not in the eighteen.
+That was right while the sweep was a bench and is wrong once clause 19 puts it in the step.
+Clause 33 keys a context by `(cell, width, arrangement)` with the arrangement being `step` or `bench`, and a floor arm and a knob arm are the same training step, on the same batch, at the same width, differing only in which implementation the seam holds while the arm traces.
+Replacing a quantized matmul with a dense one changes the arm's implementation and not its arrangement, so clause 21 does not force a third calibrated context.
+
+**The objection it has to survive is that a dense floor arm and a quantized knob arm take different amounts of time, so their noise might differ.**
+If a context boundary followed an arm's DURATION then the four knob settings would already be four contexts, because the arm at `phi = 0.25` runs a quarter of the dialled arithmetic the arm at `phi = 1.0` runs.
+The document puts all four inside one context and gives them one `R`, so duration is not what separates contexts and a floor arm is no more a separate context than a small knob arm is.
+
+**The group key CHANGES, and an earlier draft said the group map was untouched.**
+Clause 37 registers the map as "one group per candidate and context", and once candidate Q's share arms and floor arms are the same candidate in the same context that key can no longer hold them apart.
+Registered here: groups are keyed by `(candidate, arm family, context)`, where the arm family is `share` or `floor`.
+The six groups stand and the floor group gains the dense reference arm; what changes otherwise is the key that names them, and it is named because clause 37 records a demand that moves by 65 percent under a different grouping.
+
+**Candidate Q's floor needs a DENSE full-size no-dial reference arm, which the first draft left out.**
+Clause 5 defines the scaffold OFFSET as "the `phi = 1` arm minus stock with no seam installed at all", and clause 21 caps its absolute value at `3R`.
+Committed code takes that stock from one global median, and the manifest supplies only a quantized stock arm.
+Fed a floor family, that construction subtracts a QUANTIZED time from a DENSE one and reports the implementation's own speed difference as scaffold overhead.
+Reproduced 2026-08-21 on a worked case: quantized stock at 100, a dense floor at `T(phi) = 60 + 20*phi` and a dense scaffold at 80 report an offset of 20 against a limit of `3R` at `R = 1`, and refuse the family, while the true dense scaffold offset is zero.
+So the floor family carries one dense full-size arm with no dial installed, and its scaffold offset is measured against that.
+
+**A dense weight per call site does not fit on this machine, so the floor weight is registered as one per SHAPE.**
+Priced 2026-08-21 by arithmetic over the pinned config.
+The step context already holds 12.64 GiB of materialised ladders, because each of candidates L, Q and P3 materialises every setting's operands outside the timed region and the model itself is 2.11 GiB at 4 bits.
+A dense fp16 ladder holding one weight per QuantizedLinear module adds 18.73 GiB, for 31.37 GiB of weights alone against the 33.53 GiB this machine has, before a single activation, optimizer state or compiled graph.
+Registered instead: the floor holds ONE dense weight per registered shape, shared across the 36 blocks, which costs 2.15 GiB and brings the total to 14.80 GiB.
+
+This is a choice about what the floor arm COMPUTES, so it is registered rather than left to the build.
+It is consistent with what clause 1's own construction already does: a dial shrinks an operation's arithmetic by slicing its operands, so no arm at any setting below 1.0 computes the numbers stock computes, and step 7 already had to read the supervised count from mlx-lm's own mask rather than from a step's return for exactly that reason.
+A dense fp16 matmul's TIME at a logical shape does not depend on which block's values the weight holds, and time is the only thing a floor is read for.
+What it gives up is stated: the floor arm's numbers are further from stock's than a per-module floor would be, and any later rule that reads a floor arm's OUTPUT rather than its time cannot use these arms.
+
+Candidate Q is a retune, so clause 18 gives it `F = d` with no `c_floor`, and its floor carries no ablated arm.
+Its floor family is four knob arms, four scaffold arms and the one dense reference, at the same four settings as its knob, which clause 9 requires to be the same settings in the same rounds.
+
+| | Amendment 7 | This clause |
+|---|---|---|
+| Certified vector | 18 arms | 27 arms |
+| Contexts needing a demand | three | two |
+| Binding pass, short width | 26 arms | 35 arms |
+| Binding pass, long width | 35 arms | 44 arms |
+| Binding pass | 752 s, 12.53 min | 950 s, 15.83 min |
+
+### Clause 46. The calibration's timed-round subtotal, and what is still not in it
+
+Clause 37 declined to guess this number and left it as an obligation on step 9.
+What step 9 can produce is a SUBTOTAL over timed rounds, and an earlier draft called it a WINDOW BUDGET, which it is not.
+That wording is WITHDRAWN.
+
+| Context | Arms | One block | 39 blocks |
+|---|---|---|---|
+| The step, with candidate Q's floor and its reference | 27 | 1188.0 s | 12.87 h |
+| Candidate L's bench | 9 | 295.2 s | 3.20 h |
+| The kill bench | 48 | reported, so no calibrated context and no blocks | 0 |
+| **Timed-round subtotal** | | | **16.07 h** |
+
+The step context is priced through Amendment 6's own model of 0.4 seconds at the short width and 4.0 at the long, so that portion is a MODEL and not a measurement, and an earlier draft's claim that the whole figure was "priced by measurement rather than by estimate" is WITHDRAWN.
+Candidate L's bench arm is 0.184 seconds at the short width and 3.096 at the long, measured with synthetic operands at the pinned model's own dimensions: the head at `(151936, 2560)`, the loss over its logits, and one matmul at the head's backward shape, which is the arm section 4.2 registers.
+Its long-width arm is nearly as expensive as a whole training step, which is not an anomaly: that backward matmul is 2.9 TFLOP on its own, at `2 * 3675 * 151936 * 2560`.
+Nine arms, because clause 19 registers `c_floor` as zero for candidate L, so its bench carries a stock arm, four knob arms and four scaffold arms and no ablation.
+Those nine arms are not identical and all nine are priced at the full-size arm's cost, so the 3.20 hours is an upper bound rather than a sum.
+
+**What the subtotal does not carry, named so step 10 cannot be armed against it.**
+
+Every arm pays three warm-up steps when it is built, and the model above counts none of them.
+One build of every arm in both contexts costs 890 seconds, which is 0.247 hours.
+Whether an independent block rebuilds its arms or reuses them is NOT REGISTERED anywhere in this document, and the answer moves the total a long way: built once the subtotal becomes 16.32 hours, rebuilt per block it becomes 25.71 hours.
+Registered as an obligation on step 10 rather than guessed here, because a block's independence is a property of the calibration's design and this clause is not the place to decide it.
+
+Also absent: graph compilation, which happens once per arm and is not a timed round; the idle refusals the run discipline will produce; and the kill bench's own 0.67 minutes, which is real and small.
+The window step 10 is armed against is computed when those are known, and this clause supplies the timed-round part of it and nothing else.
+
+**The subtotal is 1.87 times Amendment 7's 8.58 hours, and the increase is arms that were always required rather than a new demand.**
+Amendment 7 said so in writing and declined to guess by how much; this clause is that number, and it is still short of the answer by the four items above.
+
+### The incidental reading the pricing produced, recorded because concealing it would be worse
+
+Pricing the kill bench necessarily measures the quantity the kill rule reads, and the numbers are one-sided.
+At the registered shapes with synthetic operands, stock's quantized matmul sat within 1.07 of the dense fp16 ceiling in BOTH directions at S1, S2, S3, S4 and S6, at both widths, and the only headroom was at S5, the tied head, whose backward read 3.375 at the short width and 3.514 at the long.
+
+Read through clause 8's ratio of summed costs that is five shapes at the ceiling and one with headroom, which is exactly clause 23's all-but-one and would REPORT candidate Q killed.
+
+**It is an exploratory pilot observed BEFORE the arms it predicts were frozen, so the later run is an unblinded replication and not independent confirmation.**
+An earlier draft said it "binds NOTHING", and that overstates what disclosure repairs.
+Disclosure prevents concealment; it does not restore the independence that seeing a number before freezing its measurement destroys.
+The pilot has already acted on this document once, since it is what exposed the cotangent construction clause 44 now registers.
+So the honest label is the one used here, and the future reading is reported as a replication of a seen result.
+
+Registered as the condition on any further measurement of it: the operand generator, its seed, the arm implementations' hashes and the reduction are frozen and recorded before the next arm runs, so that what a replication replicates is fixed.
+
+The reading rests on synthetic operands this document has not registered, taken outside any step, on arms built to be priced rather than to be read, and its "within 1.07" is a summary that does not establish clause 8's largest per-round ratio at either width without the underlying samples.
+The scripts that produced it live in this session's scratchpad and are NOT in the repository, so until step 9 lands them the figures here are unreproduced pilot observations.
+The registered measurement remains the binding run's, at the registered widths, through the registered arms.
+
+The operand layout was doubted and then checked, because the backward arm was timed as `mx.quantized_matmul` with `transpose=False` on this author's reading of the orientation a frozen base weight produces.
+Read off the built graph on 2026-08-21, that reading is right: the backward is a single `QuantizedMatmul` fed the cotangent, and a vjp on a dense cotangent returns 1.014, 3.534 and 0.996 at S1, S5 and S6 at the short width against the standalone call's 1.016, 3.375 and 0.969.
+A different construction, differentiating a `sum()`, disagreed by up to a factor of two hundred and is the one clause 44 now refuses.
+
+### Ledger: what Amendment 10 does to committed text
+
+| Clause | What happens to it |
+|---|---|
+| 8, its within-shape reduction | UNCHANGED. Its sum over directions, its largest per-round shape ratio and its both-widths rule all stand, and clause 44 gives them arms to read |
+| 8, its attribution in clause 36 | CORRECTED. Clause 36 calls the cross-shape statistic "clause 8's collapse"; clause 8's text registers no cross-shape combination, so what is retired below is clause 36's sentence and the committed code, not clause 8 |
+| 36, its cross-shape collapse | RETIRED as the credited ratio, because clauses 9, 18 and 19 make the credited denominator an in-step fitted slope and leave nothing per-shape to collapse. It is a DIFFERENT statistic and not the same one: it reads full per-call costs where a slope reads only the scaling part, and it sums minima where clause 9 minimises a sum. The slope ratio is the larger of the two wherever fixed cost is real, so the retirement credits candidate Q more |
+| 36, its concession tables | UNCHANGED and re-derived. Every figure reproduces through the committed collapse, and the tables are invariant to the retirement because they carry one abstract cost per shape and read a ratio of sums over them |
+| 36, its "no additional arms" | CORRECTED. The kill rule reads a per-shape ratio and the certified vector produces none, so it takes 48 bench arms of its own |
+| 36, its per-shape and per-direction resolution contexts | RETIRED. A reported quantity takes no certified margin, so it needs no `R` and no demand; the kill report carries point estimates and an observed spread instead |
+| Amendment 7's ledger row for 23 | REVERSED in one word. It records Amendment 6's resolution test on the kill as "unchanged and all still computed"; that test is retired with the contexts above. Clause 23's 1.10, its all-but-one of six and both of clause 8's reductions are untouched |
+| 9 | UNCHANGED. Its "same dial, same settings, same rounds" is what puts candidate Q's floor arms inside the binding pass rather than beside it, and clause 45 counts them |
+| 18 | UNCHANGED. `F = d` for candidate Q and `F = d + c_floor` for the two rewrites, with clause 19's registered `c_floor = 0` for candidate L |
+| 19 | UNCHANGED and load-bearing. It is the clause that makes the credited ratio an in-step quantity, and clauses 43 and 45 are consequences of taking it seriously rather than exceptions to it |
+| 5, its scaffold offset | EXTENDED, not changed. Its "`phi = 1` arm minus stock with no seam" is unaltered, and clause 45 registers WHICH stock a dense floor family's offset is taken against, because the committed reduction supplies a quantized one and would price an implementation difference as scaffold |
+| 31 | UNCHANGED and NOT invoked. An earlier draft claimed clause 31 requires the collapse retired; that claim is WITHDRAWN, because clause 31 governs box construction, preserves the median, smallest and largest reducers, and does not choose between reducers that select extrema across rounds |
+| 21's prohibition on reusing `R` | UNCHANGED and now reaches two calibrated contexts rather than three, because one of the three turned out to be the same arrangement as another and one stopped needing an `R` at all |
+| 33, its context key | UNCHANGED and load-bearing. Its `(cell, width, arrangement)` with the arrangement being `step` or `bench` is what makes candidate Q's floor the same context as its share |
+| 37, its context list | CORRECTED in two entries. Candidate Q's sweep shares the step context; the kill bench is a measurement arrangement and not a calibrated context |
+| 37, its group map | CHANGED in its KEY. "One group per candidate and context" cannot separate candidate Q's share arms from its floor arms once those share a context, so groups are keyed by `(candidate, arm family, context)`. The six groups are unchanged and candidate Q's floor group gains the dense reference arm |
+| 37, its certified vector | EXTENDED from 18 arms to 27 by candidate Q's four floor-knob arms, four floor-scaffold arms and one dense reference. Its widths, its pilot of 20, its fresh set of 19 and its demand are untouched |
+| 37, its schedule | SUPERSEDED by clause 46. Its 8.58 hours was the step context over 18 arms and stands as that; the timed-round subtotal is 16.07 hours and is not yet a window budget |
+| 37, its open obligation on step 9 | PARTLY DISCHARGED. Both bench arm counts exist and both are priced; the window budget still waits on the block lifecycle, warm-ups, compilation and the refusal reserve |
+| 39, its step 3 | CORRECTED. Its "all three contexts" becomes two, for the reasons in clauses 44 and 45. Its ordering is untouched |
+| Amendment 8, its "the box does not move" paragraph | REVERSED in two figures. Its "the certified vector stays at eighteen arms" and "the calibration stays at 8.58 hours" become 27 and 16.07. Its pilot of 20 and fresh set of 19 stand, and its reason for P3 taking no margin is untouched |
+| Amendment 8, its short-width manifest | CORRECTED. "Every cell measured at the short width carries the same 26 arms" becomes 35, by candidate Q's nine floor arms. That every such cell carries the SAME arms, and that none carries candidate A, is unchanged |
+| Amendment 8's binding pass | CORRECTED from 752 s to 950 s, over 35 arms at the short width and 44 at the long |
+| Nothing in the document | PRICES MEMORY. Clause 45 registers one dense floor weight per shape rather than per call site, because per call site needs 31.37 GiB of weights against 33.53 GiB of unified memory. This is a new registration and reverses nothing |
