@@ -2404,3 +2404,115 @@ Amendment 10's freeze condition stands unchanged and unmet.
 | 8, its "cost per call" | COMPLETED rather than corrected. Clause 8 never said which of three constructions a backward call's cost is, and clause 48 registers the gradients evaluated alone, which is what MLX's lazy graph makes true and what a standalone call to the backward primitive corroborates to within 6.6 percent at worst |
 | 10's incidental reading | UNCHANGED in verdict and STRENGTHENED in coverage, and still binding nothing. Five of six at the ceiling at both widths under all three constructions across two runs, with S5 the only shape outside it, at between 2.2 and 3.8 |
 | 10's freeze condition | UNCHANGED and still unmet. Three sightings of a pilot are not an independent measurement, and the operand generator, its seed, the implementation hashes and the reduction are still to be frozen before the next arm runs |
+
+## Amendment 12, 2026-08-21: the three things candidate L's bench needs and no clause supplies
+
+Amendment 10 clause 46 prices candidate L's bench at nine arms and Amendment 7 clause 37 makes it a resolution context of its own.
+Neither says what those arms COMPUTE, and section 4.2's one-line description of the floor admits readings that disagree by more than the quantity itself.
+All three are settled here before the bench is built.
+Two of them are settled by measurement and one by construction, and which is which is said at each, because a reading registered on a number that moves is a reading that moves with it.
+
+### Clause 49. The bench's no-dial arm is the FLOOR at full size, not stock
+
+Clause 46 calls the ninth arm "a stock arm".
+Clause 5 defines the scaffold OFFSET as "the `phi = 1` arm minus stock with no seam installed at all" and clause 21 caps its absolute value at `3R`.
+On this bench those two cannot both be taken literally.
+
+Section 4.2's floor for candidate L is "the same stock operations timed on only the SUPERVISED rows of the same cell", so the floor and stock differ in their row count by construction, and the row count is the floor's whole content.
+An offset taken against stock therefore measures the row restriction and reports it as scaffold overhead.
+
+Measured 2026-08-21 at the pinned dimensions, with the head at `(151936, 2560)` and the registered supervised fractions, and this is one run of four so that the arms behind the ranges below are visible:
+
+| Width | Rows, all | Rows, supervised | Stock | The floor with no dial | The floor's scaffold at `phi = 1` |
+|---|---|---|---|---|---|
+| short | 256 | 142 | 133.768 ms | 98.406 ms | 98.676 ms |
+| long | 4224 | 3675 | 2334.431 ms | 2088.307 ms | 2092.465 ms |
+
+| Width | Offset against STOCK, four runs | Offset against the FLOOR's own no-dial arm, four runs |
+|---|---|---|
+| short | -33.8 to -35.5 ms | 0.27 to 1.37 ms |
+| long | -48.7 to -338.3 ms | 4.2 to 174.3 ms |
+
+**The argument is STRUCTURAL, the short width's measurement confirms it, and the long width's measures nothing at all, which is a finding rather than a caveat.**
+The floor runs on the supervised rows and stock runs on all of them, so an offset between the two contains the row-count difference by construction, and the row-count difference IS the floor.
+No measurement is needed to see that, which is why the clause below is registered on it.
+
+At the short width the numbers agree: 34 ms against a proxy `3R` of 0.465 ms for the stock reading, a factor of about 73, against 0.27 to 1.37 ms for the reference reading.
+
+At the long width the numbers agree with nothing.
+Across four runs the stock offset ranged from 49 to 338 ms and the reference offset from 4 to 174, and in ONE of the four the ordering reversed and the reference offset came out the larger.
+On arms that run for two seconds, five samples apiece resolve neither offset.
+This is recorded as an obligation on step 10 rather than as a caveat here: candidate L's bench at the long width needs more rounds than the registered five before its scaffold offset means anything, and nothing in this document currently says a bench may take a different round count from the step.
+
+Registered: candidate L's bench carries a no-dial REFERENCE arm running the floor's own implementation at full vocabulary, and its scaffold offset is measured against that.
+This is Amendment 10 clause 45's principle applied to the family clause 45 did not name, and the arm COUNT is unchanged at nine.
+Clause 46's word "stock" for that arm is void; everything else clause 46 says about the bench stands.
+
+**A heads-up that is not a ruling, because the number it depends on does not exist yet.**
+The proxy `R` used above is an uncompiled 0.155 ms measured on the 0.6B model, and the real `R` for this context comes from step 10 at a bench whose arms run for two seconds rather than for a tenth of one.
+Whether candidate L's bench passes clause 21 at either width is therefore an open question for step 10, and it is recorded as one rather than predicted here.
+What clause 49 settles is only WHICH arm the offset is taken against, and that rests on the construction rather than on any of these numbers.
+
+**A second open question for step 10, from the same measurements.**
+Clause 21's linearity gate is a coefficient of determination of at least 0.99 on the pooled fit, and the registered reading at the SHORT width read between 0.9893 and 0.9930 across three runs, so it sat on both sides of that floor.
+These are proxy numbers on synthetic operands with five samples an arm, and the real fit comes from the calibrated run with its own rounds, so this predicts nothing.
+It is written down because a bench that fails its own linearity gate leaves candidate L with no credited denominator at all, and a risk named before a run is a risk the run can be designed around.
+
+### Clause 50. The extra matmul is DIALLED with the vocabulary
+
+Section 4.2 adds to candidate L's floor "one measured extra matmul at S5's backward shape standing for the hidden-gradient path".
+Nothing says whether that matmul moves with the vocabulary dial, and the two readings are not close.
+
+Measured 2026-08-21 over the registered four settings, three runs, reported as ranges because every one of these figures moved between them:
+
+| Width | Reading | Fitted slope, three runs | Intercept | Coefficient of determination |
+|---|---|---|---|---|
+| short | the extra matmul DIALLED | 95.4 to 97.3 ms | -1.9 to -0.5 | 0.9893 to 0.9930 |
+| short | the extra matmul FIXED at full vocabulary | 55.8 to 58.4 ms | about 41 | 0.9763 to 0.9852 |
+| long | the extra matmul DIALLED | 2088.6 to 2209.6 ms | -62.2 to -79.3 | 0.9998 |
+| long | the extra matmul FIXED at full vocabulary | 1127.4 to 1248.6 ms | about 880 | 0.9944 to 0.9995 |
+
+The slope is candidate L's credited denominator, so the choice moves it by a factor of between 1.6 and 1.9, observed across three runs at both widths.
+A quantity that moves by two thirds under a choice nobody registered is a rule made after the numbers.
+
+Registered: the extra matmul runs at the DIALLED vocabulary.
+The reason is faithfulness and not conservatism.
+The dial is a proxy for making the operation smaller, and a streamed kernel at a smaller vocabulary produces its hidden-gradient through a smaller matmul; a matmul held at full vocabulary while everything around it shrinks is not a smaller version of the same kernel.
+
+That short-width fact and the conservatism below are recorded as observations rather than as reasons, because a reading chosen for the gate it passes is a rule made after the numbers.
+A larger floor slope is a larger `F`, and the credited saving `K = M * (1 - F/N)` is decreasing in `F`, so the dialled reading credits candidate L LESS.
+
+**Two properties of the registered fit are recorded now so a later reader does not discover them as anomalies.**
+Its intercept is NEGATIVE at both widths, -1.908 and -62.217, which means the line extrapolates below zero at a setting the ladder never places.
+Clause 33 requires a positive step TOTAL and says nothing about an intercept, and an intercept is an extrapolation rather than a measurement, so this is not a fault; it is a sign of slight superlinearity in the dial and it is reported wherever the fit is.
+And at the SHORT width the registered reading fits better in every run, 0.9893 to 0.9930 against 0.9703 to 0.9852.
+At the long width both readings sit at 0.999 or above and which of them is higher is noise, so nothing is claimed there.
+That is NOT why it is registered, and it is written down because a reader comparing the two would otherwise assume it was.
+
+### Clause 51. What replaces clause 9's "same rounds" for candidate L
+
+Clause 9 takes `ratio_lo` from the same dial at the same settings IN THE SAME ROUNDS.
+Clause 19's written exception puts candidate L's `d` on a bench, so its rounds are not the step's rounds and that pairing cannot hold.
+Nothing registers what replaces it.
+
+Registered, and it needs no pairing at all.
+Amendment 6 clause 31's saving is `K = M * (1 - F/N)` where `M` is the median per-round credited numerator, `N` the smallest and `F` the largest credited denominator.
+Those are three separate reductions over their own samples and none of them reads a pair.
+So for candidate L, `M` and `N` are reduced over the STEP's rounds and `F` over the BENCH's rounds, each over its own context's samples, and the arithmetic is unchanged.
+
+What clause 9's pairing was protecting is the SETTINGS, and that is registered separately and does bind: candidate L's bench must place the same ACTUAL fractions as its in-step knob, at every setting, or the ratio is taken across two dials and the run refuses.
+The two ladders cut the same axis of the same weight by the same rule, so this holds by construction, and it is checked rather than assumed because a construction that holds by accident is a construction that stops holding.
+
+### Ledger: what Amendment 12 does to committed text
+
+| Clause | What happens to it |
+|---|---|
+| 46, its "a stock arm" | VOID in that word alone. The bench's ninth arm is a no-dial REFERENCE running the floor's own implementation, because the floor runs on the supervised rows and stock on all of them, so an offset between the two measures the row restriction that IS the floor. Its count of nine, its 0.184 and 3.096 second arm prices and its 3.20 hours are untouched |
+| 45, its reference principle | UNCHANGED and EXTENDED in reach. It registers that a family running an implementation stock does not run takes its own no-dial baseline; clause 49 applies it to candidate L's bench, which clause 45 did not name because candidate L's floor is not installed at a seam |
+| 5, its scaffold offset | UNCHANGED. Its "`phi = 1` arm minus stock with no seam" is unaltered and clauses 45 and 49 register WHICH no-dial arm each family's offset is taken against |
+| 4.2's floor for candidate L | COMPLETED rather than corrected. Its "one measured extra matmul at S5's backward shape" is registered as running at the DIALLED vocabulary, which moves the credited slope by a factor of between 1.6 and 1.9 against the alternative |
+| 9, its "same rounds" | SCOPED. It binds wherever the numerator and the denominator share a context, which is candidate Q and its floor. For candidate L, clause 19 already puts the two in different contexts, and clause 51 registers that `M`, `N` and `F` are three separate reductions needing no pairing, while the SETTINGS must still match and are checked |
+| 19, its bench exception | UNCHANGED and now buildable. Its `d` measured in isolation and its `c_floor` of zero are exactly as written; clauses 49, 50 and 51 supply the three things a builder needed and it did not say |
+| 46, its round count | OPEN, and named here rather than settled. Candidate L's long-width bench does not resolve its own scaffold offset at the registered five rounds, and nothing in this document says whether a bench may take a different round count from the step. Step 10 has to answer it before the bench's arms mean anything |
+| 21, its `3R` limit and its 0.99 | UNCHANGED and BOTH flagged as open questions for step 10 rather than predicted here. On proxy numbers candidate L's long-width scaffold offset is not resolved at all at five rounds, and its short-width fit sat on both sides of 0.99. A bench that fails either gate leaves candidate L with no credited denominator |
+| 33, its positive `T` | UNCHANGED. It governs a step total and not a fitted intercept, so candidate L's negative bench intercepts are reported and are not faults |
