@@ -1932,3 +1932,57 @@ No step consumes a number produced after it.
 | 11, its complete matrix | REVERSED in one entry and unchanged otherwise. The required matrix is candidates L and Q at both widths plus candidate A at the long width, and candidate A absent at either width or at both is no longer incompleteness, where Amendment 6 sent a candidate A with no valid width to INCOMPLETE. Its context-equality demand and clause 33's replacement of its same-context requirement are untouched for every entry that remains |
 | 21's prohibition on reusing `R` | UNCHANGED and load-bearing. It is what makes candidate L's bench and candidate Q's sweep separate contexts, and clause 37 registers that their arms are not in the eighteen and that step 9 owes their counts |
 | Amendment 6's refusal classes | UNCHANGED, every one of them. A non-fraction share, a non-finite reading, a non-positive step total, a resolution floor of zero, a trace during the timed rounds, a failed spread gate and a failed context-equality demand all still refuse the run, and a refusal is still not a terminal |
+
+## Amendment 8, 2026-08-21: the partition arms Amendment 7's manifest left out
+
+Amendment 7's clause 37 registers the certified vector leaf by leaf and prices the binding run's own timing pass at 576 seconds over 27 arms.
+Both are wrong in the same way: neither names candidate P3, the projections-without-the-head region clause 22's partition consumes, whose ladder is eight arms at every width.
+Found while reading the step 7 design against the amendment it would have been built from, which is the point at which a manifest error stops being a document fault and becomes a code fault.
+Committed text is preserved rather than edited, exactly as Amendment 6's clause 32 established after that fault was made once, so the correction is written here.
+
+### Clause 40. Candidate P3's eight arms, and the corrected binding pass
+
+Clause 22 tests its partition PER WIDTH and Amendment 6 gives that test three outcomes.
+Its FIRST outcome, where the measured regions alone sum above one, REJECTS that width "whether or not a region is absent, because shares are non-negative and a missing addend can only raise the sum".
+So the REJECT branch runs at a width where candidate A is absent, and there it reads P1 and P3 alone.
+
+Amendment 7 registers that candidate A is measured at the long width only and that the short width therefore falls into clause 22's third outcome, the test NOT RUN.
+That is right for the PASS branch and wrong as a reason to drop P3: the REJECT branch still runs at the short width, and it still reads P3's share there.
+A partition that can only reject at one of two widths is a weaker gate than committed text registers, and nothing in Amendment 7 declared that weakening, because Amendment 7 did not notice P3 at all.
+
+P3's ladder is four knob arms and four scaffold arms, with no ablation, because clause 18 credits a retune with its slope alone and committed code registers P3 as a retune.
+Eight arms, at BOTH registered widths.
+
+| Width | Arms | Which |
+|---|---|---|
+| Short | 26 | stock 1, candidate L 9, candidate Q 8, candidate P3 8 |
+| Long | 35 | those 26, plus candidate A's 9 |
+
+**P3 is REPORTED and not certified, and that is a consequence rather than an oversight.**
+No certified margin reads it: clause 24's shipping floor and clause 16's two sites all read candidates L and Q's savings and nothing else.
+What reads P3 is clause 22's REJECT, which is a fault check rather than an action, so it takes no margin and needs no place in the box.
+Amendment 7's clause 34 already registers that a reported quantity reaches no terminal and can still refuse the run, and a partition REJECT is precisely that.
+
+So nothing about the box moves.
+The certified vector stays at eighteen arms, the pilot stays at 20 blocks, the fresh set stays at 19, and the calibration stays at 8.58 hours.
+P3 needs no entry in clause 37's group map for the same reason it needs no margin, and clause 37's constraint that no group may mix a certified leaf with a reported one is untouched, because P3 sits in no group at all.
+
+**The corrected binding pass**, over Amendment 6's cost model of 0.4 seconds at the short width and 4.0 at the long, per arm per round:
+
+| Component | Cost |
+|---|---|
+| 26 arms at both widths | 114.4 s per round |
+| candidate A's 9 arms, long width only | 36.0 s per round |
+| five rounds | **752 s, 12.53 minutes** |
+
+Amendment 7's 576 seconds understated that by 176 seconds and its arm count by eight.
+Its separate line for candidate A's nine reported arms inside the pass, 180 seconds, is unaffected and stands, because that figure never depended on the total.
+
+| Clause | What happens to it |
+|---|---|
+| Amendment 7's clause 37, its certified vector table | EXTENDED, not corrected: the eighteen certified arms and their widths are exactly right, and the table simply did not list the eight reported P3 arms that also run. Candidate P3 joins candidate A as an arm that is timed and never certified |
+| Amendment 7's clause 37, its binding-pass row | CORRECTED: 752 seconds over 35 arms at the long width and 26 at the short, in place of 576 seconds over 27 arms |
+| Amendment 7's clause 37, its treatment of clause 22 at the short width | SCOPED: its statement that the short width falls into clause 22's NOT RUN outcome governs the PASS branch alone, and clause 22's REJECT branch runs at both widths on P1 and P3 exactly as Amendment 6 registers |
+| Amendment 7's LEDGER row for clause 22 | SCOPED by the same correction, and named separately because a reader following the ledger would otherwise not reach it. Its words "the short width falls permanently into its own third outcome" govern the PASS branch alone; the REJECT branch runs at both widths |
+| Amendment 7's clause 37, its statement that the reporting cells need no candidate A | UNCHANGED and now complete: clause 22 rejects the PROFILE rather than a cell, so every cell measured at the short width carries the same 26 arms, and none of them carries candidate A |
+| 22 | UNCHANGED by this clause, and restored to its full reach. Its three outcomes, its per-width evaluation and its REJECT's precedence over every terminal all stand as Amendment 6 leaves them |
