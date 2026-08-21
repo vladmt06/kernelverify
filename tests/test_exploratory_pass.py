@@ -274,3 +274,57 @@ def test_the_report_carries_both_contrast_families_at_both_widths(monkeypatch):
     for width in WIDTHS:
         assert len(report["window_separated_contrasts"][width]) == 3
         assert len(report["within_pass_contrasts"][width]) == 6
+
+
+# ---------------------------------------------------------------------------
+# End to end, over the real reduction rather than a stubbed margin
+# ---------------------------------------------------------------------------
+def _real_pass(shift):
+    """One pass built from the same fixtures the reduction's own tests use.
+
+    `shift` moves every identical arm together, so the within-pass contrasts
+    stay where they were and only the WINDOW-SEPARATED family moves. That is
+    the separation clause 58 exists to construct, and a fixture that moved
+    both at once could not tell the two families apart.
+    """
+    from test_profile_stock import R, _width
+
+    readings, widths = {}, {}
+    for width in WIDTHS:
+        measured = _width(width, exploratory=True, jitter={
+            label: [100.0 + shift] * ps.ROUNDS for label in ep._pair_labels()})
+        widths[width] = measured
+        readings[width] = ps.width_reading(measured, resolution_floor_ms=R,
+                                           exploratory=True)
+    profile = {"kind": "exploratory",
+               "profile_matrix": ps.profile_matrix(readings),
+               "cells": {rules.PRIMARY_CELL: {"widths": widths,
+                                              "readings": readings}}}
+    sweep = {"kind": "exploratory",
+             "loss_bench": {"readings": {
+                 width: {"per_round_slopes_ms": [1.0, 1.2, 1.1, 1.05, 1.15]}
+                 for width in WIDTHS}}}
+    return profile, sweep
+
+
+def test_the_reader_composes_with_the_real_margin_over_three_real_passes():
+    passes = [_real_pass(0.0), _real_pass(2.0), _real_pass(5.0)]
+    report = ep.aggregate(passes)
+
+    for width in WIDTHS:
+        separated = {tuple(one["passes"]): one["contrast_ms"]
+                     for one in report["window_separated_contrasts"][width]}
+        assert separated[(1, 2)] == pytest.approx(2.0)
+        assert separated[(1, 3)] == pytest.approx(5.0)
+        assert separated[(2, 3)] == pytest.approx(3.0)
+        row = report["branch"]["per_width"][width]
+        assert row["window_separated_null_ms"] == pytest.approx(5.0)
+        # Every within-pass contrast is untouched by the shift, which is what
+        # says the two families measure different things.
+        assert all(one["contrast_ms"] == 0.0
+                   for one in report["within_pass_contrasts"][width])
+        assert row["margin_read_ms"] == pytest.approx(min(row["margins_ms"]))
+        assert row["ratio"] == pytest.approx(row["margin_read_ms"] / 5.0)
+
+    assert report["branch"]["clears"] in (True, False)
+    assert report["branch"]["binds"] is False
