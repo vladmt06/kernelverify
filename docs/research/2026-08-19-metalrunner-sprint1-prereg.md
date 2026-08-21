@@ -2516,3 +2516,230 @@ The two ladders cut the same axis of the same weight by the same rule, so this h
 | 46, its round count | OPEN, and named here rather than settled. Candidate L's long-width bench does not resolve its own scaffold offset at the registered five rounds, and nothing in this document says whether a bench may take a different round count from the step. Step 10 has to answer it before the bench's arms mean anything |
 | 21, its `3R` limit and its 0.99 | UNCHANGED and BOTH flagged as open questions for step 10 rather than predicted here. On proxy numbers candidate L's long-width scaffold offset is not resolved at all at five rounds, and its short-width fit sat on both sides of 0.99. A bench that fails either gate leaves candidate L with no credited denominator |
 | 33, its positive `T` | UNCHANGED. It governs a step total and not a fitted intercept, so candidate L's negative bench intercepts are reported and are not faults |
+
+## Amendment 13, 2026-08-21: what an arm costs at the target, and the exploratory pass that sizes the calibration
+
+Amendment 10 clause 46 priced the calibration's step context through Amendment 6's cost model and said in its own text that this portion is a MODEL and not a measurement.
+It was measured, and the model is low by a factor of between two and four.
+Clause 46 also left four items out of its subtotal and named them; two are measured here, one is ruled, and the fourth is still outstanding and is named again rather than quietly absorbed.
+
+The four open obligations clause 46 and clause 49 left on step 10 are all discharged below, and two of them are discharged against the answer their own text predicted.
+Nothing here weakens a gate.
+Every figure is reproduced by execution before it is written, and the two that rest on a proxy rather than on the target say so where they appear.
+
+### Clause 52. The arm price is measured, and clause 46's subtotal is WITHDRAWN
+
+Measured 2026-08-21 on the pinned 4B at cell B's batch of four, on both pinned bands, through the same builder and the same timer the profile's own arms run on, one stock arm and no dial anywhere.
+
+| Width | Batch width | Amendment 6's model | Measured, median of nine rounds | Spread over median |
+|---|---|---|---|---|
+| short | 65 | 400 ms | 789.1 ms | 0.0186 |
+| long | 1057 | 4000 ms | 14700.8 ms | 0.0285 |
+
+The short reading is corroborated by scaling: the 0.6B proxy at batch 2 and width 97 is about 86 ms, the target holds about 6.7 times the parameters at about 1.34 times the tokens, and 86 times 9 is 774 against a measured 789.
+The long reading is 16.3 times the short width's token count at 18.6 times its time, which is the superlinearity attention's quadratic term requires and is why a model built at one width cannot be carried to the other.
+
+**What that does to every figure clause 46 published.**
+The arithmetic below reproduces clause 46's own 16.07 and 16.32 exactly when the modelled prices are fed to it, so what moved is the input and not the machinery.
+Its measured column carries clause 52's corrected bench arms as well as the measured step, which is why the factors are 2.95 rather than the step's own 3.52.
+
+| Quantity | Clause 46 | Measured | Factor |
+|---|---|---|---|
+| One step block, 27 arms, two replicas, five rounds | 1188.0 s | 4182.3 s | 3.52 |
+| Timed rounds over 39 blocks | 16.07 h | 47.43 h | 2.95 |
+| One build of every arm in both contexts | 0.247 h | 0.740 h | 2.98 |
+| Subtotal with arms built once | 16.32 h | 48.17 h | 2.95 |
+| Subtotal with arms rebuilt per block | 25.71 h | 76.18 h | 2.95 |
+| Clause 45's binding pass | 950 s, 15.83 min | 3372 s, 56.20 min | 3.55 |
+
+Clause 46's three figures and clause 45's binding pass are WITHDRAWN as prices and stand only as the arithmetic that produced them.
+The long width is 94.9 percent of every block, so any lever that does not reach it works on the remaining 5.1 percent.
+
+**Two of clause 46's four absent items are measured and are small.**
+A whole build is 3.03 timed steps at the target against the 3.00 the clause assumed, so graph compilation is a one percent surcharge on the warm-up item rather than a separate cost, and clause 46's listing of it as an absent item is discharged rather than carried.
+The per-step cache clear mlx-lm runs inside its own timed region is 2.5 percent of the step at the short width and inside the noise at the long, measured against an arm with the clear removed in A/B/A blocks, so it is stock's real and small cost and not a thing the profile is accidentally measuring.
+
+**Candidate L's bench arms were priced at the wrong row count, and the direction is favourable.**
+Clause 46 measured them at 142 supervised rows of 256 and 3675 of 4224, which are the bands' median supervised FRACTIONS.
+The code takes the count from the first batch mlx-lm's own iterator yields, which is what clause 20 pins and what `supervised_rows` reads, and at seed 7 that is 91 of 256 and 3699 of 4224.
+Measured at those counts the arms are 72.2 ms and 2107.5 ms rather than 184 and 3096, so candidate L's bench is cheaper than clause 46 priced it and its long-width arm is 14 percent of a training step rather than the "nearly as expensive as a whole training step" that clause records against the modelled step.
+That sentence in clause 46 is WITHDRAWN; its arm count of nine and clause 19's reasons for it are untouched.
+
+**Which makes candidate L's bench price SEED-DEPENDENT, and no seed is registered yet.**
+A different seed yields a different first batch and therefore a different supervised count: seed 7 gives 91 rows at the short width, and the unseeded draws clause 56 reproduces gave 83 to 130.
+Every bench figure in this amendment is at seed 7, and the binding plan's seed is registered at step 13.
+So the 43.23 hours clause 57 prices is a figure at seed 7, its bench portion is 4.5 percent of the total, and a different seed moves that portion and not the rest.
+
+### Clause 53. A calibration block REBUILDS its arms, and the argument is structural
+
+Clause 46 registered this as an obligation on step 10 and declined to guess, because a block's independence is a property of the calibration's design.
+
+Measured first, because the measurement is what a reader would expect to settle it and it does not.
+Four identical stock arms, no seam anywhere, all interleaved in one set of rounds so drift is common to all four: two built once before the first block and never rebuilt, two rebuilt at the start of every block.
+Twenty blocks of nine rounds, three runs, on the 0.6B proxy.
+
+| Reading | Run 1 | Run 2 | Run 3 |
+|---|---|---|---|
+| One persistent build faster than its twin, of 180 rounds | 88 | 88 | 91 |
+| One fresh build faster than its twin, of 180 rounds | 87 | 95 | 91 |
+| Fresh minus persistent, median over blocks | +0.189 ms | -0.034 ms | -0.150 ms |
+| Fresh minus persistent, positive in | 11 of 20 | 9 of 20 | 8 of 20 |
+
+A persistent per-build offset shows as a lopsided sign count and all six counts sit within a whisker of half, so no build offset is detectable here.
+
+**Registered: every block builds its own arms, and the reason is the structure rather than the table above.**
+Clause 33 registers that `C` "controls a future exchangeable null exceedance at no more than `alpha`", and the future draw is the binding pass, which builds its arms once and times them.
+A calibration whose blocks all share one build produces contrasts that carry no build draw at all, so it measures a null CONDITIONED on one particular build while the binding pass draws a fresh one, and the two are not exchangeable however small the conditioning turns out to be.
+A null result at the proxy cannot establish that the conditioning is empty; it can only fail to detect it, and the two errors are not symmetric, because registering reuse when builds do differ breaks the registered rate silently and registering rebuild when they do not costs hours.
+
+The alternative that would make reuse sound is registered here so that it is a choice rather than an oversight: if the binding pass ran on the SAME compiled objects the calibration blocks used, the conditioning would be identical on both sides and exchangeability would hold.
+It is not taken, because it requires one process to hold every arm alive across the calibration, the addendum's commit and the binding pass, and clause 39's ordering exists to put a committed artifact between those stages rather than a live process.
+
+### Clause 54. A bench MAY take its own round count, and what actually binds
+
+Clause 49 recorded that nothing in this document says whether a bench may take a round count different from the step's, and registered it as an obligation on step 10.
+
+Registered: it may, and the constraint is not between contexts but inside one.
+`R` and `C` are per-context by clause 33's key and clause 21's prohibition on reuse, and no rule combines a block contrast from one context with one from another, so two contexts sharing no arithmetic may take different round counts without any statistic changing meaning.
+Clause 51 already relies on exactly this, since it registers `M` and `N` reduced over the step's rounds and `F` over the bench's.
+
+What DOES bind is that a context's calibration blocks and its binding pass take the SAME round count.
+A block contrast is the absolute difference of two arm MEDIANS, and a median over five rounds has a wider distribution than one over fifteen, so a demand estimated at one round count and applied at another is calibrated against a distribution the binding draw does not come from, which is the exchangeability clause 33 requires.
+Simulated 2026-08-21 under clause 33's own ideal null over 400000 trials, the demand `C` scales with the round count while the ratio of `C` to the median block contrast does not: it is 2.91 at three rounds, 2.91 at five, 2.90 at nine and 2.90 at fifteen.
+So the round count moves the demand in milliseconds and leaves its shape alone, which is exactly the quantity a mismatch would corrupt.
+
+The RESOLUTION ADDENDUM's `rounds_per_block` is therefore a per-context field rather than one scalar, keyed the same way `contexts` is, and a stage whose round count disagrees with its context's entry REFUSES.
+Clause 33's schema is amended in that one field and in nothing else.
+
+### Clause 55. Both benches interleave their arms, and clause 49's diagnosis was wrong
+
+Clause 49 recorded candidate L's long-width scaffold offset ranging from 4 to 174 ms across four runs, registered it as an obligation on step 10, and diagnosed it as needing more rounds than the registered five.
+
+Measured 2026-08-21 at the pinned 4B dimensions, three repeats at each round count, reporting the spread of the offset ACROSS the repeats:
+
+| Width | 5 rounds | 15 rounds |
+|---|---|---|
+| short | 0.999 ms | 6.621 ms |
+| long | 48.026 ms | 109.666 ms |
+
+Tripling the rounds made it worse at both widths.
+Round noise shrinks with rounds, so this is drift between two timing windows and not noise inside one, and that is what identified the cause: the bench timed every round of one arm before starting the next, so two arm medians were separated by however long every arm between them took and their difference carried that separation.
+More rounds widened the separation, which is why the registered diagnosis pointed the wrong way.
+
+The step's arms have never had this fault, because `profile_knobs.timed_rounds` interleaves every arm inside every round and rotates the starting arm.
+Registered: both benches do the same, and only arms a rule COMPARES have to share rounds, so the kill bench interleaves the four arms at one shape and width rather than all forty-eight, because clause 8 builds no ratio across shapes.
+
+| Width, rounds | Offset spread before | After | Pooled fit clears clause 21's 0.99 |
+|---|---|---|---|
+| short, 5 | 0.999 ms | 1.270 ms | 3 of 3, unchanged |
+| short, 15 | 6.621 ms | 0.385 ms | 2 of 3 becomes 3 of 3 |
+| long, 5 | 48.026 ms | 8.622 ms | 3 of 3, unchanged |
+| long, 15 | 109.666 ms | 31.201 ms | 3 of 3, unchanged |
+
+At the short width more rounds now helps where it used to hurt, which is the sign the fault is the one named.
+At the long width the residual scatter across repeats did not fall with rounds, and that is NOT claimed to be resolved here: three repeats give a range over three samples, which is a statistic too weak to read a trend from, and what separates three repeats is drift between them, which is precisely the block-to-block variation step 10's blocks exist to measure.
+
+**What this does to clause 49 and to clause 21's two open questions.**
+Clause 49's obligation is DISCHARGED and its diagnosis WITHDRAWN: the bench does not need a different round count from the step and clause 54 registers that it may take one anyway.
+Clause 49's second open question, whether candidate L's fit clears the 0.99 linearity floor, reads six of six with the fix against five of six without it, at the target's own dimensions rather than the proxy's, and it is still step 10's to settle because these are three repeats and not a calibration.
+Clause 21's `3R` limit remains unevaluable until `R` exists, and the offsets it will be applied to are now 3.6 to 12.3 ms at the long width rather than 4 to 174.
+
+### Clause 56. A registered seed that mlx-lm will not honour is refused
+
+Clause 20 pins each width's batch as the first mlx-lm's own iterator yields at the registered seed, and `supervised_rows` reads that as deterministic and available before any run.
+
+`iterate_batches` guards its own seeding with `if seed:`, and zero is falsy.
+Measured on the short band 2026-08-21: six draws at seed 0 gave 116, 109, 114, 130, 114 and 121 supervised rows, and six at seed 7 gave 91 every time.
+
+This reaches two registered things rather than one.
+The fixed batch is what makes five rounds repeats of ONE measurement rather than five different workloads, and candidate L's floor is DEFINED on the supervised rows, so an unhonoured seed moves the workload underneath the floor as well as underneath the share.
+Registered: the run plan's seed must be a positive integer and the plan validation refuses anything else, which is clause 20's determinism made executable rather than assumed.
+
+### Clause 57. The exploratory pass, and the rule that sizes the calibration from it
+
+Clause 52 leaves the calibration at 48.17 hours with arms built once and 76.18 with clause 53's rebuild, against a binding pass of 56 minutes.
+Vlad ruled 2026-08-21 that an exploratory pass runs first and the calibration is sized from what it reads.
+The sizing rule is registered HERE, before the pass runs, because a rule written after the number it consumes is not a rule.
+
+**The floor first, because it decides what the pass is for.**
+Priced through clause 52's measured arm, with clause 53's rebuild and candidate L's corrected bench arms:
+
+| Schedule | Hours |
+|---|---|
+| Clause 37 as registered, pilot 20 at five rounds, fresh 19 at five | 76.18 |
+| Pilot 20 at two rounds | 61.58 |
+| Pilot 5 at two rounds | 43.23 |
+| The 19 fresh blocks alone, with no pilot at all | 37.11 |
+
+So there is no both-widths, five-round, rebuilt schedule below about 37 hours, and the leanest one that still fixes a scale is 43.23.
+The exploratory pass is therefore NOT choosing between a cheap calibration and an expensive one.
+It is deciding whether 43 hours buys a conclusion that a shorter route already has, and saying so plainly is the point of pricing it before registering the branches.
+
+**What the exploratory pass is.**
+Three passes of the binding manifest at both widths, each carrying two additional IDENTICAL-ARM pairs, every arm interleaved inside every round under clause 55's arrangement.
+It dials nothing the binding manifest does not already dial, it computes no score that binds, its recording lands on the REFUSED path, and it names no candidate.
+Priced at 56.20 minutes a pass and 15.49 minutes for the extra pairs across the three, it is 3.07 hours.
+
+**What it reads.**
+Per width, the L versus Q margin read as a TIME the way clause 16 already reads one, `|T/g1 - T/g2|`, three times; and the identical-arms contrast six times, of which three are separated by a whole pass and three sit inside one.
+Three passes rather than one, because a margin read once is a margin whose own stability is unknown, and the three readings cost the same arms either way.
+
+**Why a handful of draws bounds a demand at all, and by how much.**
+Simulated 2026-08-21 under clause 33's ideal null over 200000 blocks, with the demand taken as the 95th percentile of a block's grouped maximum over 27 leaves, reporting how often that demand falls below a multiple of the largest observed pair contrast:
+
+| Draws observed | 4x the largest | 8x | 16x | 32x |
+|---|---|---|---|---|
+| 1 | 0.434 | 0.697 | 0.845 | 0.922 |
+| 3 | 0.820 | 0.972 | 0.997 | 1.000 |
+| 5 | 0.943 | 0.997 | 1.000 | 1.000 |
+
+The grouped maximum over 27 leaves is only 1.59 times the single-leaf demand, which is why a few pair contrasts reach it at all.
+The within-pass pairs count as evidence about leaf spread and NOT as extra blocks, because two pairs inside one pass share a time window and the simulation assumes independence.
+
+**The multiplier does NOT substitute for a calibrated demand, and this is the clause's most important sentence.**
+Clause 33 chose an empirical order statistic precisely so that the demand assumes nothing about the null's shape, and it says in its own text that the ideal null "is not claimed to describe this machine".
+A multiplier read off a simulated ideal null is a model-based bound, which is strictly weaker.
+So no branch below lets the exploratory pass certify anything, and a margin that clears any multiple of an observed pair contrast is a REPORTED fact about cost, never a resolution.
+
+**Registered, before the pass runs.**
+
+| What the pass reads | What follows |
+|---|---|
+| the smaller of the two widths' margins is at least 8 times the largest of the three window-separated pair contrasts | the LEAN schedule runs: a 5-block pilot at two rounds and 19 fresh blocks at the binding pass's own round count, 43.23 hours, which is clause 37's rate-bearing count untouched and its pilot cut in the part that carries no rate |
+| it is not | the schedule is ruled with the measured margin in hand, and that ruling is written into this document before the calibration runs |
+
+Clause 37's fresh set of 19 is untouched in both branches, because 19 is what attains the registered `alpha` and the pilot is what fixes a scale.
+Its pilot of 20 blocks at five rounds is REDUCED to 5 at two in the lean branch only, and the reason is that the scale is "the median absolute leaf contrast within that group, over the pilot blocks, taken across blocks AND rounds", so a pilot of 5 blocks at two rounds still pools about 45 samples per group.
+
+**Why choosing the schedule after seeing a margin does not buy a conclusion.**
+The registered rate is `alpha = 0.05` and clause 33's estimator attains it at any fresh-block count of 19 or more, so what the schedule moves is the demand's VARIANCE and not its rate.
+Every branch lands on a terminal clause 38 already registers: a demand that fails to separate makes the pair TIED under clause 16 and sends it to section 4.3's registered tie-breaks, which is a legal terminal and not a refusal.
+So the exploratory pass sizes a COST and not an outcome, and what would be forbidden, choosing a schedule that makes a particular candidate win, is blocked by the branch rule existing before the number does.
+What it gives up is stated rather than repaired: a margin seen before the calibration is a margin the calibrating stage knew, and disclosure does not restore that independence, so the decision artifact names the exploratory recording's hash beside the calibration's and the reading is labelled a replication of a seen result, exactly as Amendment 10 labels the kill bench's incidental reading.
+
+**One measurement recorded here because a later reader will ask.**
+Clause 53's rebuild puts 0.737 hours of building against 1.216 hours of timing in every five-round block, so builds are 40.9 percent of the lean schedule's 43.23 hours.
+Warm-ups two and three already read at the timed rate at both widths, 782.8 ms against a timed 789.1 and 15173 and 14587 against 14700.8, so only the first warm-up does anything a timed round does not, and dropping one would save 5.84 hours.
+It is NOT dropped: section 3's "exactly three warm-up passes per arm" is committed text, the saving is 13.5 percent of the lean schedule, and a first timed round that carries allocation effects would corrupt every arm rather than cost hours.
+
+### Ledger: what Amendment 13 does to committed text
+
+| Clause | What happens to it |
+|---|---|
+| 46, its subtotal | WITHDRAWN as a price. Its 16.07 hours of timed rounds and its two lifecycle answers of 16.32 and 25.71 become 47.43, 48.17 and 76.18, because Amendment 6's cost model reads 0.4 and 4.0 seconds against a measured 0.789 and 14.70. Its arithmetic is untouched and reproduces its own figures exactly on the modelled prices |
+| 46, its absent items | TWO DISCHARGED, one RULED, one OUTSTANDING. Compilation is a one percent surcharge on the warm-up item at the target and not a separate cost; the kill bench's 0.67 minutes stands as measured; the block lifecycle is settled by clause 53; the reserve for idle refusals is registered by NOTHING here and step 10 cannot be armed until it is |
+| 46, candidate L's bench arm prices | CORRECTED. Measured at the band's median supervised fraction rather than at the first batch's actual count, they read 184 and 3096 ms where the registered construction gives 72.2 and 2107.5, and the sentence calling the long-width arm "nearly as expensive as a whole training step" is WITHDRAWN |
+| 45, its binding pass | CORRECTED from 950 s to 3372 s, over the same 35 and 44 arms. Its arm counts and its certified vector of 27 are untouched |
+| 49, its round-count obligation | DISCHARGED and its DIAGNOSIS WITHDRAWN. The bench does not need more rounds; it needed the interleaving the step has always had, and more rounds made the offset spread worse because the fault was drift between windows and not noise inside one |
+| 49, its 0.99 obligation | PARTLY DISCHARGED. Candidate L's pooled fit clears the floor in six readings of six at the target's dimensions with the interleaving, against five of six without it, and step 10 still settles it because three repeats are not a calibration |
+| 21, its `3R` and its 0.99 | UNCHANGED. Both remain unevaluable until `R` exists, and the offsets `3R` will be applied to are now 3.6 to 12.3 ms at the long width rather than clause 49's 4 to 174 |
+| 33, its addendum schema | CHANGED in ONE field. `rounds_per_block` becomes per-context, keyed as `contexts` is, because a demand estimated at one round count and applied at another is calibrated against a distribution the binding draw does not come from |
+| 33, its `alpha`, its estimator and its block count | UNCHANGED, and clause 57 rests on all three: any block count of 19 or more attains the registered rate, which is why sizing the schedule from the exploratory pass moves variance and not rate |
+| 33, its exchangeability requirement | UNCHANGED and load-bearing twice. It is the whole of clause 53's argument for rebuilding and the whole of clause 54's constraint inside a context |
+| 20, its pinned batch | UNCHANGED and now enforced. Its determinism is real for every seed mlx-lm honours and false for zero, and clause 56 refuses the value rather than restating the claim |
+| 19, its bench exception | UNCHANGED. Clause 55 changes the ORDER its arms are timed in and nothing about what they compute |
+| 8, its per-round shape ratio | UNCHANGED and now computable. Before clause 55 the kill bench's round `r` of one arm and round `r` of another sat in different time windows, so a per-round ratio paired samples that shared nothing; interleaving the four arms at one shape and width is what makes the pairing mean what clause 8 says |
+| 37, its fresh set of 19 | UNCHANGED in both of clause 57's branches, because 19 is what attains the registered `alpha` and no schedule may cut it |
+| 37, its pilot of 20 blocks at five rounds | REDUCED to 5 at two rounds in clause 57's lean branch only. The pilot carries no rate, its scale is pooled across blocks AND rounds by clause 37's own wording, and 5 blocks at two rounds still pools about 45 samples per group. Its 20 at five rounds stands wherever the lean branch is not taken |
+| 39, its ordering | UNCHANGED and load-bearing. It is why clause 53 declines the one arrangement that would make reuse sound |
+| Nothing in the document | REGISTERS AN EXPLORATORY RUN. Clause 57 is a new registration and reverses nothing: every prior run either binds or refuses, and a pass that reads a margin to size a schedule is neither |
