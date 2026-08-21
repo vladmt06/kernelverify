@@ -19,6 +19,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bench"))
 
 import ceiling_sweep as cs  # noqa: E402
+import profile_knobs as pk  # noqa: E402
 import profile_rules as rules  # noqa: E402
 from decode_rules import RunInvalid  # noqa: E402
 
@@ -335,3 +336,158 @@ def test_the_kill_bench_carries_an_observed_spread_and_says_it_is_not_a_bound():
     assert spread["observed_spread_pct"]["short:S1:stock:forward"] > 0
     assert "not an interval at any registered rate" in (
         spread["observed_spread_is_not_a_bound"])
+
+
+# --- candidate L's bench, Amendment 12 -------------------------------------
+def test_the_bench_is_nine_arms_with_a_reference_and_no_ablation():
+    """Amendment 10 clause 46's count, read as Amendment 12 clause 49 reads it.
+
+    Four knob, four scaffold, one reference. No ablation, because clause 19
+    registers candidate L's `c_floor` as zero and `KnobReading` refuses a
+    candidate that measured a residue nothing may consume.
+    """
+    for width in rules.WIDTH_ORDER:
+        manifest = cs.loss_manifest(width)
+        assert len(manifest) == 9
+        roles = [arm.role for arm in manifest]
+        assert roles.count(pk.KNOB) == 4
+        assert roles.count(pk.SCAFFOLD) == 4
+        assert roles.count(pk.REFERENCE) == 1
+        assert pk.ABLATION not in roles
+
+
+def test_the_bench_takes_a_reference_arm_and_not_a_stock_one():
+    """Clause 49 voids clause 46's word "stock" for that arm.
+
+    The floor runs on the supervised rows and stock on all of them, so an
+    offset between the two contains the row-count difference, and the
+    row-count difference IS the floor.
+    """
+    roles = {arm.role for arm in cs.loss_manifest("short")}
+    assert pk.REFERENCE in roles
+    assert pk.STOCK not in roles
+
+
+def test_a_reference_arm_carrying_a_dial_setting_refuses():
+    with pytest.raises(RunInvalid, match="defined by not having one"):
+        cs.LossArm(label="x", width="short", role=pk.REFERENCE,
+                   nominal_phi=1.0)
+
+
+def test_a_knob_arm_without_a_dial_setting_refuses():
+    with pytest.raises(RunInvalid, match="carries one"):
+        cs.LossArm(label="x", width="short", role=pk.KNOB)
+
+
+def test_an_ablation_arm_on_this_bench_refuses():
+    """Clause 19 registers `c_floor` as zero, so a residue arm here would
+    measure something no rule may read."""
+    with pytest.raises(RunInvalid, match="no ablation"):
+        cs.LossArm(label="x", width="short", role=pk.ABLATION)
+
+
+def test_the_two_ladders_place_the_same_actual_sizes():
+    """Clause 51: the pairing clause 9 asks for cannot hold across two
+    contexts, and what it was protecting is the SETTINGS, which must."""
+    vocab = 151936
+    bench = cs.vocabulary_ladder(vocab)
+    assert list(bench) == list(pk.PHIS)
+    assert bench[1.0] == vocab
+    cs.same_settings(bench, cs.vocabulary_ladder(vocab))
+
+
+def test_a_bench_ladder_at_other_sizes_than_the_step_refuses():
+    """A ratio taken across two dials is not the quantity clause 9 defines,
+    however carefully each half was measured."""
+    bench = cs.vocabulary_ladder(151936)
+    elsewhere = cs.vocabulary_ladder(151936 // 2)
+    with pytest.raises(RunInvalid, match="these are two"):
+        cs.same_settings(bench, elsewhere)
+
+
+def test_the_supervised_count_comes_from_the_profile_s_own_context():
+    """Section 4.2's floor is on the SUPERVISED rows and clause 20 pins which
+    batch those are, so the count is read and never assumed."""
+    assert cs.supervised_rows({"supervised": 3675, "supervised_of": 4224}) == 3675
+
+
+def test_a_context_with_no_supervised_count_refuses():
+    with pytest.raises(RunInvalid, match="no supervised count"):
+        cs.supervised_rows({"supervised_of": 4224})
+
+
+def test_more_supervised_rows_than_the_batch_holds_refuses():
+    with pytest.raises(RunInvalid, match="more rows than the batch"):
+        cs.supervised_rows({"supervised": 500, "supervised_of": 256})
+
+
+def test_a_supervised_count_of_zero_refuses():
+    with pytest.raises(RunInvalid, match="not a measurement"):
+        cs.supervised_rows({"supervised": 0, "supervised_of": 256})
+
+
+def test_the_bench_reduces_through_the_same_code_the_step_uses():
+    """The handoff, and the point of it: candidate L's bench and candidate Q's
+    floor take clause 5's offset against their own reference arm through ONE
+    reduction, which landed with candidate Q's floor and is reused here."""
+    samples, roles = {}, []
+    for arm in cs.loss_manifest("short"):
+        if arm.role == pk.KNOB:
+            value = 30.0 + 60.0 * arm.nominal_phi
+        elif arm.role == pk.SCAFFOLD:
+            value = 90.1
+        else:
+            value = 90.0
+        samples[arm.label] = [value] * pk.ROUNDS
+        roles.append(pk.ArmRole(label=arm.label, candidate="L", role=arm.role,
+                                phi=arm.nominal_phi))
+    reading = pk.reduce_width(samples, tuple(roles), resolution_floor=0.05,
+                              rounds=pk.ROUNDS, family=pk.FLOOR)["L"]
+    assert reading.reference_median == pytest.approx(90.0)
+    assert reading.scaffold_offset == pytest.approx(0.1)
+    assert reading.pooled.slope == pytest.approx(60.0)
+
+
+def test_a_floor_reading_carries_no_share_and_says_why():
+    """Clause 19 puts candidate L's SHARE in the step and its `d` on a bench,
+    so the bench has no step total for a share to be a fraction of."""
+    reading = pk.KnobReading(
+        candidate="L", kind=pk.REWRITE, stock_median=None,
+        per_round=(pk.Fit(60.0, 30.0, 1.0, 0.0),),
+        pooled=pk.Fit(60.0, 30.0, 1.0, 0.0),
+        scaffold=pk.Fit(0.0, 0.0, 1.0, 0.0), scaffold_offset=0.1,
+        family=pk.FLOOR, resolution_floor=0.05, span=0.75,
+        scaffold_range=0.0)
+    assert reading.residue == 0.0
+    assert reading.raw_residue == 0.0
+    assert reading.attributed == pytest.approx(60.0)
+    with pytest.raises(RunInvalid, match="no share"):
+        reading.share
+
+
+def test_a_floor_reading_that_measured_a_residue_refuses():
+    """Clause 19 registers candidate L's `c_floor` as ZERO, so an ablated arm
+    on this bench measures something no rule may read."""
+    with pytest.raises(RunInvalid, match="registers its `c_floor` as zero"):
+        pk.KnobReading(
+            candidate="L", kind=pk.REWRITE, stock_median=None,
+            per_round=(pk.Fit(60.0, 30.0, 1.0, 0.0),),
+            pooled=pk.Fit(60.0, 30.0, 1.0, 0.0),
+            scaffold=pk.Fit(0.0, 0.0, 1.0, 0.0), scaffold_offset=0.1,
+            family=pk.FLOOR, ablated_median=5.0, resolution_floor=0.05,
+            span=0.75, scaffold_range=0.0)
+
+
+def test_a_stock_less_width_whose_family_has_no_reference_refuses():
+    """Without a stock arm and without a reference arm, clause 5's scaffold
+    offset has no baseline at all and would be silently taken against nothing."""
+    samples, roles = {}, []
+    for arm in cs.loss_manifest("short"):
+        if arm.role == pk.REFERENCE:
+            continue
+        samples[arm.label] = [50.0] * pk.ROUNDS
+        roles.append(pk.ArmRole(label=arm.label, candidate="L", role=arm.role,
+                                phi=arm.nominal_phi))
+    with pytest.raises(RunInvalid, match="no baseline at all"):
+        pk.reduce_width(samples, tuple(roles), resolution_floor=0.05,
+                        rounds=pk.ROUNDS, family=pk.FLOOR)

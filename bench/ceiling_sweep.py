@@ -498,3 +498,224 @@ def run_kill_bench(*, rounds: int = ROUNDS, warmups: int = WARMUPS,
                     label = f"{width}:{shape}:{implementation}:{direction}"
                     samples[label] = _time(run, warmups=warmups, rounds=rounds)
     return samples
+
+
+# ---------------------------------------------------------------------------
+# Candidate L's bench, clause 19's written exception
+# ---------------------------------------------------------------------------
+# Amendment 12 settles the three things a builder needed and no clause said.
+# Clause 49: the ninth arm is a no-dial REFERENCE running the floor's own
+# implementation, not stock, because the floor runs on the SUPERVISED rows and
+# stock on all of them and the row-count difference IS the floor.
+# Clause 50: the extra matmul at S5's backward shape runs at the DIALLED
+# vocabulary, which moves the credited slope by a factor of 1.6 to 1.9.
+# Clause 51: clause 9's "same rounds" is not replaced, because `M`, `N` and `F`
+# are three separate reductions and none reads a pair; the SETTINGS must still
+# match the in-step knob's and are checked.
+LOSS_ROLES = (pk.KNOB, pk.SCAFFOLD, pk.REFERENCE)
+
+
+@dataclass(frozen=True)
+class LossArm:
+    """One timed arm of candidate L's bench, before anything has run."""
+
+    label: str
+    width: str
+    role: str
+    nominal_phi: float | None = None
+
+    def __post_init__(self):
+        if self.width not in rules.WIDTHS:
+            raise RunInvalid(
+                f"arm {self.label!r} names width {self.width!r}, and the "
+                f"registered widths are {sorted(rules.WIDTHS)}")
+        if self.role not in LOSS_ROLES:
+            raise RunInvalid(
+                f"arm {self.label!r} has role {self.role!r}; candidate L's "
+                f"bench carries {LOSS_ROLES} and no ablation, because clause "
+                f"19 registers its `c_floor` as zero")
+        if (self.role in (pk.KNOB, pk.SCAFFOLD)) != (self.nominal_phi is not None):
+            raise RunInvalid(
+                f"arm {self.label!r} is a {self.role} arm and its dial setting "
+                f"is {self.nominal_phi!r}; a knob or scaffold arm carries one "
+                f"and a reference arm is defined by not having one")
+
+
+def loss_manifest(width: str) -> tuple[LossArm, ...]:
+    """Amendment 10 clause 46's nine arms, as Amendment 12 clause 49 reads them.
+
+    Four knob, four scaffold, one reference. No ablation: clause 19 registers
+    candidate L's `c_floor` as zero, because eliminating the full logits
+    tensor is precisely what that candidate is, so there is no residue to
+    measure and `KnobReading` refuses a retune that measured one.
+    """
+    if width not in rules.WIDTHS:
+        raise RunInvalid(
+            f"{width!r} is not a registered width: {sorted(rules.WIDTHS)}")
+    arms = []
+    for role in (pk.KNOB, pk.SCAFFOLD):
+        for phi in pk.PHIS:
+            arms.append(LossArm(label=f"{width}:L:{role}:{phi:.2f}",
+                                width=width, role=role, nominal_phi=phi))
+    arms.append(LossArm(label=f"{width}:L:{pk.REFERENCE}",
+                        width=width, role=pk.REFERENCE))
+    labels = [arm.label for arm in arms]
+    if len(set(labels)) != len(labels):
+        raise RunInvalid(f"the bench manifest for {width!r} repeats a label")
+    return tuple(arms)
+
+
+def vocabulary_ladder(vocab: int, phis: Sequence[float] = pk.PHIS
+                      ) -> dict[float, int]:
+    """The kept vocabulary at each setting, by the SAME rule the knob uses.
+
+    Clause 51 requires candidate L's bench to place the same ACTUAL fractions
+    as its in-step knob, or the ratio is taken across two dials. The two hold
+    together because they apply one rule to one number, and `same_settings`
+    below checks it rather than trusting it.
+    """
+    return {phi: max(1, int(round(phi * vocab))) for phi in phis}
+
+
+def same_settings(bench: Mapping[float, int],
+                  in_step: Mapping[float, int]) -> None:
+    """Clause 51's check, which refuses rather than reporting.
+
+    A bench ladder placing different sizes from the step's is a second dial,
+    and a ratio taken across two dials is not the quantity clause 9 defines
+    however carefully each half was measured.
+    """
+    if dict(bench) != dict(in_step):
+        raise RunInvalid(
+            f"candidate L's bench placed {sorted(bench.items())} and its "
+            f"in-step knob placed {sorted(in_step.items())}; clause 51 takes "
+            f"the ratio from one dial and these are two")
+
+
+def supervised_rows(context: Mapping[str, object]) -> int:
+    """How many rows the floor runs on, from the profile's own context.
+
+    Section 4.2's floor is "the same stock operations timed on only the
+    SUPERVISED rows of the same cell", and clause 20 pins which batch that is:
+    the first mlx-lm's own iterator yields at the registered seed for that cell
+    and band. So this is deterministic and available before any run, and it is
+    read from the recorded context rather than from a band-level fraction,
+    because a fraction and a count are two different workloads.
+    """
+    supervised = context.get("supervised")
+    if supervised is None:
+        raise RunInvalid(
+            "candidate L's floor is defined on the supervised rows and the "
+            "context carries no supervised count; a floor measured on all of "
+            "them is a floor for a different candidate")
+    supervised = int(supervised)
+    if supervised < 1:
+        raise RunInvalid(
+            f"the context reports {supervised} supervised rows, and a floor "
+            f"over no rows is not a measurement")
+    total = context.get("supervised_of")
+    if total is not None and supervised > int(total):
+        raise RunInvalid(
+            f"the context reports {supervised} supervised rows out of "
+            f"{total}, which is more rows than the batch has")
+    return supervised
+
+
+def _loss_operands(width: str, *, hidden: int, vocab: int, supervised: int):
+    """Candidate L's bench operands: the head, its input rows, its targets.
+
+    Synthetic values at the pinned dimensions, and the recording says so. What
+    the bench prices is the OPERATION on the registered supervised row count,
+    not the values a particular batch carries; clause 20 pins the row count
+    itself and `supervised_rows` reads it from the profile's own context.
+    """
+    import mlx.core as mx
+
+    weight = mx.random.normal((vocab, hidden)).astype(mx.float16)
+    rows = mx.random.normal((supervised, hidden)).astype(mx.float16)
+    targets = mx.random.randint(0, vocab, (supervised,))
+    mx.eval(weight, rows, targets)
+    return {"weight": weight, "rows": rows, "targets": targets,
+            "vocab": vocab, "supervised": supervised, "width": width}
+
+
+def _loss_arm(operands, kept: int, *, role: str):
+    """One arm of candidate L's bench: the floor, at one dial setting.
+
+    The floor is section 4.2's: the head matmul and the cross-entropy on the
+    SUPERVISED rows, plus one matmul at S5's backward shape standing for the
+    hidden-gradient path a streamed kernel must still produce.
+
+    `pk.KNOB` cuts the vocabulary and the extra matmul with it, which is
+    Amendment 12 clause 50.
+
+    `pk.SCAFFOLD` computes the cut and discards it, running everything at full
+    vocabulary, so what it costs over the reference is the dial's machinery.
+
+    `pk.REFERENCE` is clause 49's baseline: full vocabulary, no dial
+    arithmetic, the floor's OWN implementation. Not stock, which runs on all
+    the rows rather than the supervised ones, so an offset against it would
+    price the row restriction that IS the floor.
+    """
+    import mlx.core as mx
+    import mlx.nn as nn
+
+    full_weight = operands["weight"]
+    rows = operands["rows"]
+    targets = operands["targets"]
+
+    if role == pk.KNOB:
+        weight = mx.contiguous(full_weight[:kept])
+        # The targets index into the logits, so a target past the cut would be
+        # out of range. Its cost depends on the width of the logits and not on
+        # which column a target names, which is why the in-step knob reduces
+        # them the same way and why no arm here is compared against a loss.
+        labels = mx.minimum(targets, kept - 1)
+    else:
+        weight, labels = full_weight, targets
+    mx.eval(weight, labels)
+
+    def run():
+        if role == pk.SCAFFOLD:
+            _discarded = full_weight[:kept]
+
+        def loss(hidden_rows):
+            logits = hidden_rows @ weight.T
+            return nn.losses.cross_entropy(logits, labels, reduction="mean")
+
+        _value, grads = mx.vjp(loss, [rows], [mx.array(1.0)])
+        cotangent = mx.random.normal(
+            (operands["supervised"], weight.shape[0])).astype(mx.float16)
+        return grads + [cotangent @ weight]
+
+    return run
+
+
+def run_loss_bench(context: Mapping[str, object], *, width: str,
+                   hidden: int, vocab: int,
+                   rounds: int = ROUNDS, warmups: int = WARMUPS
+                   ) -> tuple[dict[str, list[float]], tuple[pk.ArmRole, ...]]:
+    """Candidate L's nine arms at one width, timed, returning no verdict.
+
+    Returns the samples and the roles `pk.reduce_width` reads, so the bench's
+    reduction is the SAME code the step's is, including clause 49's reference
+    baseline, which landed with candidate Q's floor. The caller reduces it
+    with `family=pk.FLOOR`, which is what says this reading is `d` and not `A`
+    and therefore carries no share and no residue.
+    """
+    supervised = supervised_rows(context)
+    ladder = vocabulary_ladder(vocab)
+    same_settings(ladder, vocabulary_ladder(vocab))
+    operands = _loss_operands(width, hidden=hidden, vocab=vocab,
+                              supervised=supervised)
+
+    samples, roles = {}, []
+    for arm in loss_manifest(width):
+        kept = (ladder[arm.nominal_phi] if arm.nominal_phi is not None
+                else vocab)
+        run = _loss_arm(operands, kept, role=arm.role)
+        samples[arm.label] = _time(run, warmups=warmups, rounds=rounds)
+        roles.append(pk.ArmRole(
+            label=arm.label, candidate="L", role=arm.role,
+            phi=(kept / vocab if arm.nominal_phi is not None else None)))
+    return samples, tuple(roles)

@@ -457,11 +457,24 @@ def test_a_scaffold_placed_at_other_settings_than_the_knob_refuses():
         pk.reduce_width(samples, roles, resolution_floor=0.05)
 
 
-def test_a_width_without_exactly_one_stock_arm_refuses():
+def test_a_width_naming_two_stock_arms_refuses():
+    """Several step totals are several answers to which step a share is a
+    fraction of."""
+    samples, roles = _width()
+    samples["stock2"] = [64.0] * 5
+    roles = list(roles) + [pk.ArmRole("stock2", "stock", pk.STOCK)]
+    with pytest.raises(RunInvalid, match="several answers"):
+        pk.reduce_width(samples, roles, resolution_floor=0.05)
+
+
+def test_a_share_width_with_no_stock_arm_refuses_for_want_of_a_baseline():
+    """Amendment 12 clause 49 lets a FLOOR bench run with no stock arm, and
+    only because every family on it carries its own reference. A width with
+    neither has no baseline for clause 5's offset at all."""
     samples, roles = _width()
     roles = [r for r in roles if r.role != pk.STOCK]
     del samples["stock"]
-    with pytest.raises(RunInvalid, match="exactly one stock arm"):
+    with pytest.raises(RunInvalid, match="no baseline at all"):
         pk.reduce_width(samples, roles, resolution_floor=0.05)
 
 

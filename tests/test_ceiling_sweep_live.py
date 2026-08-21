@@ -223,3 +223,100 @@ def test_one_shape_at_one_width_reduces_through_clause_eight():
     assert entry.ratio > 0
     assert entry.numerator_high > 0
     assert entry.denominator_low > 0
+
+
+# --- candidate L's bench, Amendment 12 -------------------------------------
+# The pinned model's own head is (151936, 2560) and an arm at the long width
+# runs for about two seconds. These tests check WHAT the arm computes, which
+# does not depend on the size, so they run at a proxy vocabulary.
+PROXY = dict(hidden=256, vocab=2048, supervised=64)
+
+
+@requires_metal
+def test_the_floor_arm_runs_on_the_supervised_rows_and_not_all_of_them():
+    """Section 4.2's floor is "the same stock operations timed on only the
+    SUPERVISED rows", and the row count is the floor's whole content."""
+    import mlx.core as mx
+
+    operands = cs._loss_operands("short", **PROXY)
+    assert operands["rows"].shape == (PROXY["supervised"], PROXY["hidden"])
+    assert operands["weight"].shape == (PROXY["vocab"], PROXY["hidden"])
+    grads = cs._loss_arm(operands, PROXY["vocab"], role=cs.pk.REFERENCE)()
+    mx.eval(grads)
+    assert grads[0].shape == (PROXY["supervised"], PROXY["hidden"])
+
+
+@requires_metal
+def test_the_knob_arm_cuts_the_vocabulary_and_the_extra_matmul_with_it():
+    """Amendment 12 clause 50. The extra matmul at S5's backward shape runs at
+    the DIALLED vocabulary, which moves the credited slope by 1.6 to 1.9."""
+    import mlx.core as mx
+
+    operands = cs._loss_operands("short", **PROXY)
+    kept = PROXY["vocab"] // 4
+    grads = cs._loss_arm(operands, kept, role=cs.pk.KNOB)()
+    mx.eval(grads)
+    # The gradient w.r.t. the rows keeps its shape, and the extra matmul comes
+    # back at the hidden width: both are hidden-sized whatever the dial does,
+    # so the shapes alone cannot show the cut. The COST is what moves, and the
+    # cut is visible in the primitive the graph dispatched.
+    assert grads[0].shape == (PROXY["supervised"], PROXY["hidden"])
+    assert grads[-1].shape == (PROXY["supervised"], PROXY["hidden"])
+
+    dialled = min(cs._time(cs._loss_arm(operands, kept, role=cs.pk.KNOB),
+                           warmups=3, rounds=7))
+    full = min(cs._time(
+        cs._loss_arm(operands, PROXY["vocab"], role=cs.pk.KNOB),
+        warmups=3, rounds=7))
+    assert dialled < full, (
+        f"the arm at a quarter of the vocabulary read {dialled:.4f} ms and "
+        f"the arm at all of it {full:.4f} ms; a dial that does nothing "
+        f"produces a clean fit through a horizontal line")
+
+
+@requires_metal
+def test_the_scaffold_and_the_reference_compute_the_same_thing():
+    """Clause 5's scaffold applies the dial and discards it, so it must agree
+    with the no-dial reference. Their difference is the dial's own machinery,
+    which is the one quantity clause 21 caps at 3R."""
+    import mlx.core as mx
+
+    operands = cs._loss_operands("short", **PROXY)
+    reference = cs._loss_arm(operands, PROXY["vocab"], role=cs.pk.REFERENCE)()
+    mx.eval(reference)
+    for phi in cs.pk.PHIS:
+        kept = max(1, int(round(phi * PROXY["vocab"])))
+        scaffolded = cs._loss_arm(operands, kept, role=cs.pk.SCAFFOLD)()
+        mx.eval(scaffolded)
+        assert mx.array_equal(reference[0], scaffolded[0]), (
+            f"the scaffold at phi={phi} computes a different gradient from "
+            f"its own reference, so their difference is not the scaffold")
+
+
+@requires_metal
+def test_the_bench_times_nine_arms_and_reduces_through_the_shared_reducer():
+    """The whole path at one width: nine arms timed, reduced by the same code
+    the step's arms go through, with `family=FLOOR` so the reading carries a
+    floor slope and refuses a share."""
+    context = {"supervised": PROXY["supervised"], "supervised_of": 128}
+    samples, roles = cs.run_loss_bench(
+        context, width="short", hidden=PROXY["hidden"], vocab=PROXY["vocab"],
+        rounds=3, warmups=2)
+    assert len(samples) == 9
+    assert sorted(samples) == sorted(
+        arm.label for arm in cs.loss_manifest("short"))
+    reading = cs.pk.reduce_width(samples, roles, resolution_floor=0.001,
+                                 rounds=3, family=cs.pk.FLOOR)["L"]
+    assert reading.family == cs.pk.FLOOR
+    assert reading.stock_median is None
+    assert reading.reference_median is not None
+    assert reading.residue == 0.0
+    with pytest.raises(RunInvalid, match="no share"):
+        reading.share
+
+
+@requires_metal
+def test_a_bench_run_without_a_supervised_count_refuses_before_timing():
+    with pytest.raises(RunInvalid, match="no supervised count"):
+        cs.run_loss_bench({}, width="short", hidden=PROXY["hidden"],
+                          vocab=PROXY["vocab"], rounds=2, warmups=1)

@@ -120,6 +120,16 @@ RETUNE = "retune"
 REWRITE = "rewrite"
 KINDS = (RETUNE, REWRITE)
 
+# Which half of the ratio a reading is. A SHARE reading is the numerator's,
+# `A = b + c`, and a rewrite's needs an ablated arm to give it `c`. A FLOOR
+# reading is the denominator's, `F = d + c_floor`, and clause 19 registers
+# candidate L's `c_floor` as ZERO because eliminating the full logits tensor is
+# precisely what that candidate is. Candidate L's is the only floor of a
+# rewrite that exists, since clause 27 gives candidate A no floor at all; an
+# amendment that gave one a MEASURED `c_floor` would have to revisit this.
+SHARE, FLOOR = "share", "floor"
+FAMILIES = (SHARE, FLOOR)
+
 
 @dataclass(frozen=True)
 class Fit:
@@ -194,11 +204,12 @@ class KnobReading:
 
     candidate: str
     kind: str
-    stock_median: float                    # T, stock with NO seam installed
+    stock_median: float | None             # T, stock with NO seam installed
     per_round: tuple[Fit, ...]             # one fit per round
     pooled: Fit                            # one fit over the arm medians
     scaffold: Fit                          # the scaffold-only arm's own line
     scaffold_offset: float                 # phi=1 arm minus its own baseline
+    family: str = SHARE                    # which half of clause 18's ratio
     ablated_median: float | None = None    # rewrite candidates only
     reference_median: float | None = None  # this candidate's OWN no-dial arm
     resolution_floor: float | None = None  # R, from the instrument-only stage
@@ -211,12 +222,22 @@ class KnobReading:
                 f"candidate {self.candidate} is a {self.kind!r}, which is "
                 f"neither of the two kinds section 4.2's names allow: "
                 f"{KINDS}")
-        if self.kind == REWRITE and self.ablated_median is None:
+        if self.family not in FAMILIES:
+            raise RunInvalid(
+                f"candidate {self.candidate}'s reading is a {self.family!r}, "
+                f"which is neither half of clause 18's ratio: {FAMILIES}")
+        if self.family == FLOOR and self.ablated_median is not None:
+            raise RunInvalid(
+                f"candidate {self.candidate}'s FLOOR measured an ablated arm, "
+                f"and clause 19 registers its `c_floor` as zero, so nothing "
+                f"may read a residue here")
+        if (self.family == SHARE and self.kind == REWRITE
+                and self.ablated_median is None):
             raise RunInvalid(
                 f"candidate {self.candidate} is a rewrite, so its credit is "
                 f"its slope PLUS its residue, and no ablated arm was "
                 f"measured to give the residue")
-        if self.kind == RETUNE and self.ablated_median is not None:
+        if self.family == SHARE and self.kind == RETUNE and self.ablated_median is not None:
             raise RunInvalid(
                 f"candidate {self.candidate} is a retune, so its credit is "
                 f"its slope alone, and an ablated arm was measured that "
@@ -235,7 +256,7 @@ class KnobReading:
         residue is smaller than the machine can resolve, because a number
         below the resolution floor is not a measurement.
         """
-        if self.kind == RETUNE:
+        if self.kind == RETUNE or self.family == FLOOR:
             return 0.0
         raw = self.raw_residue
         if self.resolution_floor is not None and abs(raw) < self.resolution_floor:
@@ -245,7 +266,7 @@ class KnobReading:
     @property
     def raw_residue(self) -> float:
         """The residue before clause 18's clamp, which the record retains."""
-        if self.kind == RETUNE:
+        if self.kind == RETUNE or self.family == FLOOR:
             return 0.0
         return self.pooled.intercept - self.ablated_median
 
@@ -307,7 +328,18 @@ class KnobReading:
 
     @property
     def share(self) -> float:
-        """`f`, the median reduction, per clause 18's statistics table."""
+        """`f`, the median reduction, per clause 18's statistics table.
+
+        Refuses where there is no `T`. Amendment 12 clause 49 puts candidate
+        L's floor on a bench with no stock arm, because clause 19 already puts
+        its SHARE in the step: the bench measures `d` alone. A share divided by
+        a `T` that bench never measured would be a fraction of the wrong step.
+        """
+        if self.stock_median is None:
+            raise RunInvalid(
+                f"candidate {self.candidate} was reduced without a stock arm, "
+                f"so there is no step total to be a fraction OF; this reading "
+                f"carries a floor slope and no share")
         return self.attributed / self.stock_median
 
     def blockers(self) -> list[str]:
@@ -729,7 +761,8 @@ def kind_of(candidate: str) -> str:
 def reduce_width(samples: Mapping[str, Sequence[float]],
                  roles: Sequence[ArmRole], *,
                  resolution_floor: float,
-                 rounds: int = ROUNDS) -> dict[str, KnobReading]:
+                 rounds: int = ROUNDS,
+                 family: str = SHARE) -> dict[str, KnobReading]:
     """One width's raw arm samples, reduced to one reading per candidate.
 
     Pure: it takes times and returns readings, so every rule downstream of it
@@ -774,12 +807,30 @@ def reduce_width(samples: Mapping[str, Sequence[float]],
             f"the recording holds samples for {extra}, which the manifest "
             f"does not name; an arm nobody registered cannot enter a fit")
 
+    # A width that measures SHARES needs exactly one stock arm, because a
+    # share is a fraction of stock's own time. A width that measures a FLOOR
+    # alone needs none: Amendment 12 clause 49 puts candidate L's floor on a
+    # bench whose share was already measured in the step, and clause 46 gives
+    # that bench nine arms with no stock among them. What is not allowed is a
+    # width with several, or a stock-less width whose families have no
+    # reference arm to take clause 5's offset against.
     stock = [r for r in roles if r.role == STOCK]
-    if len(stock) != 1:
+    if len(stock) > 1:
         raise RunInvalid(
-            f"a width needs exactly one stock arm and this one names "
-            f"{len(stock)}; the share's denominator is stock's own time")
-    stock_median = statistics.median(samples[stock[0].label])
+            f"a width names {len(stock)} stock arms; the share's denominator "
+            f"is stock's own time and several of them are several answers")
+    stock_median = (statistics.median(samples[stock[0].label]) if stock
+                    else None)
+    if not stock:
+        without = sorted({r.candidate for r in roles
+                          if r.role in (KNOB, SCAFFOLD)}
+                         - {r.candidate for r in roles
+                            if r.role == REFERENCE})
+        if without:
+            raise RunInvalid(
+                f"this width has no stock arm and {without} carry no "
+                f"reference arm either, so clause 5's scaffold offset has no "
+                f"baseline at all")
 
     by_candidate: dict[str, dict[str, list[ArmRole]]] = {}
     for role in roles:
@@ -828,6 +879,7 @@ def reduce_width(samples: Mapping[str, Sequence[float]],
         readings[candidate] = KnobReading(
             candidate=candidate,
             kind=kind_of(candidate),
+            family=family,
             stock_median=stock_median,
             per_round=tuple(per_round_fits(samples, knob_phis, rounds)),
             pooled=pooled_fit(samples, knob_phis),
