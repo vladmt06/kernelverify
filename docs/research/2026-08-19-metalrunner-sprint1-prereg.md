@@ -3044,3 +3044,70 @@ What is new is not a third terminal but a recording that refuses for a reason no
 | Amendment 13's ledger, its final row | CORRECTED. The exploratory run refuses, by construction and on purpose, so "neither binds nor refuses" is false; what is new is a refusal no measurement can clear, not a third terminal |
 | 52, its three withdrawals and its binding pass | UNCHANGED. Clause 65 adds the figures it did not name and revises none of the four it did |
 | 57, 58, 59, 60, 61, 62, 63 and 64 | UNCHANGED. Nothing here reaches a rule, a rate, a schedule or a branch |
+
+## Amendment 17, 2026-08-22: the structural pass cannot run at the long width, and is scoped to the short one
+
+Amendment 5 clause 3 retains the marks as a structural check on counts and gradient identity and names no width.
+The harness runs it once per width, because it sits inside the per-width loop, and at the long width it does not fit on this machine.
+
+This was found by the exploratory run failing rather than by reading, and the failure was read wrongly twice before it was measured.
+The run died inside the structural pass with a Metal out-of-memory, and the first two readings blamed the machine being busy and then the number of marks; both were wrong, and the measurement below is what settled it.
+
+### Clause 67. The structural pass runs at the short width only
+
+Measured 2026-08-22 at the pinned 4B, batch 4, on the machine this sprint measures on: 36 GiB of unified memory and a 28.08 GB wired limit.
+
+| Width | Batch shape | Plain backward | Marked structural pass |
+|---|---|---|---|
+| short | (4, 65) | 3.730 GB | 9.090 GB |
+| long | (4, 1057) | 24.364 GB | REFUSED by the device at 38.00 GB |
+
+The long-width marked pass asks for more than the machine physically holds, so no quieter window and no smaller competing process makes it run.
+Each figure was taken in its own fresh process, because a single process measuring several widths carries the allocator's cache from one into the next.
+
+**The cost is the fence and not the mark count, which is why no cheaper arrangement of the same check exists.**
+A mark evals, and an eval inside a lazy gradient trace forces the forward to be held rather than streamed, so the first mark pays for the whole retention and later marks add almost nothing.
+Measured at the short width, one region at a time against all four:
+
+| Marked region | Marks per step | Peak | Excess over plain |
+|---|---|---|---|
+| cross-entropy | 4 | 6.139 GB | +2.409 GB |
+| head-matmul | 4 | 6.140 GB | +2.410 GB |
+| attn-core | 104 | 9.090 GB | +5.361 GB |
+| qmm | 722 | 9.064 GB | +5.334 GB |
+| all four | 834 | 9.090 GB | +5.361 GB |
+
+Four marks cost 2.41 GB and 722 cost 5.33 GB, and all four regions together cost exactly what the worst single region costs.
+So splitting the installation across passes saves nothing, and the amount retained is set by how early in the forward the first fence lands rather than by how many fences follow it.
+
+**Registered: the structural pass is taken at the short width alone, and the long width takes no structural check.**
+
+The two claims the pass makes are properties of how the model is wired and not of how long its input is.
+The counts are `depth` attention calls forward and `adapted` backward, `7 * depth` projection calls forward and `7 * adapted - 3` backward, and one call per step in each direction for the head and the cross-entropy.
+On the registered arrangement of 36 blocks with 16 adapted that is 36 and 16, 252 and 109, and 1 and 1.
+Every one is a function of the layer count and the adapted count, and the rule that computes them takes no width argument at all, which is a stronger statement than any reading of the table: a quantity a function cannot receive is a quantity its output cannot depend on.
+The gradient identity compares a marked pass against a plain one on the same weights and the same batch, and a mark that is an identity at 65 tokens is an identity at 1057 for the same reason.
+
+**What this gives up, stated rather than absorbed.**
+A seam that fires at one width and not at another would now go uncaught, and this is not merely hypothetical: at the long width mlx-lm passes a mask array where the short width can pass a string, so the two widths do not provably enter attention by the same path.
+The check that would have caught it cannot be run, so what replaces it is a statement of the gap and not a weaker version of the check.
+The count asymmetry this pass exists to verify has caught a seam that never fired and a test that left gradient checkpointing installed, and both faults were width-independent, which is the evidence that the short width is where this check earns its keep.
+
+### Clause 68. A width with no structural check says so in the record
+
+An absent check and a passed check must never read alike, and clause 67 creates the first place in this profile where a width carries no structural entry at all.
+
+Registered: the recording carries a structural entry for every width it measured, and a width the structural pass did not cover carries a typed absence naming clause 67 as its reason, in the same way Amendment 7 clause 37 registers candidate A's typed absence at the short width.
+A width whose structural entry is simply missing is INCOMPLETE, not passed.
+
+This is the same rule Amendment 8 was written to enforce elsewhere, and it is restated here rather than inherited, because the reason for the absence is new and a reader tracing a missing entry must land on the clause that removed it.
+
+### Ledger: what Amendment 17 does to committed text
+
+| Clause | What happens to it |
+|---|---|
+| Amendment 5 clause 3 | SCOPED, not withdrawn. The marks remain a structural check on counts and gradient identity and remain barred from timing; what changes is that the check is taken at one width where the harness took it at both |
+| Amendment 5 clause 17 | UNCHANGED in rule and OVERTAKEN in fact. It sources the memory budget from the peak measured with knobs installed, and clause 67's table is the first such measurement at the 4B; the budget itself is still step 12's to set |
+| Amendment 7 clause 37, its typed absences | EXTENDED by clause 68 to a second kind of absence, and its rule that a typed absence is never incompleteness is untouched |
+| Amendment 13 clause 57 and its exploratory pass | UNCHANGED as a design. Its three passes could not have completed under the committed scope, which is a fact about this machine and not a fault in the clause |
+| Every price, schedule, rate and demand in this document | UNCHANGED. Nothing here is a timing measurement, and the structural pass has never been timed or costed |
