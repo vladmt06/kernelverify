@@ -2959,3 +2959,88 @@ The floor-dependent gates return in full at the binding run, where a measured `R
 | 37, its fresh set of 19 | UNCHANGED. Nothing here reaches the rate-bearing count, and the simulation holds the fresh set at five rounds throughout |
 | 33, its `alpha` and its estimator | UNCHANGED. The measured exceedance is 0.0471 to 0.0501 across every pilot clause 61 admits |
 | 46, its outstanding reserve for idle refusals | STILL OUTSTANDING and named a third time. Clause 63 moves a pass from 3.23 to 5.09 hours and registers no reserve, and step 10 still cannot be armed until one exists |
+
+## Amendment 16, 2026-08-21: the prices the withdrawal chain left standing, and three ledger rows that mislabel themselves
+
+Amendment 13 clause 52 withdrew three figures and a binding pass because the model that produced them read 0.4 and 4.0 seconds against a measured 0.789 and 14.70.
+It did not withdraw the other figures that model produced, and it labelled its own changes to committed text in terms this document reserves for something weaker.
+
+Both are process faults rather than arithmetic ones, and both were found by an independent pass over Amendment 13's committed text rather than by the nine commits of self-attack that preceded it.
+That is recorded here because it is the same lesson twice: a document that corrects a total and leaves its components is a document whose reader cannot tell which numbers still hold.
+
+### Clause 65. Every price the withdrawn model produced is withdrawn by name
+
+Clause 52 says it handles every figure clause 46 published and then withdraws clause 46's three subtotals and clause 45's binding pass.
+Seven further prices in this document are outputs of the same model or of the bench arm prices clause 52 corrected, and none of them was named.
+
+Reproduced by execution 2026-08-21.
+Every one of them reproduces EXACTLY on the model it was written against, which is the check that the arithmetic was never wrong and only its input moved:
+
+| Quantity | As committed | At clause 52's measured arm |
+|---|---|---|
+| Clause 37, one null block over 18 arms | 792.000 s | 2788.182 s |
+| Clause 37, the calibration over 39 blocks | 8.580 h | 30.205 h |
+| Clause 37, the binding pass over 18 short and 27 long arms | 576.000 s | 2055.627 s |
+| Amendment 8, the binding pass over 26 short and 35 long arms | 752.000 s | 2675.223 s |
+| Clause 46, the step context over 27 arms | 12.870 h | 45.308 h |
+| Clause 46, one bench block over 9 arms | 295.200 s | 196.173 s |
+| Clause 46, the bench context over 39 blocks | 3.198 h | 2.125 h |
+| Clause 46, its ratio against clause 37's 8.58 | 1.873 | 1.570 |
+
+**All eight are WITHDRAWN as prices and stand only as the arithmetic that produced them.**
+
+Two of them are worth reading rather than skimming.
+
+The bench context is the only figure in this document that moves DOWNWARD, from 3.198 hours to 2.125, and the reason is that clause 52's own correction to candidate L's bench arms was favourable: it priced them at the bands' median supervised fractions where the registered construction takes the first batch's actual count.
+A withdrawal chain that only ever raised numbers would have been easy to spot; one that lowers a component while raising the total is exactly the kind that survives.
+
+The ratio is worse than a stale number.
+Clause 46 reads "the subtotal is 1.87 times Amendment 7's 8.58 hours, and the increase is arms that were always required rather than a new demand", and the sentence is an ARGUMENT about where an increase came from.
+At the measured arm the same comparison is 1.570, because the two sides of the ratio carry different arm mixes and the bench correction moves one of them.
+The argument survives and the number does not, and the number was the evidence for the argument.
+
+**What is NOT withdrawn, so the boundary is stated rather than inferred.**
+Every arm COUNT in the same tables stands: 18, 27, 9, 26, 35 and 44 are counts of arms and no measurement moves them.
+Clause 46's 0.247 hours of build and clause 45's 950 seconds are already withdrawn by clause 52's own table and are not withdrawn twice.
+Clause 37's pilot of 20, its fresh set of 19 and its `alpha` are untouched: they are a schedule and a rate, not prices.
+
+### Clause 66. Three ledger rows in Amendment 13 mislabel what they did
+
+This document's discipline is that an amendment may not reverse committed text without saying, in its own ledger row, that it is a reversal.
+Three of Amendment 13's seventeen rows fail that test, and one of the three is false in either reading.
+
+**Clause 33's `rounds_per_block` was REVERSED, not CHANGED.**
+Clause 33 registers a schema in which `rounds_per_block` is "the round count inside one block", one scalar for the addendum.
+Clause 54 makes it a mapping keyed as `contexts` is, and Amendment 13's ledger records that as "CHANGED in ONE field".
+An addendum that was valid under clause 33 is not valid under clause 54, which is what a reversal means here; the field count is true and is not the test.
+Registered: that row reads REVERSED, and clause 54's substance is untouched.
+
+**Clause 37's pilot was REVERSED, not REDUCED.**
+Clause 37 registers a pilot of 20 blocks and clause 57 runs 5 at two rounds in its lean branch.
+"REDUCED" describes the direction accurately and does not say that a committed count no longer holds, which is the thing the ledger exists to make visible.
+Registered: that row reads REVERSED in the lean branch, and clause 57's substance and Amendment 15 clause 61's scoping are untouched.
+
+**The exploratory run is in the refusal class, and the ledger says it is in neither.**
+Amendment 13's last ledger row reads: "Clause 57 is a new registration and reverses nothing: every prior run either binds or refuses, and a pass that reads a margin to size a schedule is neither."
+Clause 57's own body says the recording "lands on the REFUSED path", and the harness gives an exploratory recording a blocker no gate clears and exits non-zero.
+So the run REFUSES, by construction and on purpose, and the ledger's "is neither" contradicts the clause it is summarising and the code that implements it.
+
+Registered: clause 57 registers a new KIND of run inside the existing refusal class and reverses nothing, which is the true statement the row was reaching for.
+What is new is not a third terminal but a recording that refuses for a reason no measurement can clear, where every prior refusal named something a quieter machine or a better fit could have fixed.
+
+### Ledger: what Amendment 16 does to committed text
+
+| Clause | What happens to it |
+|---|---|
+| 37, its price table | WITHDRAWN as prices, in full. Its 792-second block, its 8.58-hour calibration and its 576-second binding pass are outputs of the model clause 52 withdrew, and each reproduces exactly on that model |
+| 37, its pilot, fresh set and `alpha` | UNCHANGED. A schedule and a rate are not prices, and Amendment 15 clause 61 already carries what moved |
+| Amendment 8, its 752-second binding pass | WITHDRAWN as a price. Its arm counts of 26 and 35 stand and are untouched |
+| 46, its step and bench subtotals | WITHDRAWN as prices, which clause 52 did for their sum and not for them. The bench context is the one figure in this document that moves downward, because clause 52's correction to candidate L's arms was favourable |
+| 46, its 1.87 ratio | WITHDRAWN, and it is the only withdrawal here that costs an argument as well as a number: the ratio was the evidence that the increase came from arms rather than from a new demand, and at the measured arm it is 1.570 |
+| 46, its arm counts and its 0.247-hour build | UNCHANGED and already withdrawn respectively. A count is not a price, and clause 52 withdrew the build in its own table |
+| 12, its ledger row for clause 46 | CORRECTED in one clause. It records clause 46's "0.184 and 3.096 second arm prices and its 3.20 hours" as untouched; clause 52 corrected the arm prices and clause 65 withdraws the hours that were built from them |
+| Amendment 13's ledger, its `rounds_per_block` row | RELABELLED to REVERSED. An addendum valid under clause 33 is not valid under clause 54, and the field count was never the test |
+| Amendment 13's ledger, its pilot row | RELABELLED to REVERSED in the lean branch. The direction it named was accurate and the fact that a committed count no longer holds was not stated |
+| Amendment 13's ledger, its final row | CORRECTED. The exploratory run refuses, by construction and on purpose, so "neither binds nor refuses" is false; what is new is a refusal no measurement can clear, not a third terminal |
+| 52, its three withdrawals and its binding pass | UNCHANGED. Clause 65 adds the figures it did not name and revises none of the four it did |
+| 57, 58, 59, 60, 61, 62, 63 and 64 | UNCHANGED. Nothing here reaches a rule, a rate, a schedule or a branch |
