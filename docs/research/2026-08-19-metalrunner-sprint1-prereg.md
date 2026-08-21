@@ -2293,3 +2293,114 @@ A different construction, differentiating a `sum()`, disagreed by up to a factor
 | Amendment 8, its short-width manifest | CORRECTED. "Every cell measured at the short width carries the same 26 arms" becomes 35, by candidate Q's nine floor arms. That every such cell carries the SAME arms, and that none carries candidate A, is unchanged |
 | Amendment 8's binding pass | CORRECTED from 752 s to 950 s, over 35 arms at the short width and 44 at the long |
 | Nothing in the document | PRICES MEMORY. Clause 45 registers one dense floor weight per shape rather than per call site, because per call site needs 31.37 GiB of weights against 33.53 GiB of unified memory. This is a new registration and reverses nothing |
+
+## Amendment 11, 2026-08-21: clause 44's cotangent claim is withdrawn, and what a backward arm actually is
+
+Building the kill bench against Amendment 10 found that clause 44's second half rests on a measurement artefact.
+The artefact is mine and it is the same KIND of artefact clause 44 itself was written to catch, which is why it is corrected in writing rather than quietly fixed in the code.
+Amendment 10 was committed less than a day before this one; that is the cost of registering a construction before building it, and it is cheaper than the alternative.
+
+### Clause 47. The cotangent moves nothing, and clause 44's factor of two hundred was a subtraction
+
+Clause 44 states that "a backward timed by differentiating a `sum()` is fed a BROADCAST scalar one, which MLX exploits", and reports that "at shape S6 it reads 0.02 ms against 4.19 ms, which is a factor of about two hundred".
+That comparison is WITHDRAWN.
+It compared a SUBTRACTED quantity against an UNSUBTRACTED one: the 0.02 is `time(gradient) - time(forward)` and the 4.19 is `time(gradient)` with nothing subtracted.
+
+Measured the same way on both sides, 2026-08-21, at all six registered shapes and both registered widths:
+
+| | `grad` of a `sum()` | `vjp` on a dense cotangent | Apart by |
+|---|---|---|---|
+| S6, long | 4.271 ms | 4.222 ms | 1.2 percent |
+| S5, long | 2343.779 ms | 2333.914 ms | 0.4 percent |
+| S1, short | 1.255 ms | 1.228 ms | 2.1 percent |
+| Worst of the twelve, two runs | | | **3.7 and 8.5 percent** |
+
+The worst case is quoted from two runs rather than one because it is the run-to-run figure and not a stable constant.
+What reproduces is the RELATION: the two constructions agree to within about a tenth at every shape and width, against a claimed factor of two hundred.
+So the cotangent is not what moved the number and nothing in this document should say it was.
+The arithmetic of the withdrawn comparison, reproduced at S6 and the long width: the forward reads 4.237, the whole gradient 4.273, and the gradient minus the forward 0.036.
+At that shape the forward and the backward cost about the same, so their difference is near zero, and a near-zero difference set beside an un-subtracted 4.19 looks like a factor of two hundred and is a units error.
+
+**What SURVIVES of clause 44's registration, and it is the registration itself.**
+Every backward arm is still driven by an explicit dense cotangent built to the forward output's own shape, and the bench still refuses one whose shape is not that.
+A real loss produces a dense cotangent, so the dense construction remains the faithful one and remains registered.
+What changes is its standing: it is a construction chosen because it is faithful, not a correction of a two-hundred-fold error, and clause 44's sentence claiming otherwise is void.
+
+### Clause 48. A backward arm is the vjp's gradients evaluated ALONE, and that is not obvious
+
+The withdrawn comparison exposed a question clause 8 never answered and clause 44 answered by accident.
+Clause 8 reads a "cost per call" in each direction.
+A forward call's cost is a forward.
+A backward call's cost is a backward, and there are three constructions that all claim to be one.
+
+Registered here: **the backward arm is `mx.vjp(f, [x], [cotangent])[1]` evaluated on its own.**
+Not the gradient minus a separately timed forward, and not a hand-written call to the backward primitive.
+
+**It is registered because it is what MLX makes true, and that was measured rather than assumed.**
+Asked only for the gradients, MLX's lazy graph never builds the forward at all: read off the built graph 2026-08-21, the gradients of a quantized matmul hold exactly ONE primitive, a `QuantizedMatmul`, and no forward.
+So the gradients evaluated alone ARE the backward, and subtracting a forward from them over-subtracts.
+
+| Shape, width | Forward | `vjp` gradients alone | `vjp` value AND gradients | Standalone backward primitive |
+|---|---|---|---|---|
+| S6, long | 4.228 | 4.230 | 8.214 | 4.222 |
+| S3, long | 37.939 | 37.857 | 75.463 | 37.864 |
+| S5, short | 35.843 | 132.565 | 162.848 | 124.324 |
+
+Three things are visible in that table and each is a check on the others.
+The gradients alone agree with a standalone call to the backward primitive to within 6.6 percent at worst and under 2 percent in a second run, which is the corroboration.
+The value AND gradients together sum to the forward plus the backward, 8.214 against 8.450 and 75.463 against 75.803 and 162.848 against 160.167, which is what says the forward is genuinely absent from the first column.
+And at S6 and S3 the forward and the backward cost nearly the same, which is the coincidence that made the withdrawn subtraction look like a discovery.
+
+**The construction moves a shape's ratio by up to 54 percent and the registered one is the smallest of the three, which is stated because it is not the flattering direction.**
+Measured 2026-08-21 through clause 8's own ratio of summed costs at the registered counts:
+
+| Width | Construction | S5's ratio, two runs |
+|---|---|---|
+| short | gradients alone, REGISTERED | 2.377 and 2.225 |
+| short | gradient minus its own forward | 3.564 and 3.282 |
+| short | standalone backward primitive | 2.316 and 2.243 |
+| long | gradients alone, REGISTERED | 2.317 and 2.513 |
+| long | gradient minus its own forward | 3.300 and 3.704 |
+| long | standalone backward primitive | 2.319 and 2.497 |
+
+The absolute figures move between runs and the ORDERING does not: the subtracting construction reads about half again as high at every width in every run, and the other two agree with each other.
+
+A smaller ratio is LESS headroom, and less headroom brings a shape closer to counting toward the kill, so the registered construction is the one that makes killing candidate Q easier at the only shape that has any headroom at all.
+That is the conservative direction for a rule whose effect is to remove a candidate only under the demotion clause 36 already took: with the kill REPORTED, an easier kill costs candidate Q nothing at any terminal.
+It is named here so that a later reader does not have to work out which way the choice leant.
+
+**A per-round backward that comes out negative is a fault and not a small number.**
+The registered construction cannot produce one by subtraction, because nothing is subtracted.
+It can still produce one through a clock excursion, and the bench records any per-round sample at or below zero, refuses to build a ratio from that round, and reports how many rounds it dropped.
+A round silently dropped is a round that changes what "the largest per-round ratio" was taken over.
+
+### The incidental reading, now reproduced under all three constructions
+
+Amendment 10 recorded that stock's quantized matmul sat within 1.07 of the dense fp16 ceiling at five of six shapes in both directions at both widths, and that clause 8 would therefore REPORT candidate Q killed.
+That reading was taken under one construction.
+It has now been taken under all three, 2026-08-21, and the verdict does not move:
+
+| Width | Construction | Shapes at the ceiling | Verdict |
+|---|---|---|---|
+| short | gradients alone | 5 of 6 | killed |
+| short | gradient minus its own forward | 5 of 6 | killed |
+| short | standalone backward primitive | 5 of 6 | killed |
+| long | gradients alone | 5 of 6 | killed |
+| long | gradient minus its own forward | 5 of 6 | killed |
+| long | standalone backward primitive | 5 of 6 | killed |
+
+Every construction puts S5 and only S5 outside the ceiling, at ratios between 2.2 and 3.8 across two runs, and every other shape between 0.99 and 1.07.
+This still binds NOTHING, for every reason Amendment 10 gives and one more: it is now an exploratory pilot that has been seen three times rather than once, and seeing a result again is not the same as measuring it independently.
+Amendment 10's freeze condition stands unchanged and unmet.
+
+### Ledger: what Amendment 11 does to committed text
+
+| Clause | What happens to it |
+|---|---|
+| 44, its cotangent measurement | WITHDRAWN. Its 1925.36 against 2512.74, its 0.02 against 4.19 and its "factor of about two hundred" all compared a subtracted quantity against an unsubtracted one. Measured the same way on both sides the two constructions agree to within 3.7 percent across all six shapes and both widths |
+| 44, its cotangent REGISTRATION | UNCHANGED and re-grounded. A dense cotangent built to the forward output's own shape is still what every backward arm is driven by and a broadcast one is still refused, because a real loss produces a dense cotangent. Only its stated justification is void |
+| 44, its 48 arms | UNCHANGED. A stock forward, a stock gradient, a dense forward and a dense gradient at each of six shapes and two widths, which is what clause 48's construction reads |
+| 44, everything else | UNCHANGED. Its withdrawal of the impossibility claim, its in-step construction, its reasons for choosing the bench, its correction of the block-group formula and its retirement of clause 36's resolution contexts are untouched and rest on nothing this amendment moves |
+| 8, its "cost per call" | COMPLETED rather than corrected. Clause 8 never said which of three constructions a backward call's cost is, and clause 48 registers the gradients evaluated alone, which is what MLX's lazy graph makes true and what a standalone call to the backward primitive corroborates to within 6.6 percent at worst |
+| 10's incidental reading | UNCHANGED in verdict and STRENGTHENED in coverage, and still binding nothing. Five of six at the ceiling at both widths under all three constructions across two runs, with S5 the only shape outside it, at between 2.2 and 3.8 |
+| 10's freeze condition | UNCHANGED and still unmet. Three sightings of a pilot are not an independent measurement, and the operand generator, its seed, the implementation hashes and the reduction are still to be frozen before the next arm runs |
