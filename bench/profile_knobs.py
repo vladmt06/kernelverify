@@ -98,6 +98,7 @@ SCAFFOLD_SLOPE_LIMIT = 0.10       # |scaffold slope| <= this * |knob slope|
 R_SQUARED_FLOOR = 0.99
 RESIDUAL_LIMIT = 0.05             # |largest residual| <= this * |slope|
 SCAFFOLD_OFFSET_R_MULTIPLE = 3.0  # |offset| <= this * R
+EXCURSION_R_MULTIPLE = 10.0       # |slope| * span >= this * R, clause 26
 
 # Clause 15. Two attention dials whose scaffold prices differ by less than
 # this are a tie, and a tie goes to the more complete dial. The statistic is
@@ -192,6 +193,8 @@ class KnobReading:
     scaffold_offset: float                 # phi=1 arm minus stock
     ablated_median: float | None = None    # rewrite candidates only
     resolution_floor: float | None = None  # R, from the instrument-only stage
+    span: float | None = None              # highest minus lowest ACTUAL phi
+    scaffold_range: float | None = None    # the scaffold's own median range
 
     def __post_init__(self):
         if self.kind not in KINDS:
@@ -225,10 +228,68 @@ class KnobReading:
         """
         if self.kind == RETUNE:
             return 0.0
-        raw = self.pooled.intercept - self.ablated_median
+        raw = self.raw_residue
         if self.resolution_floor is not None and abs(raw) < self.resolution_floor:
             return 0.0
         return raw
+
+    @property
+    def raw_residue(self) -> float:
+        """The residue before clause 18's clamp, which the record retains."""
+        if self.kind == RETUNE:
+            return 0.0
+        return self.pooled.intercept - self.ablated_median
+
+    @property
+    def residue_is_a_fault(self) -> bool:
+        """Clause 33: a residue below `-R` refuses the profile.
+
+        Committed clause 18 says such a residue "REJECTS that candidate's
+        reading" and clause 27 puts impossible measurements in the refusal
+        class rather than among the typed absences; clause 33 settles the two
+        in favour of a FAULT. It says the step ran SLOWER with the operation
+        removed than the fit predicts without its scaling part, which is not
+        a measurement that can be true, so no rule carries it.
+        """
+        if self.kind == RETUNE or self.resolution_floor is None:
+            return False
+        return self.raw_residue < -self.resolution_floor
+
+    @property
+    def scaffold_case(self) -> str:
+        """Clause 26's three cases, because a fit is a trend not a movement.
+
+        An arm whose fitted slope is zero can still have moved: medians of
+        100, 110, 110, 100 fit a slope of exactly zero while the arm moved by
+        ten. So the RANGE decides first, and it is taken over the arm medians
+        rather than the raw rounds, which is the same reduction the pooled
+        fit uses.
+
+        Clause 26 words its third case as "neither of the other two
+        conditions holds", and read literally that leaves a gap where the
+        excursion clears `R` but the shape limits fail. The clause also says
+        the three cases are exhaustive, so the only consistent reading is
+        that the third case is everything at or above `R` that the second
+        does not take, and that is what runs here.
+        """
+        if self.resolution_floor is None or self.scaffold_range is None:
+            return "unjudged"
+        if self.scaffold_range < self.resolution_floor:
+            return "clamped"
+        if self.span is None:
+            return "unjudged"
+        excursion = abs(self.scaffold.slope) * self.span
+        shaped = (self.scaffold.r_squared >= R_SQUARED_FLOOR
+                  and abs(self.scaffold.max_residual)
+                  <= RESIDUAL_LIMIT * abs(self.scaffold.slope))
+        if excursion >= self.resolution_floor and shaped:
+            return "fitted"
+        return "unreadable"
+
+    @property
+    def effective_scaffold_slope(self) -> float:
+        """Zero where clause 26 clamps, the fitted slope where it stands."""
+        return 0.0 if self.scaffold_case == "clamped" else self.scaffold.slope
 
     @property
     def attributed(self) -> float:
@@ -247,12 +308,23 @@ class KnobReading:
         failed one gate is evidence, and the reason is worth naming.
         """
         problems = []
+        # Clause 26 evaluates the SIGN rule first, on the knob's slope alone,
+        # and demands it of BOTH estimators: an excursion condition written
+        # on an absolute value cannot see a sign, so a dial whose registered
+        # slope is negative would clear `10R` on magnitude and be admitted by
+        # a rule committed text already refuses.
         if not self.pooled.is_a_dial:
             problems.append(
                 f"candidate {self.candidate}: the fitted slope is "
                 f"{self.pooled.slope:.6f}, which is not positive, so the "
                 f"dial does not shrink the step and is not measuring the "
                 f"operation it names")
+        if self.slope <= 0.0:
+            problems.append(
+                f"candidate {self.candidate}: the median of the per-round "
+                f"slopes is {self.slope:.6f}, which is not positive; that is "
+                f"the slope the share is built from, so the dial does not "
+                f"measure the operation it names whatever the pooled fit says")
         if self.pooled.r_squared < R_SQUARED_FLOOR:
             problems.append(
                 f"candidate {self.candidate}: the fit's R-squared is "
@@ -264,8 +336,27 @@ class KnobReading:
                 f"candidate {self.candidate}: the largest residual is "
                 f"{abs(self.pooled.max_residual):.6f} against a limit of "
                 f"{residual_limit:.6f}, one twentieth of the slope")
+        # Clause 26's clamp reaches clause 21's scaffold-slope limit rather
+        # than sitting beside it: a scaffold whose whole excursion is below
+        # what the machine resolves cannot be moving the knob's slope by a
+        # resolvable amount, so the limit would guard against nothing.
         scaffold_limit = SCAFFOLD_SLOPE_LIMIT * abs(self.pooled.slope)
-        if abs(self.scaffold.slope) > scaffold_limit:
+        case = self.scaffold_case
+        if case == "unjudged":
+            problems.append(
+                f"candidate {self.candidate}: the scaffold's observed range "
+                f"or the dial's actual span was not recorded, so clause 26's "
+                f"three cases cannot be told apart and the scaffold's slope "
+                f"cannot be read")
+        elif case == "unreadable":
+            problems.append(
+                f"candidate {self.candidate}: the scaffold moved by "
+                f"{self.scaffold_range:.6f}, at or above the resolution "
+                f"floor, and its own line does not describe that movement, "
+                f"so its price cannot be read and the dial is not eligible "
+                f"at this width")
+        elif (case == "fitted"
+                and abs(self.scaffold.slope) > scaffold_limit):
             problems.append(
                 f"candidate {self.candidate}: the scaffold's own slope is "
                 f"{abs(self.scaffold.slope):.6f} against a limit of "
@@ -284,6 +375,32 @@ class KnobReading:
                     f"candidate {self.candidate}: the scaffold offset is "
                     f"{abs(self.scaffold_offset):.6f} against a limit of "
                     f"{offset_limit:.6f}, three times the resolution floor")
+            # Clause 26's fifth limit, demanded of BOTH estimators because a
+            # condition on one certifies a number the rule does not consume.
+            if self.span is None:
+                problems.append(
+                    f"candidate {self.candidate}: the dial's actual span was "
+                    f"not recorded, so its excursion cannot be judged against "
+                    f"the resolution floor")
+            else:
+                demand = EXCURSION_R_MULTIPLE * self.resolution_floor
+                for name, value in (("pooled", self.pooled.slope),
+                                    ("median", self.slope)):
+                    excursion = abs(value) * self.span
+                    if excursion < demand:
+                        problems.append(
+                            f"candidate {self.candidate}: the {name} "
+                            f"excursion is {excursion:.6f} against a demand "
+                            f"of {demand:.6f}, {EXCURSION_R_MULTIPLE:g} times "
+                            f"the resolution floor, so the dial does not move "
+                            f"the step by enough to be read")
+            if self.residue_is_a_fault:
+                problems.append(
+                    f"candidate {self.candidate}: the raw residue is "
+                    f"{self.raw_residue:.6f}, negative by more than the "
+                    f"resolution floor of {self.resolution_floor:.6f}; the "
+                    f"step ran slower with the operation removed than the fit "
+                    f"predicts without its scaling part, which cannot be true")
         if not 0.0 < self.share < 1.0:
             problems.append(
                 f"candidate {self.candidate}: the share is "

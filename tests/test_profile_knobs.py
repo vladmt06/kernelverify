@@ -91,19 +91,34 @@ def _fits(slopes):
 
 def _reading(kind=pk.RETUNE, *, slopes=(8.0, 8.1, 7.9, 8.0, 8.05),
              intercept=12.0, stock=20.0, ablated=None, scaffold_slope=0.1,
-             offset=0.02, floor=0.05, r_squared=1.0, max_residual=0.0):
+             offset=0.02, floor=0.05, r_squared=1.0, max_residual=0.0,
+             pooled_slope=None, span=0.75, scaffold_range=0.0,
+             scaffold_r_squared=1.0, scaffold_residual=0.0):
+    """One reading, defaulting to a clean one.
+
+    `scaffold_range` defaults BELOW the resolution floor, so clause 26 clamps
+    the scaffold to zero and its slope limit is not binding; a test that means
+    to exercise that limit sets a range at or above the floor and puts the
+    scaffold in the fitted case.
+    """
     return pk.KnobReading(
         candidate="Q" if kind == pk.RETUNE else "L",
         kind=kind,
         stock_median=stock,
         per_round=_fits(slopes),
-        pooled=pk.Fit(slope=statistics.median(slopes), intercept=intercept,
-                      r_squared=r_squared, max_residual=max_residual),
-        scaffold=pk.Fit(slope=scaffold_slope, intercept=0.0, r_squared=1.0,
-                        max_residual=0.0),
+        pooled=pk.Fit(
+            slope=statistics.median(slopes) if pooled_slope is None
+            else pooled_slope,
+            intercept=intercept, r_squared=r_squared,
+            max_residual=max_residual),
+        scaffold=pk.Fit(slope=scaffold_slope, intercept=0.0,
+                        r_squared=scaffold_r_squared,
+                        max_residual=scaffold_residual),
         scaffold_offset=offset,
         ablated_median=ablated,
         resolution_floor=floor,
+        span=span,
+        scaffold_range=scaffold_range,
     )
 
 
@@ -173,7 +188,7 @@ def test_a_large_residual_is_refused():
 
 
 def test_a_scaffold_whose_own_cost_moves_with_the_dial_is_refused():
-    problems = _reading(scaffold_slope=2.0).blockers()
+    problems = _reading(scaffold_slope=2.0, scaffold_range=1.5).blockers()
     assert any("scaffold's own slope" in p for p in problems)
 
 
@@ -193,7 +208,8 @@ def test_a_share_that_is_not_a_fraction_is_refused():
 
 
 def test_a_fit_can_pass_while_its_scaffold_fails():
-    reading = _reading(r_squared=1.0, max_residual=0.0, scaffold_slope=5.0)
+    reading = _reading(r_squared=1.0, max_residual=0.0, scaffold_slope=5.0,
+                       scaffold_range=3.75)
     problems = reading.blockers()
     assert any("scaffold" in p for p in problems)
     assert not any("R-squared" in p for p in problems)
@@ -204,6 +220,113 @@ def test_a_scaffold_can_pass_while_its_fit_fails():
     problems = reading.blockers()
     assert any("R-squared" in p for p in problems)
     assert not any("scaffold" in p for p in problems)
+
+
+# --- clause 26's readability and clause 33's residue fault ------------------
+
+
+def test_a_residue_more_negative_than_the_floor_is_a_fault_not_a_clamp():
+    """Clause 33 settles clause 18 against clause 27's absence machinery.
+
+    It says the step ran SLOWER with the operation removed than the fit
+    predicts without its scaling part, which cannot be true of any step, so
+    it refuses the profile rather than typing that candidate absent.
+    """
+    reading = _reading(pk.REWRITE, intercept=12.0, ablated=12.20, floor=0.05)
+    assert reading.raw_residue == pytest.approx(-0.20)
+    assert reading.residue_is_a_fault
+    assert any("negative by more than" in p for p in reading.blockers())
+
+
+def test_a_residue_negative_but_inside_the_floor_is_zero_and_no_fault():
+    reading = _reading(pk.REWRITE, intercept=12.0, ablated=12.02, floor=0.05)
+    assert reading.raw_residue == pytest.approx(-0.02)
+    assert reading.residue == 0.0
+    assert not reading.residue_is_a_fault
+
+
+def test_a_retune_never_has_a_residue_fault():
+    assert not _reading(pk.RETUNE).residue_is_a_fault
+
+
+def test_a_median_slope_that_is_not_positive_blocks_where_the_pooled_one_is():
+    """Clause 26's sign precondition, on the estimator the share consumes.
+
+    An excursion condition written on an absolute value cannot see a sign, so
+    without this a dial whose registered slope is negative clears `10R` on
+    magnitude and is admitted by a rule committed text already refuses.
+    """
+    reading = _reading(slopes=(-60.0, -20.0, -20.0, 52.0, 20.0),
+                       pooled_slope=20.0)
+    assert reading.slope == pytest.approx(-20.0)
+    assert reading.pooled.is_a_dial
+    problems = reading.blockers()
+    assert any("median of the per-round slopes" in p for p in problems)
+    assert not any("the fitted slope is" in p for p in problems)
+
+
+def test_the_excursion_is_demanded_of_both_estimators():
+    """Clause 26's reproduction: collinear medians, disagreeing estimators.
+
+    Five exact per-round lines whose arm medians are collinear give a pooled
+    slope of 20 and a median slope of 0.05, so at `R = 0.5` the pooled
+    excursion clears `10R` while the median's is below `R` itself. The share
+    is built from the median, so a condition on the pooled fit alone would
+    certify a number no rule consumes.
+    """
+    reading = _reading(slopes=(0.05,) * 5, pooled_slope=20.0, span=0.75,
+                       floor=0.5, offset=0.0)
+    problems = reading.blockers()
+    assert any("median excursion" in p for p in problems)
+    assert not any("pooled excursion" in p for p in problems)
+
+
+def test_a_scaffold_that_moves_less_than_the_floor_is_clamped_to_zero():
+    reading = _reading(scaffold_slope=2.0, scaffold_range=0.004, floor=0.05)
+    assert reading.scaffold_case == "clamped"
+    assert reading.effective_scaffold_slope == 0.0
+    assert not any("scaffold's own slope" in p for p in reading.blockers())
+
+
+def test_a_scaffold_that_moved_and_whose_line_describes_it_keeps_its_slope():
+    reading = _reading(scaffold_slope=2.0, scaffold_range=1.5, floor=0.05)
+    assert reading.scaffold_case == "fitted"
+    assert reading.effective_scaffold_slope == pytest.approx(2.0)
+    assert any("scaffold's own slope" in p for p in reading.blockers())
+
+
+def test_a_scaffold_that_moved_without_its_line_describing_it_is_unreadable():
+    """Clause 26's third case, and the reading of it this code registers.
+
+    Scaffold medians of 100, 130, 110 and 105.5 at `R = 1` have a range of 30
+    and a fitted excursion of 1.05, so the excursion condition HOLDS while
+    the fit describes nothing: its coefficient of determination is 0.0012 and
+    its largest residual is over eighteen times `R`.
+
+    Clause 26 words its third case as "neither of the other two conditions
+    holds", which read literally would leave this state uncovered while the
+    same clause calls the three cases exhaustive. The only consistent reading
+    is that the third case takes everything at or above `R` the second does
+    not, and this pins it.
+    """
+    reading = _reading(scaffold_slope=1.4, scaffold_range=30.0, floor=1.0,
+                       offset=0.0, scaffold_r_squared=0.0012,
+                       scaffold_residual=18.0)
+    assert reading.scaffold_case == "unreadable"
+    assert any("does not describe that movement" in p
+               for p in reading.blockers())
+
+
+def test_a_scaffold_range_that_was_never_recorded_blocks_rather_than_passes():
+    reading = _reading(scaffold_range=None)
+    assert reading.scaffold_case == "unjudged"
+    assert any("three cases cannot be told apart" in p
+               for p in reading.blockers())
+
+
+def test_a_span_that_was_never_recorded_blocks_rather_than_passes():
+    problems = _reading(span=None).blockers()
+    assert any("actual span was" in p for p in problems)
 
 
 # --- the credited ratio ----------------------------------------------------
