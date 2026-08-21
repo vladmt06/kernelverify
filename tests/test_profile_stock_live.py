@@ -1,27 +1,35 @@
 """The profile harness against a real model, for the claims only a GPU proves.
 
-Three things cannot be pinned by arithmetic over records, and all three are
-load-bearing:
+What lives here is what arithmetic over records cannot pin:
 
   the process is stock          - every seam still holds the object mlx-lm
                                   defines, checked the way the installer
                                   checks it;
-  the modes really alternate    - Amendment 4 needs a compiled total and an
-                                  uncompiled total from one child on one
-                                  batch, and MLX refuses an eval inside a
-                                  compiled step, so the whole harness rests on
-                                  the global compile switch surviving repeated
-                                  toggling in one process;
   the batch is mlx-lm's         - the width a step runs at is a property of
                                   the data under mlx-lm's own padding rule,
                                   not of the configuration, and the harness
                                   must record the width that rule produces
-                                  rather than the one the plan names.
+                                  rather than the one the plan names;
+  the settings are the model's  - a dial asked for 0.75 places a whole number
+                                  of quantization groups or of rows, and the
+                                  fraction it lands on is a property of the
+                                  model's dimensions rather than of the
+                                  ladder;
+  the manifest really runs      - every arm of one registered width built,
+                                  traced under its own seams, and timed with
+                                  no installer active at all.
+
+The arm machinery itself - one trace per arm, two arms not sharing a graph, no
+seam installed during timing, the full setting bit-identical to stock, every
+patched class restored - is proved in tests/test_profile_knobs_live.py, which
+owns it. This file does not restate those claims.
 
 Qwen3-0.6B stands in for the pinned 4B. The structure the harness reads - a
 projection per layer, attention per layer, one output head, a backward that
 reaches only the adapted blocks - is the same in both, and this one loads in
-seconds.
+seconds. Its rows are chosen so mlx-lm's own padding rule lands the batch on
+the registered SHORT band's width, which is what lets the real context be
+built rather than stubbed.
 """
 
 import json
@@ -34,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bench"))
 
 import pin_dolly  # noqa: E402
 import profile_instrument as pi  # noqa: E402
+import profile_knobs as pk  # noqa: E402
 import profile_rules as rules  # noqa: E402
 import profile_stock as ps  # noqa: E402
 from conftest import requires_metal  # noqa: E402
@@ -41,19 +50,34 @@ from conftest import requires_metal  # noqa: E402
 MODEL = (Path(__file__).resolve().parents[1] / "bench" / ".models"
          / "qwen3-0.6b-4bit-g64")
 BATCH = 2
+WIDTH = "short"
 
-# Short rows of deliberately different lengths, so the batch pads to the
-# longest of them and the padding rule is visible rather than incidental.
+# Rows of deliberately different lengths, all inside the 33-to-64 token band,
+# so the batch pads to the registered short band's own width of 65 and the
+# padding rule is visible rather than incidental.
 ROWS = [
     {"prompt": "Name three primary colours.",
-     "completion": "Red, blue and yellow."},
-    {"prompt": "Summarise the water cycle in one paragraph, with detail "
-               "about evaporation, condensation and precipitation.",
-     "completion": "Water evaporates from oceans and lakes, rises, cools and "
-                   "condenses into clouds, and returns as rain or snow, "
-                   "which flows back to the sea."},
-    {"prompt": "What is 12 times 12?", "completion": "144."},
+     "completion": "Red, blue and yellow are the three primary colours used."},
+    {"prompt": "Summarise the water cycle briefly.",
+     "completion": "Water evaporates, condenses into clouds, and falls as "
+                   "rain."},
+    {"prompt": "What is 12 times 12?",
+     "completion": "It is one hundred and forty four."},
 ]
+
+PLAN = {"seed": 7, "optimizer": "adam", "optimizer_config": {},
+        "learning_rate": 1e-5}
+
+
+class _Guard:
+    """The child's memory guard, reduced to the one method a build calls."""
+
+    def __init__(self):
+        self.checks = []
+
+    def check(self, label):
+        self.checks.append(label)
+        return 0.0
 
 
 @pytest.fixture(scope="module")
@@ -65,29 +89,31 @@ def corpus(tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
-def target(corpus):
-    """The model, the optimizer and one fixed batch, through the real loader.
+def target():
+    """The model, the adapters and a settled optimizer, built once.
 
-    Built once: loading the model costs far more than the steps being measured
-    and every test here reads the same arrangement rather than provoking a new
-    one.
+    Loading the model costs far more than the steps being measured, and every
+    test here reads the same arrangement rather than provoking a new one.
     """
-    plan = {"seed": 7, "optimizer": "adam", "optimizer_config": {},
-            "learning_rate": 1e-5}
-    provenance = {"base_model": {"directory": str(MODEL)},
-                  "data": {"directory": str(corpus)}}
-    return ps._load_target(plan, provenance, batch=BATCH, mask_prompt=True)
+    provenance = {"base_model": {"directory": str(MODEL)}}
+    return ps._load_model(PLAN, provenance)
+
+
+@pytest.fixture(scope="module")
+def batch(target, corpus):
+    return ps._fixed_batch(PLAN, target.tokenizer, str(corpus),
+                           batch=BATCH, mask_prompt=True)
 
 
 @requires_metal
-def test_the_process_is_the_stock_one_the_profile_claims_to_measure(target):
+def test_the_process_is_the_stock_one_the_profile_claims_to_measure():
     """A profile of stock taken through somebody's patch is a profile of the
     patch, and nothing in the numbers would say so."""
     report = ps.stock_process()
     assert set(report["seams"]) == {str(region.seam)
                                     for region in pi.REGIONS.values()}
     assert report["certified"] == 0
-    for seam_name, module in report["seams"].items():
+    for _seam_name, module in report["seams"].items():
         assert module and not module.startswith("metalrunner")
 
 
@@ -108,188 +134,232 @@ def test_a_replaced_seam_makes_the_process_refuse_to_be_profiled():
 
 @requires_metal
 def test_the_batch_width_is_the_one_mlx_lm_s_own_padding_rule_produces(
-        corpus, target):
+        corpus, target, batch):
     """`max_seq_length` is a cap, not a target. mlx-lm pads each batch to one
     plus the next multiple of 32 above its own longest row, so the width is a
     property of the data, and a harness that recorded the registered number
     instead would name a shape the step never ran."""
-    from mlx_lm.tokenizer_utils import load as load_tokenizer
     from mlx_lm.tuner.datasets import CacheDataset, load_dataset
 
-    tokenizer = load_tokenizer(MODEL)
     train, _, _ = load_dataset(
-        ps._dataset_args({}, str(corpus), True), tokenizer)
+        ps._dataset_args({}, str(corpus), True), target.tokenizer)
     cached = CacheDataset(train)
     longest = max(len(cached[index][0]) for index in range(len(cached)))
 
-    assert target.width == pin_dolly.batch_width(longest,
-                                                 max_seq_length=rules.SEQ_LEN)
-    assert target.width < rules.SEQ_LEN
-    assert target.rows == BATCH
+    assert batch.width == pin_dolly.batch_width(longest,
+                                                max_seq_length=rules.SEQ_LEN)
+    assert batch.width == rules.WIDTHS[WIDTH]["batch_width"]
+    assert batch.rows == BATCH
 
 
 @requires_metal
-def test_the_prompt_mask_survives_the_real_loader(target):
+def test_the_context_the_batch_produces_is_the_registered_one(target, batch):
+    context = ps.cell_context(
+        "B", WIDTH, batch=batch.rows, batch_width=batch.width,
+        model=MODEL.name, adapted=target.adapted,
+        supervised=batch.supervised, supervised_of=batch.supervised_of,
+        batch_sha256=batch.digest)
+    assert context["operation_width"] == batch.width - 1
+    assert context["tokens"] == batch.rows * (batch.width - 1)
+    assert 0.0 < context["supervised_fraction"] < 1.0
+
+
+@requires_metal
+def test_the_prompt_mask_survives_the_real_loader(batch):
     """Candidate L's whole premise is that some tokens are not supervised. If
     the loader lost the prompt boundary every token would be supervised and
     the profile would be measuring the all-token case while labelled masked."""
     import mlx.core as mx
 
-    _tokens, lengths = target.batch
-    offsets = lengths[:, 0]
-    assert bool(mx.all(offsets > 0))
+    _tokens, lengths = batch.batch
+    assert bool(mx.all(lengths[:, 0] > 0))
+    assert batch.supervised < batch.supervised_of
 
 
 @requires_metal
-def test_the_marked_passes_compute_what_the_plain_pass_computes(target):
-    """Over every gradient array rather than a summary: a summary can agree
-    while the arrays beneath it do not."""
+def test_the_supervised_count_is_mlx_lm_s_own_mask_and_not_an_approximation(
+        target, batch):
+    """Derived from the batch rather than read off a step, because every arm's
+    loss is meaningless at a dialled setting and a count taken from one would
+    be a count of whatever that arm happened to compute."""
     import mlx.core as mx
+    import mlx.nn as nn
+    from mlx.utils import tree_flatten
+    from mlx_lm.tuner.trainer import default_loss
 
+    del tree_flatten, nn
     mx.disable_compile()
     try:
-        report = ps._identity(target.model, target.batch, ps.MODES_DECIDING)
+        _loss, toks = default_loss(target.model, *batch.batch)
+        mx.eval(toks)
     finally:
         mx.enable_compile()
-    assert report["gradients_compared"] > 0
-    assert set(report["modes"]) == {"instr-A", "instr-L", "instr-Q"}
-    for mode, verdict in report["modes"].items():
-        assert verdict["loss_equal"], mode
-        assert verdict["gradients_differing"] == [], mode
-        assert verdict["foreign_on_removal"] == [], mode
-
-
-@pytest.fixture(scope="module")
-def measured(target):
-    """Every deciding mode, twice around, on one built step.
-
-    This is the harness's inner loop run for real: the same step object driven
-    compiled and uncompiled with the marks installed and removed between, which
-    is the arrangement Amendment 4 asks for and the one MLX makes awkward.
-    """
-    step, state = ps._build_step(target.model, target.optimizer)
-    context = ps.cell_context("B", batch=target.rows, width=target.width,
-                              model=MODEL.name, adapted=target.adapted)
-    for mode in ps.MODES_DECIDING:
-        ps.timed_mode(step, state, target.batch, mode, context=context)
-    return {mode: [ps.timed_mode(step, state, target.batch, mode,
-                                 context=context) for _ in range(2)]
-            for mode in ps.MODES_DECIDING}
+    assert int(toks.item()) == batch.supervised
 
 
 @requires_metal
-def test_every_mode_produces_a_timed_step(measured):
-    for mode, runs in measured.items():
-        assert all(run["elapsed_s"] > 0.0 for run in runs), mode
-        assert all(run["foreign_on_removal"] == [] for run in runs), mode
-
-
-@requires_metal
-def test_the_counts_are_exactly_what_the_arrangement_says(measured, target):
+def test_the_structural_pass_counts_exactly_what_the_arrangement_says(
+        target, batch):
     """The check that catches a seam installed and never reached. Asserted
     against the harness's own expectation, so the expectation and the machine
     have to agree rather than the test restating one of them."""
-    observed = {}
-    for runs in measured.values():
-        for run in runs:
-            if run["decomposed"] is not None:
-                observed.update(run["decomposed"]["counts"])
-    marked = sorted({region for mode in ps.MODES_DECIDING
-                     for region in ps.MODE_REGIONS[mode]})
-    expected = ps.expected_counts(target.depth, target.adapted, marked)
-    report = ps.completeness(observed, expected)
-    assert report["ok"], report["mismatches"]
+    report = ps._structural_pass(target.model, batch.batch)
+    expected = ps.expected_counts(target.depth, target.adapted,
+                                  sorted(pi.REGIONS))
+    checked = ps.completeness(report["counts"], expected)
+    assert checked["ok"], checked["mismatches"]
+    assert report["foreign_on_removal"] == []
 
 
 @requires_metal
-def test_the_counts_do_not_move_between_repeats(measured):
-    """Two rounds of one mode that fired different numbers of times are not
-    repeats, and the median across them describes neither."""
-    for mode, runs in measured.items():
-        passes = [run["decomposed"] for run in runs
-                  if run["decomposed"] is not None]
-        if passes:
-            assert ps.median_decomposition(passes)["passes"] == len(passes)
+def test_the_marked_pass_computes_what_the_plain_pass_computes(target, batch):
+    """Over every gradient array rather than a summary: a summary can agree
+    while the arrays beneath it do not."""
+    report = ps._structural_pass(target.model, batch.batch)
+    assert report["gradients_compared"] > 0
+    assert report["loss_equal"]
+    assert report["gradients_differing"] == []
 
 
 @requires_metal
-def test_compilation_is_left_enabled_however_a_mode_ends(target):
+def test_the_structural_pass_leaves_compilation_enabled(target, batch):
     """Enabled is the state a process starts in. A harness that left it off
     would silently change what runs next in the same interpreter, including
     the rest of this suite."""
     import mlx.core as mx
 
-    step, state = ps._build_step(target.model, target.optimizer)
-    context = ps.cell_context("B", batch=target.rows, width=target.width,
-                              model=MODEL.name, adapted=target.adapted)
-    for mode in ps.MODES_DECIDING:
-        ps.timed_mode(step, state, target.batch, mode, context=context)
-        assert not mx.is_compile_disabled() if hasattr(
-            mx, "is_compile_disabled") else True
+    ps._structural_pass(target.model, batch.batch)
+    traces = []
 
-    def explode(*_args, **_kwargs):
-        raise RuntimeError("the step failed mid-measurement")
+    @mx.compile
+    def step(value):
+        traces.append(1)
+        return value + 1
 
-    with pytest.raises(RuntimeError):
-        ps.timed_mode(explode, state, target.batch, "instr-Q", context=context)
-    # The marks were removed and compilation restored on the way out, so a
-    # plain step still runs and still computes.
-    after = ps.timed_mode(step, state, target.batch, "compiled",
-                          context=context)
-    assert after["elapsed_s"] > 0.0
+    step(mx.array(1.0))
+    step(mx.array(2.0))
+    assert len(traces) == 1
 
 
 @requires_metal
-def test_the_shares_a_real_cell_produces_are_fractions_of_a_real_step(
-        measured, target):
-    """The arithmetic and the machine meeting: real logs, read by the function
-    the harness will use, over a denominator from the pass that carries no
-    marks."""
-    record = {
-        "cell": "B",
-        "context": ps.cell_context("B", batch=target.rows, width=target.width,
-                                   model=MODEL.name, adapted=target.adapted),
-        "modes": {mode: {
-            "totals_s": [run["elapsed_s"] for run in runs],
-            "peak_gb": [1.0 for _ in runs],
-            "passes": [run["decomposed"] for run in runs
-                       if run["decomposed"] is not None],
-        } for mode, runs in measured.items()},
-    }
-    reading = ps.cell_reading(record)
-    assert set(reading["shares"]) == set(rules.CANDIDATES)
-    for mode, cost in reading["instrument_cost"].items():
-        assert cost["ratio"] > 1.0, mode
+@pytest.mark.parametrize("candidate", ["L", "Q", "P3"])
+def test_every_dial_places_the_fraction_the_model_can_realise(target, batch,
+                                                              candidate):
+    """A fit run on the fraction that was asked for rather than the one that
+    was placed is a fit on numbers nothing measured."""
+    knob = ps._knob_for(candidate)
+    prepared = knob.prepare(target.model, batch.width)
+    settings = ps._actual_settings(candidate, prepared)
+    assert sorted(settings) == sorted(pk.PHIS)
+    placed = [settings[phi]["actual_phi"] for phi in pk.PHIS]
+    assert len(set(placed)) == len(pk.PHIS)
+    assert placed == sorted(placed, reverse=True)
+    for phi in pk.PHIS:
+        for site in settings[phi]["sites"].values():
+            assert 0 < site["kept"] <= site["full"]
+            assert site["fraction"] == pytest.approx(settings[phi]["actual_phi"])
 
-    # BLOCKER, measured here: the registered share carries its own marks.
-    #
-    # Section 3.3 defines f as the region's wall time over the step's, and the
-    # split-pass design was supposed to make that safe by taking the
-    # denominator from the unmarked pass. It does stop one candidate's marks
-    # from deflating another's share, and it does NOT stop a candidate's own
-    # marks from inflating its own: the marks sit inside the spans they
-    # bracket and outside the plain step they divide. The inflation is
-    # proportional to how many marks a region carries, and that is exactly the
-    # quantity that differs most between the three candidates - 197 marked
-    # calls for Q, 32 for A, 2 for L - so it biases the comparison the rule
-    # makes. At 0.6B it is severe enough that Q's share comes out above 1,
-    # which is not a fraction of anything.
-    #
-    # The correction is measurable rather than estimated: in a split pass
-    # nothing but this candidate's regions is marked, so the whole difference
-    # between the instrumented total and the plain total was spent inside
-    # those spans. It is computed and reported and deliberately not used,
-    # because a share redefined after seeing a number is not a share.
-    assert reading["shares"]["Q"]["share"] > 1.0
-    assert all(share["instrument_excess_s"] > 0.0
-               for share in reading["shares"].values())
-    # And the excess is larger than the spans it would have to be subtracted
-    # from, for the two heavily marked candidates. That is why no correction
-    # is applied: the marks' cost is not all inside the spans, and how much of
-    # it is cannot be recovered from these two numbers.
-    for candidate in ("A", "Q"):
-        share = reading["shares"][candidate]
-        assert share["instrument_excess_s"] > share["marked_total_s"], candidate
-    blockers = ps.binding_blockers({
-        "closing_idle": {"idle": True}, "cells": {}, "readings": {"B": reading}})
-    assert any("not a fraction of a step" in one for one in blockers)
+
+@requires_metal
+def test_the_attention_dial_the_amendment_names_is_the_one_that_is_built(
+        target, batch):
+    """Amendment 7 clause 35 names candidate A's dial by rule, so no run
+    reselects it and a recording cannot depend on which dial happened to price
+    best that night."""
+    knob = ps._knob_for("A")
+    assert knob is pk.ATTENTION_KNOBS[ps.ATTENTION_DIAL]
+    assert ps.ATTENTION_DIAL == "kv-length"
+    prepared = knob.prepare(target.model, batch.width)
+    settings = ps._actual_settings("A", prepared)
+    full = pk.attention_width(batch.width)
+    assert settings[1.0]["sites"][f"attention:{full}"]["kept"] == full
+
+
+@requires_metal
+def test_a_candidate_with_no_registered_dial_is_refused_not_guessed():
+    with pytest.raises(Exception, match="no dial is registered"):
+        ps._knob_for("P2")
+
+
+@pytest.fixture(scope="module")
+def built(target, batch):
+    """Every arm of the short width, built, traced under its seams and warmed.
+
+    This is the harness's inner loop run for real. It is a module fixture
+    because building 26 compiled steps costs far more than timing them.
+    """
+    return ps._build_width(target, batch, WIDTH, _Guard())
+
+
+@requires_metal
+def test_the_whole_registered_manifest_builds(built):
+    labels = [arm.label for arm in built["compiled"]]
+    assert labels == [arm.label for arm in ps.arm_manifest(WIDTH)]
+    assert len(labels) == 26
+    assert set(built["roles"]) == set(labels)
+
+
+@requires_metal
+def test_every_arm_carries_the_fraction_it_actually_placed(built):
+    for label, role in built["roles"].items():
+        if role["nominal_phi"] is None:
+            assert role["actual_phi"] is None, label
+        else:
+            assert role["actual_phi"] is not None, label
+            assert role["sites"], label
+
+
+@requires_metal
+def test_the_stock_and_ablated_arms_carry_no_setting_at_all(built):
+    """Their `phi` is absent rather than a fictitious zero or one, because a
+    fit that read either would be fitting a point no dial placed."""
+    for label, role in built["roles"].items():
+        if role["role"] in (pk.STOCK, pk.ABLATION):
+            assert role["nominal_phi"] is None and role["actual_phi"] is None
+
+
+@requires_metal
+def test_every_arm_of_the_manifest_is_timed_in_every_round(target, batch,
+                                                           built):
+    """All the arms at one width go through ONE `timed_rounds` call. Running
+    one round group per candidate would let the machine drift between two
+    candidates the rule then compares."""
+    samples = pk.timed_rounds(built["compiled"], batch.batch, rounds=2)
+    assert set(samples) == set(built["roles"])
+    for label, values in samples.items():
+        assert len(values) == 2, label
+        assert all(value > 0.0 for value in values), label
+
+
+@requires_metal
+def test_the_reducer_reads_a_real_width_end_to_end(target, batch, built):
+    """The arithmetic and the machine meeting: real arms, real samples, read
+    by the function the harness will use.
+
+    It asserts the SHAPE and not the numbers. Nothing here says which gates a
+    0.6B proxy clears at a resolution floor nothing has measured, and a test
+    that did would be pinning this machine's noise.
+    """
+    samples = pk.timed_rounds(built["compiled"], batch.batch, rounds=2)
+    context = ps.cell_context(
+        "B", WIDTH, batch=batch.rows, batch_width=batch.width,
+        model=MODEL.name, adapted=target.adapted,
+        supervised=batch.supervised, supervised_of=batch.supervised_of,
+        batch_sha256=batch.digest)
+    measured = {
+        "width": WIDTH, "context": context, "peak_gb": 1.0,
+        "arms": {label: dict(built["roles"][label], context=context,
+                             samples_ms=[value * 1000.0
+                                         for value in samples[label]])
+                 for label in samples},
+    }
+    reading = ps.width_reading(measured, resolution_floor_ms=0.155)
+    assert set(reading["entries"]) == set(ps.CANDIDATES_AT_WIDTH[WIDTH])
+    for candidate, entry in reading["entries"].items():
+        assert entry["type"] in ("reading", "missing_share"), candidate
+        evidence = entry if entry["type"] == "reading" else entry["evidence"]
+        assert evidence["stock_median_ms"] > 0.0
+        assert len(evidence["per_round"]) == 2
+    # P2 is measured by candidate A's dial and candidate A is at the long
+    # width alone, so the short width can never PASS this test.
+    assert reading["partition"]["outcome"] in ("NOT RUN", "REJECT")

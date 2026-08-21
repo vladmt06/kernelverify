@@ -51,6 +51,31 @@ SHAPES = {
     "S5": (151936, 2560),
 }
 
+# Amendment 5 clause 14 and clause 20. TWO registered widths, both drawn from
+# one corpus so that width is the only thing separating them, and both derived
+# by the band rule at the pinned revision rather than chosen. `SEQ_LEN` above
+# is the cap mlx-lm is given and this corpus never approaches it: mlx-lm pads
+# each batch to one plus the next multiple of 32 above its own longest row, so
+# the band edge is what actually sets a step's width.
+#
+# `batch_width` is the padded width mlx-lm produces, and `operation_width` is
+# what every matmul in the step actually sees, because `default_loss` trains on
+# `batch[:, :-1]`. The two are carried apart rather than one derived at each
+# call site, since a floor measured at the padded width would be measuring a
+# shape the step never produces while agreeing about everything else.
+WIDTHS = {
+    "short": {"band": 64, "batch_width": 65, "operation_width": 64,
+              "data": "ultrachat-64"},
+    "long": {"band": 1056, "batch_width": 1057, "operation_width": 1056,
+             "data": "ultrachat-1056"},
+}
+
+# Amendment 6 clause 26 and Amendment 7 clause 35: candidate A's dial fits at
+# the long width and not at the short, so the deciding cell measures both and
+# candidate A appears at one of them. The order is the order every rule-facing
+# table is serialised in, so two artifacts can be compared row by row.
+WIDTH_ORDER = ("short", "long")
+
 # Section 3.3. The named regions plus one remainder must account for the step.
 RECONCILE_PCT = 2.0
 

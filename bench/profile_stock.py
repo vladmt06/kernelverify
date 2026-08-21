@@ -3,96 +3,106 @@
 
 What this produces, and what it refuses to produce
 --------------------------------------------------
-It produces one number per candidate operation: the share f of the training
-step that operation occupies, forward and backward, measured inside mlx-lm's
-own step on the pinned model and the pinned corpus. It produces no verdict.
-The gain formula, the tie rule and the selection live in `profile_rules`, were
-committed before this file existed, and are applied by `--decide` to a
+It produces one reading per candidate operation per registered width: the
+fraction `f` of the training step that operation occupies, measured inside
+mlx-lm's own step on the pinned model and the pinned corpus. It produces no
+verdict. The gain formula, the tie rule and the selection live in
+`profile_rules`, were committed before this file existed, and are applied to a
 recording this harness has already closed and hashed. A harness that could
 also rule would be a harness that could quietly become the thing that decides.
 
-One child per cell, one batch, every mode round-robin
------------------------------------------------------
-Amendment 4 requires the step total both compiled and uncompiled "in the same
-run, on the same batch". A fresh process per mode cannot satisfy that, so a
-cell is one child: it loads the model once, pulls ONE batch out of mlx-lm's
-own iterator, and then drives the trainer's step through every mode in
-rotation, five rounds. The rotation is why no mode always runs warm, and the
-single batch is why five rounds are genuine repeats rather than five different
-workloads.
+A share is a slope, and there is no clock inside the step
+---------------------------------------------------------
+Amendment 5 clause 1 replaced section 3.3's marked spans with a fitted slope,
+because a mark evals and then timestamps: its fence sits inside the span that
+forms a share's numerator and outside the plain step that forms its
+denominator, so the error grows with how many marks a candidate carries -
+which is exactly what separates the three candidates. Measured 2026-08-20, the
+same three regions read 0.263, 0.193 and 1.401 with marks and 0.245, 0.045 and
+0.376 without, and a share of 1.401 is not a fraction of anything.
 
-Why the deciding cell splits its instrumented passes
------------------------------------------------------
-Every mark costs time, and that cost lands inside the marked region's
-numerator while the step total it is divided by carries every region's cost.
-Attention is marked once per layer, the output head once per step, the
-quantized projections seven times per layer. Marking all of them in one pass
-therefore inflates the heavily marked region's share and deflates the others,
-which is precisely the three-way comparison the selection rule makes. So cell
-B runs one instrumented pass per candidate, and each share takes its
-denominator from the plain pass in the same child. Cells A, C and D decide
-nothing, keep one combined pass, and their shares are labelled as carrying
-cross-region bias rather than quietly presented as clean.
+So nothing here times a region. Every arm is a whole compiled step, and what
+separates two arms is how much arithmetic one operation does inside it. A
+candidate's ladder shrinks its operation's size while holding the launch
+count, the output shape and the graph structure fixed; the line through those
+arms has a slope, and `slope / stock` is the fraction of the step that moves
+with that operation. `profile_knobs` owns the arms, the fits and the gates;
+this file owns the process, the workload and the recording.
 
-What is checked, and against what
----------------------------------
-Section 3.3 registered "named regions plus one remainder must equal the step
-within 2%", and which step that is decides whether the check exists at all.
-Against the marked pass's own elapsed it cannot fail, because the remainder is
-defined as whatever the spans leave on the same timeline. Amendment 4 does not
-say that: it compares against the step "taken without the interior
-boundaries", which is the plain pass. Read as written the check is therefore
-the instrument's own cost measured against a 2% limit, so section 3.3's
-reconciliation and Amendment 5's instrument-cost band are one quantity at two
-limits rather than two checks. The 2% is what is registered today, and no
-instrument that can put a clock inside an MLX backward meets it, so a
-recording says so and does not bind.
+The manifest, and why candidate A is at one width only
+-------------------------------------------------------
+Amendment 8 registers 26 arms at the short width and 35 at the long:
 
-Three other things are checked and each can fail:
+    stock         1     no seam installed, the denominator of every share
+    candidate L   9     four knob, four scaffold, one ablation (a rewrite)
+    candidate Q   8     four knob, four scaffold (a retune, so no ablation)
+    candidate P3  8     the projections without the head, clause 22's region
+    candidate A   9     LONG WIDTH ONLY, on the `kv-length` dial
 
+Candidate A is absent at the short width by design and not by a measurement
+that failed: Amendment 7 clause 35 names its dial by rule and records that the
+dial fits at the long width, where attention's quadratic term dominates, and
+not at the short, where every scaffold price measured sat inside the machine's
+own jitter. Its reading gates no terminal, so a gap there is a gap in a report
+rather than a hole in a ruling.
+
+All arms at one width are interleaved inside one set of rounds. Running one
+round group per candidate would let the machine drift between two candidates
+that the rule then compares.
+
+What is checked, and what each check would catch
+------------------------------------------------
+  the process is stock  - before anything is timed, every seam is checked to
+                      hold the object mlx-lm itself defines and metalrunner is
+                      checked to certify nothing, because a profile of stock
+                      taken through somebody's patch is a profile of the patch.
   exact counts      - forward, a region fires once per place it appears.
                       Backward it does NOT: mlx-lm adapts only the last
-                      `num_layers` blocks, so attention has a backward once
-                      per ADAPTED block and the projections
-                      `7 * adapted - 3` times, the three being those that
-                      consume the lowest adapted block's input, whose gradient
-                      nothing below asks for. A seam installed and never
-                      reached leaves its region absent from the log, so its
-                      share reads as zero and its time lands silently in the
-                      remainder, and only a count tells that apart from an
+                      `num_layers` blocks, so attention has a backward once per
+                      ADAPTED block and the projections `7 * adapted - 3` times,
+                      the three being those that consume the lowest adapted
+                      block's input, whose gradient nothing below asks for. A
+                      seam installed and never reached leaves its region absent
+                      from the log, and only a count tells that apart from an
                       operation that really costs nothing.
-  identity          - the marked pass and the plain pass must agree on the
-                      loss and on every gradient array, or the custom gradient
-                      rule changed the computation and the two modes describe
-                      different work.
-  a share is a fraction - a candidate whose share does not land in (0, 1) has
-                      not measured a fraction of a step. That happens: the
-                      marks sit inside the spans that form the numerator and
-                      outside the plain step that forms the denominator, so
-                      every share is an upper bound and the overstatement
-                      grows with how many marks the candidate carries.
+  identity          - the marked pass and the plain pass must agree on the loss
+                      and on every gradient array, or the boundary instrument
+                      changed the computation and its counts describe a
+                      different step.
+  no trace while timing - `mx.compile` traces at an object's FIRST CALL, not at
+                      construction, so an arm whose graph is built after its
+                      seam is gone is silently stock. A counter refuses the run
+                      if any arm traces during the timed rounds, which is the
+                      general guard the other two trace rules do not have to be
+                      exhaustive about.
+  the fits          - `profile_knobs` gates every reading: a positive slope on
+                      both estimators, clause 6's two shape limits, clause 26's
+                      three scaffold cases, the scaffold offset against `3R`,
+                      both excursions against `10R`, clause 33's residue fault,
+                      and a share strictly inside (0, 1).
+  the partition     - clause 22's double-counting test over P1, P2 and P3. It
+                      detects double-counting and cannot detect omission,
+                      because P4 absorbs anything unmeasured by construction.
 
-And the process must be stock. Before anything is timed, every seam is checked
-to hold the object mlx-lm itself defines and metalrunner is checked to certify
-nothing, because a profile of stock taken through somebody's patch is a
-profile of the patch.
+The boundary instrument is kept and demoted
+--------------------------------------------
+`profile_instrument` still runs, once per cell-width, in its own untimed pass.
+Its counts are exact and have already caught a seam that never fired and a
+test that left gradient checkpointing installed for a whole session. It
+contributes no timing to anything.
 
 Refused deliberately
 --------------------
 `--grad-checkpoint` is not offered. Checkpointing discards activations and
 runs a block's forward AGAIN during the backward; the marks survive that with
 the loss and gradients unchanged, but the replayed forward fires forward
-marks, so a region's forward count and forward span absorb work belonging to
-the backward. Measured 2026-08-20: attention fires 30 times forward on a
-28-block model and the projections 210 times where an unchecked step fires
-196. Nothing downstream would notice, and the collapse rule weights a credited
-ratio by exactly those counts.
+marks, so a region's forward count absorbs work belonging to the backward.
+Measured 2026-08-20: attention fires 30 times forward on a 28-block model and
+the projections 210 times where an unchecked step fires 196.
 
 Usage
 -----
-    python bench/profile_stock.py --plan <plan.json> --calibrate
     bench/start_binding_run.sh bench/profile_stock.py -- --plan <plan.json>
-    python bench/profile_stock.py --decide --profile <rec.json> --sweep <rec.json>
 """
 
 from __future__ import annotations
@@ -104,12 +114,14 @@ import statistics
 import tempfile
 import time
 import types
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Mapping, Sequence
 
 import machine_state
 import profile_instrument as pi
+import profile_knobs as pk
 import profile_rules as rules
 from decode_rules import RunInvalid
 from harness_runner import (
@@ -146,36 +158,31 @@ from memory_guard import (
 
 RESULTS_DIR = ROOT / "bench" / "results"
 
-# Section 3.4. Five rounds, and the calibration run takes fewer because it
-# binds nothing and exists only to price the instrument.
-ROUNDS = 5
-CALIBRATION_ROUNDS = 3
+# Section 3.4, and `profile_knobs` uses the same number: five rounds, so the
+# rounds are genuine repeats and the spread gate reads the machine.
+ROUNDS = pk.ROUNDS
 
 # The profile installs nothing. The shared preflight records which module a
 # run could have routed through, and for this run the honest answer is the
 # real installer with nothing certified in it.
 STOCK_MEASUREMENT_MODULE = "metalrunner.measurement"
 
-# Modes at the cell that decides, and at the cells that only report. The
-# deciding cell splits one instrumented pass per candidate; see the module
-# docstring for why the combined pass biases exactly the comparison the rule
-# makes.
-MODES_DECIDING = ("compiled", "plain", "instr-A", "instr-L", "instr-Q")
-# `compiled` is here too, and not as symmetry. Amendment 4 requires the
-# compiled-to-uncompiled ratio "beside every share it publishes", and the
-# cells that decide nothing still publish shares - section 4.3 requires them
-# reported, and requires cell C's ordering compared against cell B's. A cell
-# with no compiled total could not carry the bound its own shares are read
-# under.
-MODES_REPORTING = ("compiled", "plain", "instr-all")
-
-MODE_REGIONS = {
-    "compiled": (),
-    "plain": (),
-    "instr-all": tuple(sorted(pi.REGIONS)),
-    **{f"instr-{candidate}": regions
-       for candidate, regions in pi.CANDIDATE_REGIONS.items()},
+# Amendment 8's manifest. Candidate A is at the long width alone, per
+# Amendment 7 clause 35, and P3 is at both because clause 22's REJECT branch
+# reads it at both. The order is the order the arms are built and recorded in,
+# so two recordings can be compared row by row.
+CANDIDATES_AT_WIDTH = {
+    "short": ("L", "P3", "Q"),
+    "long": ("A", "L", "P3", "Q"),
 }
+
+# Amendment 7 clause 35: candidate A's dial is NAMED rather than measured, by
+# clause 15's own completeness tie-break, so no run reselects it.
+ATTENTION_DIAL = "kv-length"
+
+# Clause 22's partition, and which reading measures each region. P4 is the
+# remainder by subtraction and is measured by nothing.
+PARTITION = {"P1": "L", "P2": "A", "P3": "P3"}
 
 # The block's shape, measured rather than read off the config. On the 0.6B
 # model at 1, 2, 4 and 8 adapted blocks the backward count was exactly
@@ -190,68 +197,112 @@ INPUT_CONSUMING_PROJECTIONS = 3
 # ---------------------------------------------------------------------------
 # Pure functions: no MLX, no device, no machine
 # ---------------------------------------------------------------------------
-def rotated(items: Sequence[str], round_index: int) -> tuple[str, ...]:
-    """Rotate the first slot while preserving the registered order.
+@dataclass(frozen=True)
+class ArmSpec:
+    """One arm of the manifest, before any ladder has said what it can place.
 
-    Without it the first mode of every round always runs on a machine that has
-    just been idle and every later mode always runs warm, so the mode order
-    would be part of what the profile measures.
+    Pure and nominal. The fraction a dial ACTUALLY places is a property of the
+    model's dimensions, not of the manifest, and the two are kept apart
+    because a fit run on the fraction that was asked for rather than the one
+    that was placed is a fit on numbers nothing measured.
     """
-    items = tuple(items)
-    offset = round_index % len(items)
-    return items[offset:] + items[:offset]
+
+    label: str
+    candidate: str
+    role: str
+    nominal_phi: float | None = None
 
 
-def modes_for(cell: str) -> tuple[str, ...]:
-    """Which modes a cell runs. Only the primary cell splits its passes."""
+def widths_for(cell: str) -> tuple[str, ...]:
+    """Which registered widths a cell is measured at.
+
+    Only the deciding cell takes both. Section 4.3 gives cells A, C and D no
+    part in the selection, so measuring them twice would double their cost to
+    move no rule, and Amendment 5 clause 14's two-width comparison is a
+    property of the cell that decides.
+    """
     if cell not in rules.CELLS:
         raise RunInvalid(f"not a registered cell: {cell!r}")
-    return (MODES_DECIDING if cell == rules.PRIMARY_CELL
-            else MODES_REPORTING)
+    return (rules.WIDTH_ORDER if cell == rules.PRIMARY_CELL
+            else (rules.WIDTH_ORDER[0],))
 
 
-def candidates_from(mode: str) -> tuple[str, ...]:
-    """Which candidates a mode's log can score.
+def arm_manifest(width: str) -> tuple[ArmSpec, ...]:
+    """Amendment 8's arms for one width, in build and record order.
 
-    A split pass scores exactly one candidate; the combined pass scores all of
-    them and each share it produces carries cross-region bias.
+    One stock arm, then each candidate's knob ladder, its scaffold ladder at
+    the same settings, and an ablation where clause 18 credits a rewrite with
+    a residue. A retune carries no ablation at all rather than an unused one,
+    because `KnobReading` refuses a retune that measured a residue nothing may
+    consume.
     """
-    if mode == "instr-all":
-        return tuple(rules.CANDIDATES)
-    if mode.startswith("instr-"):
-        return (mode.split("-", 1)[1],)
-    return ()
+    if width not in rules.WIDTHS:
+        raise RunInvalid(
+            f"{width!r} is not a registered width: "
+            f"{sorted(rules.WIDTHS)}")
+    arms = [ArmSpec(label="stock", candidate="stock", role=pk.STOCK)]
+    for candidate in CANDIDATES_AT_WIDTH[width]:
+        for role in (pk.KNOB, pk.SCAFFOLD):
+            for phi in pk.PHIS:
+                arms.append(ArmSpec(label=f"{candidate}:{role}:{phi:.2f}",
+                                    candidate=candidate, role=role,
+                                    nominal_phi=phi))
+        if pk.kind_of(candidate) == pk.REWRITE:
+            arms.append(ArmSpec(label=f"{candidate}:{pk.ABLATION}",
+                                candidate=candidate, role=pk.ABLATION))
+    labels = [arm.label for arm in arms]
+    if len(set(labels)) != len(labels):
+        raise RunInvalid(
+            f"the manifest for width {width!r} repeats a label, so one arm's "
+            f"samples would overwrite another's")
+    return tuple(arms)
 
 
-def cell_context(cell: str, *, batch: int, width: int, model: str,
-                 adapted: int, supervised: int | None = None) -> dict:
-    """What identifies the workload a pass measured.
+def cell_context(cell: str, width: str, *, batch: int, batch_width: int,
+                 model: str, adapted: int, supervised: int | None = None,
+                 supervised_of: int | None = None,
+                 batch_sha256: str | None = None) -> dict:
+    """What identifies the workload one width of one cell measured.
 
-    Carried into every decomposition, and checked wherever a numerator from
-    one pass is divided by a denominator from another: across modes inside
-    this harness, and across harnesses when the floor sweep's samples meet
-    this profile's shares. Two passes with different contexts describe
+    Carried into every arm's samples and checked wherever a number from one
+    measurement meets a number from another: across widths inside this
+    harness, and across harnesses when the floor sweep's samples meet this
+    profile's shares. Two measurements with different contexts describe
     different steps, and a ratio between them is a number nothing downstream
     could tell was meaningless.
 
-    `tokens` is the token count the projections actually run at, and it is
-    carried rather than left to be derived because deriving it is where a
-    floor sweep would go wrong. mlx-lm pads a batch to `width` and then
+    `operation_width` is the token count the matmuls actually run at, and it
+    is carried rather than left to be derived because deriving it is where a
+    floor sweep would go wrong. mlx-lm pads a batch to `batch_width` and then
     `default_loss` trains on `batch[:, :-1]`, so every matmul in the step sees
-    `width - 1` tokens per row. At the widest band this corpus can fill that
-    is 160 rather than 161, and a sweep that measured its floor at the padded
-    width would be measuring a shape the step never produces while agreeing
-    with the profile about everything else.
+    one fewer token per row. It is taken from the registered band rather than
+    from the batch, and the batch is then checked against it, so a batch that
+    padded to some other width refuses instead of quietly redefining the cell.
 
     `supervised` is the count of tokens the loss actually trains on, and it is
-    in the context because candidate L's floor is defined as the same
-    operations "timed on only the supervised rows of the same cell". A floor
-    measured against a different supervised count is a floor for a different
-    problem, and the credited ratio would still divide.
+    here because candidate L's floor is defined as the same operations "timed
+    on only the supervised rows of the same cell". A floor measured against a
+    different supervised count is a floor for a different problem, and the
+    credited ratio would still divide.
     """
-    return {"cell": cell, "batch": batch, "width": width,
-            "tokens": batch * (width - 1), "model": model, "adapted": adapted,
-            "supervised": supervised}
+    if width not in rules.WIDTHS:
+        raise RunInvalid(f"{width!r} is not a registered width")
+    registered = rules.WIDTHS[width]
+    if batch_width != registered["batch_width"]:
+        raise RunInvalid(
+            f"cell {cell} at the {width} width padded to {batch_width} and "
+            f"the registered band {registered['band']} pads to "
+            f"{registered['batch_width']}: this batch is not the width the "
+            f"profile registered")
+    fraction = (supervised / supervised_of
+                if supervised is not None and supervised_of else None)
+    return {"cell": cell, "width": width, "band": registered["band"],
+            "batch": batch, "batch_width": batch_width,
+            "operation_width": registered["operation_width"],
+            "tokens": batch * registered["operation_width"],
+            "model": model, "adapted": adapted, "supervised": supervised,
+            "supervised_of": supervised_of,
+            "supervised_fraction": fraction, "batch_sha256": batch_sha256}
 
 
 def expected_counts(depth: int, adapted: int,
@@ -304,141 +355,314 @@ def completeness(observed: Mapping[str, Mapping[str, int]],
             "observed": {r: dict(c) for r, c in sorted(observed.items())}}
 
 
-def median_decomposition(passes: Sequence[Mapping[str, object]]) -> dict:
-    """One decomposition standing for several rounds of the same mode.
+# Amendment 7 clause 34. Only these two name the first operation, so only
+# their readings can stop a recording binding. Candidate A gates nothing by
+# ruling 2 and candidate P3 gates nothing because no certified margin reads
+# it; both are measured, published, and allowed to be absent.
+CERTIFIED_CANDIDATES = ("L", "Q")
 
-    Section 3.3 takes both sides of a share as medians over the eligible
-    rounds, so this is a ratio of medians rather than a median of ratios: the
-    per-region medians go in the numerator and the plain step's median goes in
-    the denominator. The result is not a decomposition any single round
-    produced, and it is not presented as one.
 
-    Refuses when the rounds disagree about what they measured. Two rounds of
-    one mode that ran different contexts, or that reached different regions,
-    or that fired a region a different number of times, are not repeats, and a
-    median across them describes nothing.
+def _fit_record(one: pk.Fit) -> dict:
+    """A fitted line as data, so a reader can re-derive every gate from it."""
+    return {"slope_ms": one.slope, "intercept_ms": one.intercept,
+            "r_squared": one.r_squared, "max_residual_ms": one.max_residual}
+
+
+def _reading_record(reading: pk.KnobReading) -> dict:
+    """One candidate's reading, with everything each gate rested on beside it.
+
+    Held as the measured quantity, its threshold and its signed distance in
+    units of `R` rather than as a pass or a fail, because a reader who can
+    only see the verdict cannot tell a gate that barely held from one that
+    held by a factor of ten, and clause 26's own margins are the evidence a
+    later amendment would be argued from.
     """
-    if not passes:
-        raise RunInvalid("a median needs at least one pass")
-    context = passes[0]["context"]
-    counts = passes[0]["counts"]
-    regions = set(passes[0]["totals"])
-    for index, one in enumerate(passes[1:], start=1):
-        if one["context"] != context:
-            raise RunInvalid(
-                f"pass {index} ran in {one['context']!r} and pass 0 ran in "
-                f"{context!r}: these are not repeats of one measurement")
-        if set(one["totals"]) != regions:
-            raise RunInvalid(
-                f"pass {index} measured {sorted(one['totals'])} and pass 0 "
-                f"measured {sorted(regions)}: a region present in one round "
-                f"and absent in another cannot be reduced to a median")
-        if one["counts"] != counts:
-            raise RunInvalid(
-                f"pass {index} fired {one['counts']!r} and pass 0 fired "
-                f"{counts!r}: the workload changed between rounds")
+    floor = reading.resolution_floor
     return {
-        "totals": {region: statistics.median([one["totals"][region]
-                                              for one in passes])
-                   for region in sorted(regions)},
-        "elapsed": statistics.median([one["elapsed"] for one in passes]),
-        "covered": statistics.median([one["covered"] for one in passes]),
-        "remainder": statistics.median([one["remainder"] for one in passes]),
-        "counts": counts,
-        "context": context,
-        "passes": len(passes),
+        "type": "reading",
+        "candidate": reading.candidate,
+        "kind": reading.kind,
+        "stock_median_ms": reading.stock_median,
+        "registered_slope_ms": reading.slope,
+        "pooled": _fit_record(reading.pooled),
+        "per_round": [_fit_record(one) for one in reading.per_round],
+        "scaffold": _fit_record(reading.scaffold),
+        "scaffold_case": reading.scaffold_case,
+        "scaffold_offset_ms": reading.scaffold_offset,
+        "scaffold_range_ms": reading.scaffold_range,
+        "effective_scaffold_slope_ms": reading.effective_scaffold_slope,
+        "actual_span": reading.span,
+        "ablated_median_ms": reading.ablated_median,
+        "raw_residue_ms": reading.raw_residue,
+        "credited_residue_ms": reading.residue,
+        "residue_is_a_fault": reading.residue_is_a_fault,
+        "attributed_ms": reading.attributed,
+        "share": reading.share,
+        # Clause 22 reads `b/T` with NO residue term, "because a partition
+        # region is a region and not a candidate". It is computed here beside
+        # the candidate share rather than derived by the partition, so the two
+        # quantities are visibly different numbers in the record.
+        "scaling_share": reading.slope / reading.stock_median,
+        "resolution_floor_ms": floor,
+        "margins_in_R": {
+            "pooled_excursion": (abs(reading.pooled.slope) * reading.span
+                                 / floor - pk.EXCURSION_R_MULTIPLE)
+            if floor and reading.span is not None else None,
+            "median_excursion": (abs(reading.slope) * reading.span / floor
+                                 - pk.EXCURSION_R_MULTIPLE)
+            if floor and reading.span is not None else None,
+            "scaffold_offset": (pk.SCAFFOLD_OFFSET_R_MULTIPLE
+                                - abs(reading.scaffold_offset) / floor)
+            if floor else None,
+            "scaffold_range": (reading.scaffold_range / floor - 1.0)
+            if floor and reading.scaffold_range is not None else None,
+            "raw_residue": reading.raw_residue / floor if floor else None,
+        },
+        "blockers": reading.blockers(),
     }
 
 
-def cell_reading(record: Mapping[str, object], *,
-                 spread_limit_pct: float = machine_state.MAX_SPREAD_PCT
-                 ) -> dict:
-    """Every derived number for one cell, and what each one rests on.
+def arm_spreads(arms: Mapping[str, Mapping[str, object]], *,
+                spread_limit_pct: float = machine_state.MAX_SPREAD_PCT
+                ) -> dict:
+    """Every arm's own spread across the rounds, and whether it is eligible.
 
-    The plain pass is the reference arm and its own spread across rounds is
-    the detector, exactly as `interleave` uses its canary: interleaving the
-    modes equalises a clock excursion across them but cannot detect one, so a
-    plain arm that disagreed with itself between rounds describes the machine
-    and the cell binds nothing.
+    The old design gated on the plain arm alone, because interleaving equalises
+    a clock excursion across arms but cannot detect one, so one reference arm
+    disagreeing with itself was the detector. With a ladder there is no
+    reference arm: every arm is a whole step and any of them can be the one the
+    machine moved under, so the gate runs over all of them.
     """
-    modes = record["modes"]
-    plain = list(modes["plain"]["totals_s"])
-    plain_total = statistics.median(plain)
-    context = record["context"]
-    denominator = {"total": plain_total, "context": context}
+    out = {}
+    for label in sorted(arms):
+        samples = list(arms[label]["samples_ms"])
+        out[label] = {
+            "median_ms": statistics.median(samples),
+            "spread_pct": machine_state.spread_pct(samples),
+            "rounds_eligible": rules.round_is_eligible(samples,
+                                                       spread_limit_pct),
+        }
+    return out
 
-    reading = {
-        "cell": record["cell"],
+
+def partition(entries: Mapping[str, Mapping[str, object]]) -> dict:
+    """Clause 22's double-counting test, at one width.
+
+    Three outcomes and not two. Where the MEASURED regions alone already sum
+    above one the profile REJECTS, and it rejects whether or not a region is
+    absent, because every share is non-negative so a missing addend can only
+    raise the sum. Where they do not and a region is absent the test is NOT
+    RUN with that reason, which is not a pass: recording NOT RUN in the first
+    case would suppress a rejection the numbers already establish.
+
+    It detects double-counting and cannot detect omission, because P4 is
+    whatever the other three leave and absorbs anything unmeasured. And three
+    separately fitted slopes are not guaranteed additive under compilation, so
+    a pass is a necessary condition on the decomposition and not a proof of it.
+    """
+    measured, absent = {}, {}
+    for region, candidate in sorted(PARTITION.items()):
+        entry = entries.get(candidate)
+        if entry is None or entry.get("type") != "reading":
+            absent[region] = (candidate if entry is None
+                              else entry.get("reason_code", "absent"))
+        else:
+            measured[region] = entry["scaling_share"]
+    subtotal = sum(measured.values())
+    if subtotal > 1.0:
+        outcome, reason = "REJECT", (
+            f"the measured regions {sorted(measured)} sum to {subtotal:.4f}, "
+            f"above one; every share is non-negative so no absent region can "
+            f"bring it back down")
+    elif absent:
+        outcome, reason = "NOT RUN", (
+            f"regions {sorted(absent)} carry no reading, and the measured "
+            f"regions sum to {subtotal:.4f}, which proves nothing")
+    else:
+        outcome, reason = "PASS", (
+            f"the three regions sum to {subtotal:.4f}, at or below one")
+    return {"outcome": outcome, "reason": reason, "measured": measured,
+            "absent": absent, "subtotal": subtotal,
+            "remainder_P4": None if absent else 1.0 - subtotal,
+            "reads": "b/T, the scaling share with no residue term, because a "
+                     "partition region is a region and not a candidate"}
+
+
+def width_reading(measured: Mapping[str, object], *,
+                  resolution_floor_ms: float,
+                  spread_limit_pct: float = machine_state.MAX_SPREAD_PCT
+                  ) -> dict:
+    """One width of one cell, reduced from raw arm samples to typed entries.
+
+    Every candidate resolves to exactly one of two things and never to a
+    placeholder: a `reading`, or a `missing_share` naming why. An absence is a
+    measurement that legitimately does not exist and the rules carry it; it is
+    not a zero, and it is not a null anything downstream could divide by.
+    """
+    width = measured["width"]
+    arms = measured["arms"]
+    manifest = arm_manifest(width)
+    expected = {arm.label for arm in manifest}
+    if set(arms) != expected:
+        raise RunInvalid(
+            f"width {width!r} recorded arms {sorted(set(arms) - expected)} "
+            f"the manifest does not name and is missing "
+            f"{sorted(expected - set(arms))}; a hole is not an absence")
+    context = measured["context"]
+    for label in sorted(arms):
+        if arms[label]["context"] != context:
+            raise RunInvalid(
+                f"arm {label!r} carries {arms[label]['context']!r} and the "
+                f"width carries {context!r}: two arms in one fit measured "
+                f"different workloads")
+
+    samples = {label: list(arms[label]["samples_ms"]) for label in arms}
+    counted = {len(values) for values in samples.values()}
+    if len(counted) != 1:
+        raise RunInvalid(
+            f"width {width!r} recorded {sorted(counted)} rounds across its "
+            f"arms; arms that ran a different number of times are not the "
+            f"repeats the spread gate reads")
+    roles = tuple(pk.ArmRole(label=label, candidate=arms[label]["candidate"],
+                             role=arms[label]["role"],
+                             phi=arms[label]["actual_phi"])
+                  for label in sorted(arms))
+    readings = pk.reduce_width(samples, roles,
+                               resolution_floor=resolution_floor_ms,
+                               rounds=counted.pop())
+
+    spreads = arm_spreads(arms, spread_limit_pct=spread_limit_pct)
+    entries = {}
+    for candidate in CANDIDATES_AT_WIDTH[width]:
+        reading = readings[candidate]
+        record = _reading_record(reading)
+        # Clause 34 gives a reported quantity an interval, and candidate A is
+        # in neither the pilot nor the fresh set, so there is no calibrated
+        # interval for it to carry. What it carries instead is its own arms'
+        # observed range, labelled as an observed spread and NOT as a bound at
+        # any registered rate, which is the difference the label exists to
+        # keep visible.
+        record["certified"] = candidate in CERTIFIED_CANDIDATES
+        if not record["certified"]:
+            record["observed_spread_pct"] = {
+                label: spreads[label]["spread_pct"]
+                for label in sorted(spreads)
+                if arms[label]["candidate"] == candidate}
+            record["observed_spread_is_not_a_bound"] = (
+                "an observed range over this run's own rounds, not an "
+                "interval at any registered rate: clause 37 keeps candidate "
+                "A and candidate P3 out of the calibration entirely")
+        if record["blockers"]:
+            entries[candidate] = {
+                "type": "missing_share",
+                "candidate": candidate,
+                "certified": record["certified"],
+                "reason_code": "fit_gates_failed",
+                "blockers": record["blockers"],
+                "evidence": record,
+            }
+        else:
+            entries[candidate] = record
+
+    return {
+        "width": width,
         "context": context,
-        "plain_total_s": plain_total,
-        "plain_samples_s": plain,
-        "plain_spread_pct": machine_state.spread_pct(plain),
+        "resolution_floor_ms": resolution_floor_ms,
         "spread_limit_pct": spread_limit_pct,
-        "rounds_eligible": rules.round_is_eligible(plain, spread_limit_pct),
-        "peak_gb": {mode: max(modes[mode]["peak_gb"]) for mode in sorted(modes)},
-        "shares": {},
-        "instrument_cost": {},
+        "arms": spreads,
+        "peak_gb": measured["peak_gb"],
+        "entries": entries,
+        "partition": partition(entries),
+        "actual_settings": {
+            label: {"nominal_phi": arms[label]["nominal_phi"],
+                    "actual_phi": arms[label]["actual_phi"],
+                    "sites": arms[label].get("sites")}
+            for label in sorted(arms) if arms[label]["actual_phi"] is not None
+        },
     }
 
-    if "compiled" in modes:
-        reading["compile_transfer"] = rules.compile_transfer(
-            plain_total, statistics.median(modes["compiled"]["totals_s"]))
 
-    for mode in sorted(modes):
-        scored = candidates_from(mode)
-        if not scored:
-            continue
-        combined = median_decomposition(modes[mode]["passes"])
-        instrumented_total = statistics.median(modes[mode]["totals_s"])
-        reading["instrument_cost"][mode] = rules.instrument_cost(
-            instrumented_total, plain_total)
-        # How much longer the marked pass ran than the unmarked one. Recorded
-        # because it is the size of the perturbation sitting inside this
-        # candidate's numerator, and it is NOT subtracted: see the note on
-        # `caveat` below for the two attempts that showed it cannot be.
-        excess = instrumented_total - plain_total
-        split = len(scored) == 1
-        # Section 3.3 as Amendment 4 restates it: the regions and the
-        # remainder are measured INSIDE the marked step and compared against
-        # "that same uncompiled step's own end-to-end time, taken without the
-        # interior boundaries" - which is the plain pass, not this one.
-        #
-        # Compared against this pass's own elapsed it could not fail, because
-        # the remainder is defined as whatever the spans leave on the same
-        # timeline. Compared against the plain pass, as registered, it is the
-        # instrument's cost measured against a 2% limit, so the registered
-        # reconciliation and the instrument-cost band are one check with two
-        # limits rather than two checks. Both are reported; the 2% is what is
-        # registered today and it is the one that binds.
-        reading.setdefault("reconciles", {})[mode] = dict(
-            rules.reconciles(combined["totals"], combined["remainder"],
-                             plain_total),
-            same_check_as="instrument_cost, at section 3.3's 2% limit")
-        for candidate in scored:
-            regions = list(pi.CANDIDATE_REGIONS[candidate])
-            marked_total = sum(combined["totals"][name] for name in regions)
-            reading["shares"][candidate] = {
-                "share": pi.candidate_share(combined, candidate, denominator),
-                "from_mode": mode,
-                "regions": regions,
-                "region_totals_s": {name: combined["totals"][name]
-                                    for name in regions},
-                "cross_region_bias": mode == "instr-all",
-                "marked_total_s": marked_total,
-                "instrument_excess_s": excess if split else None,
-                "caveat": (
-                    "this share carries its own marks: they sit inside the "
-                    "spans that form the numerator and outside the plain step "
-                    "that forms the denominator, so it is an upper bound on "
-                    "the candidate's true share, and the overstatement grows "
-                    "with how many marks the candidate's regions carry. No "
-                    "correction is applied because none is available: "
-                    "subtracting the whole excess produced negative shares "
-                    "for two candidates, and a doubled fence measured nothing "
-                    "because a second eval of an already-materialised tensor "
-                    "is free (both measured 2026-08-20)."),
-            }
-    return reading
+# Clause 11's context travels with every measurement, and the two widths are
+# SUPPOSED to differ in some of it. These are the fields that must agree
+# across the columns anyway, because a disagreement in one of them means the
+# two columns measured two arrangements and reported it as width.
+INVARIANT_CONTEXT = ("cell", "batch", "model", "adapted")
+
+# The fields the two columns are allowed to differ in, named rather than left
+# as "everything else", so a field added later has to be classified.
+VARIANT_CONTEXT = ("width", "band", "batch_width", "operation_width", "tokens",
+                   "supervised", "supervised_of", "supervised_fraction",
+                   "batch_sha256")
+
+
+def profile_matrix(readings: Mapping[str, Mapping[str, object]]) -> dict:
+    """The rule-facing table: every candidate at every width, typed, in order.
+
+    Serialised in the registered order so two recordings can be compared row
+    by row, and complete by construction: a candidate a width does not measure
+    gets a typed absence naming why, never an omission and never a null. The
+    absences here are legal outcomes rather than failures - Amendment 7 clause
+    37 registers that candidate A absent at either width or at both is never
+    incompleteness, which is REVERSED from Amendment 6.
+
+    Every entry in a column carries that column's context, which `width_reading`
+    already enforces arm by arm. What is checked HERE is the part it cannot
+    see: that the two columns agree about the arrangement they measured, and
+    differ only in the fields width is allowed to move.
+    """
+    missing = sorted(set(rules.WIDTH_ORDER) - set(readings))
+    if missing:
+        raise RunInvalid(
+            f"the deciding cell carries no reading for {missing}, and the "
+            f"selection takes the highest minimum gain across both widths")
+    contexts = {width: readings[width]["context"] for width in readings}
+    reference = contexts[rules.WIDTH_ORDER[0]]
+    for width in rules.WIDTH_ORDER[1:]:
+        for field in INVARIANT_CONTEXT:
+            if contexts[width][field] != reference[field]:
+                raise RunInvalid(
+                    f"the {width} column measured {field}="
+                    f"{contexts[width][field]!r} and the "
+                    f"{rules.WIDTH_ORDER[0]} column measured "
+                    f"{reference[field]!r}: these two columns describe two "
+                    f"arrangements and the comparison would report it as width")
+        unclassified = sorted(set(contexts[width])
+                              - set(INVARIANT_CONTEXT) - set(VARIANT_CONTEXT))
+        if unclassified:
+            raise RunInvalid(
+                f"the context carries {unclassified}, which is neither "
+                f"registered as invariant across widths nor as something "
+                f"width is allowed to move")
+
+    entries = {}
+    for candidate in rules.CANDIDATES:
+        column = {}
+        for width in rules.WIDTH_ORDER:
+            if candidate not in CANDIDATES_AT_WIDTH[width]:
+                column[width] = {
+                    "type": "missing_share", "candidate": candidate,
+                    "certified": candidate in CERTIFIED_CANDIDATES,
+                    "reason_code": "not_measured_at_this_width",
+                    "reason": (
+                        f"candidate {candidate} is measured at the long width "
+                        f"alone, per Amendment 7 clause 35, because that is "
+                        f"where clause 26 records its dial fits"),
+                }
+                continue
+            entry = readings[width]["entries"][candidate]
+            if entry.get("type") not in ("reading", "missing_share"):
+                raise RunInvalid(
+                    f"candidate {candidate} at the {width} width is typed "
+                    f"{entry.get('type')!r}, and the matrix carries readings "
+                    f"and typed absences and nothing else")
+            column[width] = entry
+        entries[candidate] = column
+    return {
+        "candidate_order": list(rules.CANDIDATES),
+        "width_order": list(rules.WIDTH_ORDER),
+        "entries": entries,
+        "context_by_width": contexts,
+    }
 
 
 def binding_blockers(record: Mapping[str, object]) -> list[str]:
@@ -447,76 +671,136 @@ def binding_blockers(record: Mapping[str, object]) -> list[str]:
     Gathered rather than raised, because a run that measured everything and
     then failed one gate is evidence: the samples are worth keeping and the
     reason is worth naming.
+
+    Every gate the mode-based version held has a named replacement or a
+    written reason it is gone, so nothing was lost by not being carried
+    forward:
+
+      closing idle           survives unchanged.
+      the plain arm's spread  becomes every arm's spread, because with a
+                             ladder there is no reference arm and any of them
+                             can be the one the machine moved under.
+      the compile transfer    gone by Amendment 5 clause 4: every timed arm is
+                             compiled, so there is no uncompiled total to
+                             transfer to.
+      the reconciliation      gone by clause 2, which voids it outright, and
+                             its named weaker replacement is clause 22's
+                             partition, which is checked below.
+      a share is a fraction   survives, inside `KnobReading.blockers`, along
+                             with every fit gate the marks never had.
+      the instrument band     gone: there is no timing device inside the step,
+                             so there is no perturbation left to price. What
+                             replaces it is the scaffold price, which is the
+                             honest measure of what a dial costs and is
+                             checked at every setting rather than at one.
+      exact region counts     survives, in the untimed structural pass.
+      marked/plain identity   survives, in the same untimed structural pass.
+
+    A typed absence is not a blocker. Candidate A gates no terminal by
+    Amendment 7 ruling 2, and candidate P3 is read only by a fault check that
+    takes no margin, so their absence costs a report a row and a check a
+    width. Candidates L and Q are the two the profile certifies, and a gate
+    they fail is a gate the ruling would have rested on.
     """
     blockers = []
     if not record.get("closing_idle", {}).get("idle"):
         blockers.append("the machine was not idle at the closing gate")
-    for cell, reading in sorted(record.get("readings", {}).items()):
-        if not reading["rounds_eligible"]:
-            blockers.append(
-                f"cell {cell}: the plain arm's own spread is "
-                f"{reading['plain_spread_pct']:.1f}%, past the "
-                f"{reading['spread_limit_pct']:.1f}% limit, so the rounds "
-                f"describe the machine rather than the step")
-        transfer = reading.get("compile_transfer")
-        if transfer is not None and not transfer["ok"]:
-            blockers.append(
-                f"cell {cell}: the compiled-to-uncompiled ratio is "
-                f"{transfer['ratio']:.4f}, outside {transfer['band']}")
-        for mode, report in sorted(reading.get("reconciles", {}).items()):
-            if not report["ok"]:
-                blockers.append(
-                    f"cell {cell} {mode}: the marked regions and the "
-                    f"remainder account for {report['accounted']:.4f}s against "
-                    f"{report['step_total']:.4f}s for the same step without "
-                    f"them, a gap of {report['gap_pct']:.1f}% past section "
-                    f"3.3's {report['limit_pct']:.1f}% limit")
-        for candidate, share in sorted(reading["shares"].items()):
-            if not 0.0 < share["share"] < 1.0:
-                blockers.append(
-                    f"cell {cell}: candidate {candidate}'s registered share is "
-                    f"{share['share']:.4f}, which is not a fraction of a step; "
-                    f"the marks' own cost sits inside the numerator and "
-                    f"outside the denominator, and no correction is registered")
-        for mode, cost in sorted(reading["instrument_cost"].items()):
-            if cost["ok"] is None:
-                blockers.append(
-                    f"cell {cell} {mode}: the instrument cost is "
-                    f"{cost['ratio']:.4f} and no band is registered for it")
-            elif not cost["ok"]:
-                blockers.append(
-                    f"cell {cell} {mode}: the instrument cost is "
-                    f"{cost['ratio']:.4f}, outside {cost['band']}")
     for cell, cell_record in sorted(record.get("cells", {}).items()):
-        if not cell_record["completeness"]["ok"]:
-            blockers.append(
-                f"cell {cell}: region counts differ from the arrangement: "
-                f"{cell_record['completeness']['mismatches']}")
-        for mode, verdict in sorted(cell_record["identity"]["modes"].items()):
-            if not verdict["loss_equal"] or verdict["gradients_differing"]:
+        for width, reading in sorted(cell_record.get("readings", {}).items()):
+            for label, arm in sorted(reading["arms"].items()):
+                if not arm["rounds_eligible"]:
+                    blockers.append(
+                        f"cell {cell} {width} arm {label}: its own spread is "
+                        f"{arm['spread_pct']:.1f}%, past the "
+                        f"{reading['spread_limit_pct']:.1f}% limit, so its "
+                        f"rounds describe the machine rather than the step")
+            for candidate, entry in sorted(reading["entries"].items()):
+                evidence = (entry if entry["type"] == "reading"
+                            else entry["evidence"])
+                # Clause 33: a residue below `-R` is a FAULT and not an
+                # absence, whatever the candidate. It says the step ran SLOWER
+                # with the operation removed than the fit predicts without its
+                # scaling part, which is not a measurement that can be true,
+                # so no rule carries it and no demotion excuses it.
+                if evidence.get("residue_is_a_fault"):
+                    blockers.append(
+                        f"cell {cell} {width} candidate {candidate}: the raw "
+                        f"residue is {evidence['raw_residue_ms']:.6f} ms, "
+                        f"negative by more than the resolution floor of "
+                        f"{evidence['resolution_floor_ms']:.6f} ms")
+                if entry["type"] == "reading":
+                    continue
+                if candidate not in CERTIFIED_CANDIDATES:
+                    continue
+                for reason in entry["blockers"]:
+                    blockers.append(f"cell {cell} {width}: {reason}")
+            if reading["partition"]["outcome"] == "REJECT":
                 blockers.append(
-                    f"cell {cell} {mode}: the marked pass and the plain pass "
-                    f"do not compute the same thing")
+                    f"cell {cell} {width}: clause 22 REJECTS the profile - "
+                    f"{reading['partition']['reason']}")
+        # Amendment 7 clause 37 and clause 11: the deciding cell's certified
+        # entries must be complete at BOTH widths, because the selection takes
+        # the highest minimum gain across them and a candidate measured at one
+        # width has no minimum to take. Candidate A absent at either width is
+        # never incompleteness, which is REVERSED from Amendment 6.
+        if cell == rules.PRIMARY_CELL:
+            for candidate in CERTIFIED_CANDIDATES:
+                for width in widths_for(cell):
+                    entry = cell_record.get("readings", {}).get(
+                        width, {}).get("entries", {}).get(candidate)
+                    if entry is None:
+                        blockers.append(
+                            f"cell {cell} {width}: candidate {candidate} was "
+                            f"not measured, and the selection takes the "
+                            f"highest minimum gain across both widths")
+        # Per width, because the widths run different batches through the
+        # same seams and a fault at the second one would otherwise be recorded
+        # and never read.
+        for width, checked in sorted(cell_record.get("structural", {}).items()):
+            if not checked["completeness"]["ok"]:
+                blockers.append(
+                    f"cell {cell} {width}: region counts differ from the "
+                    f"arrangement: {checked['completeness']['mismatches']}")
+            if not checked["loss_equal"] or checked["gradients_differing"]:
+                blockers.append(
+                    f"cell {cell} {width}: the marked pass and the plain pass "
+                    f"do not compute the same thing, so the counts beside it "
+                    f"describe a different step from the one that was timed")
+            if checked["foreign_on_removal"]:
+                blockers.append(
+                    f"cell {cell} {width}: {checked['foreign_on_removal']} "
+                    f"was replaced while the structural pass ran, so what it "
+                    f"counted is not what this profile installed")
     return blockers
 
 
 def recording_path(results_dir: str | Path, day: date, *, kind: str,
-                   closing_idle: bool) -> Path:
-    """Where a recording lands, with its verdict already in the name."""
-    suffix = ".json" if closing_idle else ".REFUSED.json"
+                   binding: bool) -> Path:
+    """Where a recording lands, with its verdict already in the name.
+
+    Keyed on the final verdict rather than on the closing idle gate alone.
+    The old name marked a recording REFUSED only when the machine went busy,
+    so a run that measured everything cleanly on a quiet machine and then
+    failed a fit gate landed under the same name as one that bound, and the
+    difference was visible only inside the file.
+    """
+    suffix = ".json" if binding else ".REFUSED.json"
     return Path(results_dir) / f"profile-stock-{kind}-{day.isoformat()}{suffix}"
 
 
 def validate_plan(plan: Mapping[str, object]) -> dict:
     """Freeze the unregistered choices together, before any model is loaded."""
-    required = {"schema_version", "data", "seed", "optimizer",
+    required = {"schema_version", "bands", "seed", "optimizer",
                 "optimizer_config", "learning_rate", "memory_ceiling_gb",
-                "wall_cap_seconds", "cells"}
+                "wall_cap_seconds", "cells", "resolution"}
     missing = sorted(required - set(plan))
     if missing:
         raise RunInvalid(f"run plan is missing {missing}")
-    if plan["schema_version"] != 1:
-        raise RunInvalid(f"unknown plan schema {plan['schema_version']!r}")
+    if plan["schema_version"] != 2:
+        raise RunInvalid(
+            f"unknown plan schema {plan['schema_version']!r}; schema 1 named "
+            f"marked modes and one dataset, and this harness measures knob "
+            f"arms at two registered widths")
     # A stock profile installs nothing. A plan that could name a kept kernel
     # could produce a profile of somebody's kernel labelled as stock, so the
     # key is refused outright rather than defaulted to empty.
@@ -531,6 +815,46 @@ def validate_plan(plan: Mapping[str, object]) -> dict:
         raise RunInvalid(f"not registered cells: {unknown}")
     if not cells:
         raise RunInvalid("a profile with no cells measures nothing")
+
+    # One corpus, two bands, per Amendment 5 clause 20: two datasets have two
+    # supervised fractions, which IS candidate L's floor, so a width
+    # comparison drawn from two corpora would carry a second variable and
+    # report it as width.
+    bands = dict(plan["bands"])
+    needed_bands = sorted({width for cell in cells
+                           for width in widths_for(cell)})
+    if sorted(bands) != needed_bands:
+        raise RunInvalid(
+            f"the plan pins bands {sorted(bands)} and the requested cells "
+            f"need exactly {needed_bands}")
+    for width, directory in sorted(bands.items()):
+        if Path(directory).name != rules.WIDTHS[width]["data"]:
+            raise RunInvalid(
+                f"the {width} width is registered at band "
+                f"{rules.WIDTHS[width]['band']}, whose slice is "
+                f"{rules.WIDTHS[width]['data']!r}, and the plan points it at "
+                f"{Path(directory).name!r}")
+
+    # Clause 21 forbids reusing one resolution floor across contexts, and
+    # clause 26 refuses a floor of zero, so both floors enter as data the plan
+    # copies out of the committed addendum and the artifact that supplied them
+    # is named. The harness reads `R` and never measures it: a run that could
+    # set its own floor could set it after seeing what it needed to clear.
+    resolution = plan["resolution"]
+    floors = dict(resolution.get("floors_ms", {}))
+    needed = sorted({width for cell in cells for width in widths_for(cell)})
+    for width in needed:
+        value = floors.get(width)
+        if not isinstance(value, (int, float)) or not value > 0.0:
+            raise RunInvalid(
+                f"the plan carries no positive resolution floor for the "
+                f"{width} width, and every gate clause 26 registers is a "
+                f"multiple of one")
+    if not resolution.get("addendum_sha256"):
+        raise RunInvalid(
+            "the plan names no addendum for its resolution floors, so a "
+            "reading could not be traced to the measurement that set them")
+
     fixed = dict(plan)
     fixed["cells"] = cells
     fixed["kept_candidates"] = []
@@ -538,111 +862,28 @@ def validate_plan(plan: Mapping[str, object]) -> dict:
     fixed["rounds"] = int(plan.get("rounds", ROUNDS))
     if fixed["rounds"] < 1:
         raise RunInvalid("a round count below one measures nothing")
+    fixed["bands"] = bands
+    fixed["widths"] = {cell: list(widths_for(cell)) for cell in cells}
+    fixed["resolution"] = dict(resolution, floors_ms=floors)
     return fixed
 
 
 def decide(profile: Mapping[str, object],
            sweep: Mapping[str, object]) -> dict:
-    """Section 4.3 applied to two closed recordings, and nothing else.
+    """Step 8's job, refused here rather than half-done.
 
-    The shares come from the profile, the credited ratios from the floor
-    sweep, and the two are checked to describe the same workload before either
-    divides the other. That check is the whole reason a context travels with
-    every measurement: the profile and the sweep are separate runs of separate
-    harnesses, and nothing else in the pipeline would notice if one of them
-    had measured a different batch.
+    The rule this used to apply reads one share per candidate at one width
+    against one credited ratio, and none of those three things survives
+    Amendment 7 unchanged: the selection takes the highest MINIMUM gain across
+    two widths, candidate A carries a share and no ratio at all, and the kill
+    rule no longer certifies. A `--decide` that ran the old arithmetic over a
+    schema-2 recording would produce a ruling with the right shape and the
+    wrong meaning, which is worse than none.
     """
-    for name, record in (("profile", profile), ("sweep", sweep)):
-        if not record.get("binding"):
-            raise RunInvalid(
-                f"the {name} recording does not bind: "
-                f"{record.get('binding_blockers')}")
-    cell = rules.PRIMARY_CELL
-    reading = profile.get("readings", {}).get(cell)
-    floors = sweep.get("cells", {}).get(cell)
-    if reading is None or floors is None:
-        raise RunInvalid(
-            f"the ruling is computed at cell {cell} and one of the two "
-            f"recordings does not carry it")
-    if reading["context"] != floors["context"]:
-        raise RunInvalid(
-            f"the profile measured {reading['context']!r} and the floor sweep "
-            f"measured {floors['context']!r}: a share from one over a ratio "
-            f"from the other is a comparison of two workloads")
-
-    missing = sorted(set(rules.CANDIDATES) - set(reading["shares"]))
-    if missing:
-        raise RunInvalid(
-            f"the profile carries no share for {missing}, and the rule ranks "
-            f"every registered candidate; a candidate absent from the table "
-            f"is not a candidate that scored zero")
-    absent = sorted(set(rules.CANDIDATES) - set(floors.get("candidates", {})))
-    if absent:
-        raise RunInvalid(
-            f"the floor sweep carries no credited ratio for {absent}, so "
-            f"their gain cannot be computed")
-    kill = rules.kill_q(floors["ceiling_ratios"])
-    readings, ratios = [], {}
-    for candidate in rules.CANDIDATES:
-        if candidate == "Q" and kill["killed"]:
-            continue
-        floor = floors["candidates"][candidate]
-        if candidate == "Q":
-            # The share counts every quantized linear the step ran, so the
-            # floor has to cover every shape the share counted. A floor over a
-            # subset would credit Q with a ratio measured on part of the
-            # operation and divided into a share measured on all of it.
-            registered = set(rules.SHAPES)
-            observed = set(floor["per_shape"])
-            if observed != registered:
-                raise RunInvalid(
-                    f"Q's floor covers {sorted(observed)} and the registered "
-                    f"shapes are {sorted(registered)}: missing "
-                    f"{sorted(registered - observed)}, unregistered "
-                    f"{sorted(observed - registered)}")
-            collapsed = rules.collapse_ratio_lo(floor["per_shape"])
-            ratios[candidate] = collapsed
-            credited = collapsed["ratio_lo"]
-        else:
-            credited = rules.ratio_lo(floor["numerator"], floor["denominator"])
-            ratios[candidate] = {"ratio_lo": credited}
-        readings.append(rules.Reading(
-            candidate=candidate,
-            share=reading["shares"][candidate]["share"],
-            ratio_lo=credited,
-            footprint_delta=floor.get("footprint_delta_bytes")))
-
-    ruling = rules.select_first_operation(readings)
-    return {
-        "schema_version": 1,
-        "cell": cell,
-        "ruling": ruling,
-        "kill_q": kill,
-        "ratios": ratios,
-        "shares": reading["shares"],
-        "context": reading["context"],
-        "assumptions": {c: floors["candidates"][c].get("assumption")
-                        for c in rules.CANDIDATES},
-        "footprint_delta_source": (
-            "the floor arms' own measured peak deltas, which is a statement "
-            "about the floor rather than about a kernel that does not exist "
-            "yet (Amendment 5)"),
-        "gain_is_an_upper_bound": (
-            "each floor measures what the operation could become, so every "
-            "gain here is an upper bound on that candidate's end-to-end "
-            "effect, per section 4.2"),
-        "rested_on": {
-            "profile_sha256": _json_sha256(profile),
-            "sweep_sha256": _json_sha256(sweep),
-            "profile_rules_sha256": _file_sha256(
-                Path(rules.__file__).resolve()),
-        },
-        "reported_only": {
-            name: other["shares"]
-            for name, other in sorted(profile.get("readings", {}).items())
-            if name != cell
-        },
-    }
+    raise RunInvalid(
+        "the selection rule is being rewritten to Amendment 7's scope, and "
+        "no ruling is computed from a schema-2 recording until it is; the "
+        "recording is closed and hashed and loses nothing by waiting")
 
 
 # ---------------------------------------------------------------------------
@@ -681,19 +922,17 @@ def _dataset_args(plan: Mapping[str, object], data_dir: str,
         chat_feature="messages")
 
 
-def _load_target(plan: Mapping[str, object], provenance: Mapping[str, object],
-                 *, batch: int, mask_prompt: bool):
-    """The model, the optimizer and ONE fixed batch, all built mlx-lm's way.
+def _load_model(plan: Mapping[str, object], provenance: Mapping[str, object]):
+    """The model, the adapters and the optimizer, built mlx-lm's way, once.
 
-    The batch comes out of mlx-lm's own iterator rather than being assembled
-    here, so its width, its padding and its prompt mask are the ones a real
-    fine-tune would produce. It is then frozen for the whole cell, which is
-    what makes five rounds repeats of one measurement.
+    The optimizer's state is initialised and evaluated HERE, before any arm is
+    built, which is clause 25's second requirement: Adam allocates `m` and `v`
+    on its first update, which grows the tree `mx.compile` captured and forces
+    a second trace. If that trace lands after an arm's seam is gone, the arm
+    silently becomes stock and nothing downstream can tell.
     """
     import mlx.core as mx
     import mlx.optimizers as optim
-    from mlx_lm.tuner.datasets import CacheDataset, load_dataset
-    from mlx_lm.tuner.trainer import iterate_batches
     from mlx_lm.tuner.utils import build_schedule, linear_to_lora_layers
     from mlx_lm.utils import load
 
@@ -710,17 +949,6 @@ def _load_target(plan: Mapping[str, object], provenance: Mapping[str, object],
                            "dropout": 0.0})
     model.train()
 
-    train_set, _, _ = load_dataset(
-        _dataset_args(plan, provenance["data"]["directory"], mask_prompt),
-        tokenizer)
-    batches = iterate_batches(dataset=CacheDataset(train_set),
-                              batch_size=batch,
-                              max_seq_length=rules.SEQ_LEN,
-                              loop=False, seed=plan["seed"],
-                              comm_group=mx.distributed.init())
-    tokens, lengths = next(batches)
-    mx.eval(tokens, lengths)
-
     schedule = plan.get("schedule")
     rate = build_schedule(schedule) if schedule else plan["learning_rate"]
     name = str(plan["optimizer"]).lower()
@@ -729,124 +957,66 @@ def _load_target(plan: Mapping[str, object], provenance: Mapping[str, object],
         raise RunInvalid(f"the profile does not register optimizer {name!r}")
     optimizer = classes[name](learning_rate=rate,
                               **dict(plan["optimizer_config"]))
+    pk.settle_optimizer(model, optimizer)
 
     return types.SimpleNamespace(
-        model=model, optimizer=optimizer, batch=(tokens, lengths),
-        depth=len(model.model.layers), adapted=rules.LORA_LAYERS,
-        width=int(tokens.shape[1]), rows=int(tokens.shape[0]))
+        model=model, tokenizer=tokenizer, optimizer=optimizer,
+        state=[model.state, optimizer.state, mx.random.state],
+        depth=len(model.model.layers), adapted=rules.LORA_LAYERS)
 
 
-def _build_step(model, optimizer):
-    """A mirror of the step mlx-lm's own trainer compiles and runs.
+def _fixed_batch(plan: Mapping[str, object], tokenizer, data_dir: str, *,
+                 batch: int, mask_prompt: bool):
+    """ONE batch out of mlx-lm's own iterator, then frozen for the width.
 
-    Mirrored rather than called, because the closure is local to
-    `mlx_lm.tuner.trainer.train` and there is no way to reach it from outside;
-    what keeps the mirror honest is not care but the pin, since the harness
-    refuses to start unless mlx-lm's installed files hash to the recorded
-    value, so an upstream edit to that closure stops the run rather than
-    quietly changing what "the step" means.
-
-    The accumulation and averaging branches are kept even though this profile
-    always updates and never accumulates. They are part of the step being
-    measured, and a mirror with the unused half removed is a different
-    function that happens to agree today.
-    """
-    from functools import partial
-
-    import mlx.core as mx
-    import mlx.nn as nn
-    from mlx.nn.utils import average_gradients
-    from mlx.utils import tree_map
-    from mlx_lm.tuner.trainer import default_loss
-
-    loss_value_and_grad = nn.value_and_grad(model, default_loss)
-    state = [model.state, optimizer.state, mx.random.state]
-
-    @partial(mx.compile, inputs=state, outputs=state)
-    def step(batch, prev_grad, do_update):
-        (lvalue, toks), grad = loss_value_and_grad(model, *batch)
-        if prev_grad is not None:
-            grad = tree_map(lambda x, y: x + y, grad, prev_grad)
-        if do_update:
-            grad = average_gradients(grad)
-            optimizer.update(model, grad)
-            grad = None
-        return lvalue, toks, grad
-
-    return step, state
-
-
-def _timed_step(step, state, batch, clear_cache_threshold: int):
-    """One step, timed exactly where mlx-lm's own loop times it.
-
-    The cache clear is inside the timed region because it is inside mlx-lm's,
-    and with the default threshold of zero it runs every single step. It is
-    stock's real cost and the denominator has to carry it.
+    Taken from the iterator rather than assembled here, so its width, its
+    padding and its prompt mask are the ones a real fine-tune would produce.
+    Frozen for the whole width, which is what makes five rounds repeats of one
+    measurement rather than five different workloads.
     """
     import mlx.core as mx
-    from mlx_lm.tuner.trainer import _clear_cache
+    from mlx_lm.tuner.datasets import CacheDataset, load_dataset
+    from mlx_lm.tuner.trainer import iterate_batches
 
-    start = time.perf_counter()
-    lvalue, toks, grad = step(batch, None, True)
-    mx.eval(state, lvalue, toks, grad)
-    _clear_cache(clear_cache_threshold)
-    return start, time.perf_counter(), lvalue, toks
-
-
-def timed_mode(step, state, batch, mode: str, *, context: Mapping,
-               clear_cache_threshold: int = 0) -> dict:
-    """One step in one mode: install, time, decompose, and put the names back.
-
-    Compilation is toggled here rather than once per run because MLX refuses
-    an eval inside a compiled step - which is Amendment 4's whole reason for
-    existing - while the compiled total that amendment prices has to come from
-    the same child on the same batch. Measured 2026-08-20 on the 0.6B model:
-    the switch takes fifteen alternations in one process without a fault, the
-    marks fire with exactly the expected counts every time, and the loss falls
-    monotonically across them, so the step is really training in both states.
-
-    Compilation is left ENABLED on the way out, in every path including a
-    raise, because enabled is the state a process starts in and a harness that
-    left it off would silently change what runs next.
-    """
-    import mlx.core as mx
-
-    regions = MODE_REGIONS[mode]
-    if mode == "compiled":
-        mx.enable_compile()
-    else:
-        mx.disable_compile()
-    recorder = pi.Recorder()
-    installation = pi.install(list(regions), recorder) if regions else None
-    try:
-        start, end, _lvalue, toks = _timed_step(step, state, batch,
-                                                clear_cache_threshold)
-    finally:
-        if installation is not None:
-            installation.remove()
-        mx.enable_compile()
-    return {
-        "mode": mode,
-        "elapsed_s": end - start,
-        "supervised_tokens": int(toks.item()),
-        "decomposed": (pi.decompose(recorder.entries, start, end,
-                                    context=dict(context))
-                       if regions else None),
-        "shapes": {region: dict(counts)
-                   for region, counts in recorder.shapes.items()},
-        "foreign_on_removal": (list(installation.foreign_on_removal)
-                               if installation is not None else []),
-    }
+    train_set, _, _ = load_dataset(
+        _dataset_args(plan, data_dir, mask_prompt), tokenizer)
+    batches = iterate_batches(dataset=CacheDataset(train_set),
+                              batch_size=batch,
+                              max_seq_length=rules.SEQ_LEN,
+                              loop=False, seed=plan["seed"],
+                              comm_group=mx.distributed.init())
+    tokens, lengths = next(batches)
+    mx.eval(tokens, lengths)
+    # The supervised count is derived from the batch by mlx-lm's own rule
+    # rather than read off a step's return value. The step is compiled and
+    # every arm's loss is meaningless at a dialled setting, so a count taken
+    # from one would be a count of whatever that arm happened to compute; the
+    # rule below is `default_loss`'s own mask, applied to the same tensors.
+    targets = tokens[:, 1:]
+    steps = mx.arange(1, targets.shape[1] + 1)
+    mask = mx.logical_and(steps >= lengths[:, 0:1], steps <= lengths[:, 1:])
+    supervised = int(mask.sum().item())
+    digest = _json_sha256({"tokens": tokens.tolist(),
+                           "lengths": lengths.tolist()})
+    return types.SimpleNamespace(batch=(tokens, lengths), digest=digest,
+                                 rows=int(tokens.shape[0]),
+                                 width=int(tokens.shape[1]),
+                                 supervised=supervised,
+                                 supervised_of=int(targets.size))
 
 
-def _identity(model, batch, modes: Sequence[str]) -> dict:
-    """Do the marked passes compute what the plain pass computes?
+def _structural_pass(model, batch) -> dict:
+    """The boundary instrument, once, untimed, contributing no number.
 
-    Compared on the same weights, before any optimizer update has moved them,
-    and over every gradient array rather than a summary, because a summary can
-    agree while the arrays beneath it do not. A disagreement here means the
-    custom gradient rule changed the computation, and then the marked pass and
-    the plain pass are timing two different pieces of work.
+    Two things only, and both have caught a real fault. The COUNTS say every
+    seam fired as often as the arrangement demands, which is what tells a seam
+    that never fired apart from an operation that costs nothing. The IDENTITY
+    says the marked pass computes what the plain pass computes, on the same
+    weights and over every gradient array rather than a summary, because a
+    summary can agree while the arrays beneath it do not.
+
+    Uncompiled, because a mark evals and MLX refuses an eval inside a compiled
+    step, which is the whole of Amendment 4. Nothing timed runs in this state.
     """
     import mlx.core as mx
     import mlx.nn as nn
@@ -860,116 +1030,242 @@ def _identity(model, batch, modes: Sequence[str]) -> dict:
         mx.eval(loss, grad)
         return loss, dict(tree_flatten(grad))
 
-    once()
-    plain_loss, plain_grad = once()
-    if not plain_grad:
-        raise RunInvalid("the model produced no gradients, so nothing was "
-                         "compared and the identity claim is empty")
-
-    report = {"gradients_compared": len(plain_grad), "modes": {}}
-    for mode in modes:
-        regions = MODE_REGIONS[mode]
-        if not regions:
-            continue
+    mx.disable_compile()
+    try:
+        once()
+        plain_loss, plain_grad = once()
+        if not plain_grad:
+            raise RunInvalid(
+                "the model produced no gradients, so nothing was compared "
+                "and the identity claim is empty")
         recorder = pi.Recorder()
-        installation = pi.install(list(regions), recorder)
+        installation = pi.install(sorted(pi.REGIONS), recorder)
         try:
             marked_loss, marked_grad = once()
         finally:
             installation.remove()
-        report["modes"][mode] = {
-            "loss_equal": bool(mx.array_equal(plain_loss, marked_loss)),
-            "gradients_differing": sorted(
-                name for name in plain_grad
-                if not bool(mx.array_equal(plain_grad[name],
-                                           marked_grad[name]))),
-            "foreign_on_removal": list(installation.foreign_on_removal),
+    finally:
+        mx.enable_compile()
+
+    return {
+        "gradients_compared": len(plain_grad),
+        "loss_equal": bool(mx.array_equal(plain_loss, marked_loss)),
+        "gradients_differing": sorted(
+            name for name in plain_grad
+            if not bool(mx.array_equal(plain_grad[name], marked_grad[name]))),
+        "counts": pi.counts(recorder.entries),
+        "foreign_on_removal": list(installation.foreign_on_removal),
+    }
+
+
+def _knob_for(candidate: str) -> pk.Knob:
+    """The dial one candidate is measured on, looked up and never chosen.
+
+    Candidate A's entry is `ATTENTION_KNOBS[ATTENTION_DIAL]` rather than a
+    price comparison run at measurement time: Amendment 7 clause 35 names the
+    dial by clause 15's own completeness tie-break, so no run reselects it and
+    a recording cannot depend on which dial happened to price best that night.
+    """
+    if candidate == "A":
+        return pk.ATTENTION_KNOBS[ATTENTION_DIAL]
+    if candidate in pk.KNOBS:
+        return pk.KNOBS[candidate]
+    raise RunInvalid(f"no dial is registered for candidate {candidate!r}")
+
+
+def _kept_sizes(prepared: Mapping[str, object], phi: float) -> dict:
+    """Every dialled site's kept size at one setting, keyed by the site.
+
+    The key is internal and is whatever identifies a site inside one prepared
+    ladder; `_actual_settings` relabels it by the site's FULL dimension before
+    anything is recorded, because a module's `id()` is a memory address that
+    means nothing in a recording while "the 2560-wide projections" is a thing
+    a reader can check against the model card.
+    """
+    sizes = {}
+    for name, ladder in sorted(prepared.items()):
+        entry = ladder[phi]
+        if name == "projections":
+            for site, value in entry.items():
+                sizes[(name, site)] = value[0]
+        elif name == "attention":
+            sizes[(name, None)] = entry["kept"]
+        else:
+            sizes[(name, None)] = entry[0]
+    return sizes
+
+
+def _actual_settings(candidate: str, prepared: Mapping[str, object]) -> dict:
+    """What fraction each nominal setting ACTUALLY placed, and where.
+
+    A dial asked for 0.75 places a whole number of quantization groups or a
+    whole number of rows, and the fraction it lands on is a property of the
+    model's dimensions. Fitting the fraction that was asked for rather than
+    the one that was placed is a fit on numbers nothing measured.
+
+    Two settings that place ONE size are one setting, not two: their arms
+    compute the same thing, so the fit would carry a repeated point that adds
+    no evidence about linearity while raising R-squared. That refuses here
+    rather than being silently deduplicated, because Amendment 7 registers
+    four knob arms per candidate and dropping one changes a registered count.
+
+    Sites that disagree about the fraction they placed also refuse. Nothing
+    registers how to reduce several per-site fractions to the one scalar a fit
+    reads, and inventing that reduction here would be a rule made to fit the
+    model in front of it.
+    """
+    full = _kept_sizes(prepared, pk.PHIS[0])
+    labelled = {key: f"{key[0]}:{size}" for key, size in full.items()}
+    settings = {}
+    for phi in pk.PHIS:
+        sizes = _kept_sizes(prepared, phi)
+        if set(sizes) != set(full):
+            raise RunInvalid(
+                f"candidate {candidate} dialled {len(sizes)} sites at {phi} "
+                f"and {len(full)} at {pk.PHIS[0]}, so the ladder is not one "
+                f"dial moving one set of operations")
+        fractions = {key: sizes[key] / full[key] for key in sizes}
+        distinct = sorted(set(fractions.values()))
+        if len(distinct) != 1:
+            placed = sorted({(labelled[key], value)
+                             for key, value in fractions.items()})
+            raise RunInvalid(
+                f"candidate {candidate} at nominal {phi} placed fractions "
+                f"{placed}, and nothing registers how several per-site "
+                f"fractions reduce to the one scalar a fit reads")
+        settings[phi] = {
+            "actual_phi": distinct[0],
+            "sites": {labelled[key]: {"kept": sizes[key], "full": full[key],
+                                      "fraction": fractions[key]}
+                      for key in sorted(sizes, key=lambda one: labelled[one])},
         }
-    return report
+    placed = [settings[phi]["actual_phi"] for phi in pk.PHIS]
+    if len(set(placed)) != len(placed):
+        raise RunInvalid(
+            f"candidate {candidate}'s four nominal settings placed only "
+            f"{sorted(set(placed))}; two arms computing the same thing are a "
+            f"repeated point in the fit, and the manifest registers four")
+    return settings
+
+
+def _build_width(target, batch, width: str, guard: _ChildGuard) -> dict:
+    """Every arm of one width, prepared, built, traced and warmed.
+
+    The ordering is the whole point and it is not an implementation detail.
+    Every dial's operands are materialised OUTSIDE any timed region, so arms
+    differ in the work they do and not in when they paid for it. Each arm then
+    gets its own freshly built closure, because MLX keys its compile cache on
+    the underlying callable and two arms sharing one raw function share one
+    traced graph, which would make the second arm's dial do nothing. And the
+    trace happens at an object's FIRST CALL rather than at construction, so
+    the seams are live across the warm-ups and gone before anything is timed.
+    """
+    prepared = {}
+    settings = {}
+    for candidate in CANDIDATES_AT_WIDTH[width]:
+        knob = _knob_for(candidate)
+        prepared[candidate] = knob.prepare(target.model, batch.width)
+        settings[candidate] = _actual_settings(candidate, prepared[candidate])
+
+    compiled, roles = [], {}
+    for spec in arm_manifest(width):
+        guard.check(f"{width}: build {spec.label}")
+        if spec.role == pk.STOCK:
+            seams_map, actual = {}, None
+        else:
+            knob = _knob_for(spec.candidate)
+            if spec.role == pk.KNOB:
+                seams_map = knob.arm(prepared[spec.candidate],
+                                     spec.nominal_phi)
+            elif spec.role == pk.SCAFFOLD:
+                seams_map = knob.scaffold(prepared[spec.candidate],
+                                          spec.nominal_phi)
+            else:
+                seams_map = knob.ablate(prepared[spec.candidate])
+            actual = (settings[spec.candidate][spec.nominal_phi]["actual_phi"]
+                      if spec.nominal_phi is not None else None)
+        compiled.append(pk.prepare_arm(
+            target.model, target.optimizer, target.state, batch.batch,
+            pk.Arm(label=spec.label, phi=actual, seams=seams_map)))
+        roles[spec.label] = {
+            "candidate": spec.candidate, "role": spec.role,
+            "nominal_phi": spec.nominal_phi, "actual_phi": actual,
+            "sites": (settings[spec.candidate][spec.nominal_phi]["sites"]
+                      if spec.nominal_phi is not None else None),
+        }
+    return {"compiled": compiled, "roles": roles}
 
 
 def _profile_child(task: Mapping[str, object], guard: _ChildGuard) -> dict:
-    """One cell: one model, one batch, every mode in rotation."""
-    import mlx.core as mx
-
+    """One cell: one model, one batch per width, every arm in rotation."""
     plan = task["plan"]
     provenance = task["provenance"]
     cell = task["cell_name"]
-    modes = modes_for(cell)
     rounds = int(plan["rounds"])
     registered = rules.CELLS[cell]
     mask_prompt = registered["supervision"] == "masked"
 
     stock = stock_process()
     guard.check(f"{cell}: load")
-    target = _load_target(plan, provenance, batch=registered["batch"],
-                          mask_prompt=mask_prompt)
+    target = _load_model(plan, provenance)
+    model_name = Path(provenance["base_model"]["directory"]).name
 
-    mx.disable_compile()
-    try:
-        identity = _identity(target.model, target.batch, modes)
-    finally:
-        mx.enable_compile()
-
-    step, state = _build_step(target.model, target.optimizer)
-    threshold = int(plan.get("clear_cache_threshold", 0))
-    records = {mode: {"totals_s": [], "peak_gb": [], "passes": []}
-               for mode in modes}
-
-    def run(mode: str, context) -> dict:
-        return timed_mode(step, state, target.batch, mode, context=context,
-                          clear_cache_threshold=threshold)
-
-    def described(supervised) -> dict:
-        return cell_context(
-            cell, batch=target.rows, width=target.width, adapted=target.adapted,
-            model=Path(provenance["base_model"]["directory"]).name,
-            supervised=supervised)
-
-    # Warm every mode once, untimed: the first compiled call pays for
-    # compilation and the first of any mode pays for first-touch allocation,
-    # and neither is a property of the step. The warm-up is also where the
-    # supervised token count comes from, which is why the context the timed
-    # rounds carry is built after it rather than before.
-    supervised = None
-    for mode in modes:
-        supervised = run(mode, described(None))["supervised_tokens"]
-    context = described(supervised)
-
-    observed_counts = {}
-    for round_index in range(rounds):
-        guard.check(f"{cell}: round {round_index + 1}/{rounds}")
-        for mode in rotated(modes, round_index):
-            measured = run(mode, context)
-            records[mode]["totals_s"].append(measured["elapsed_s"])
-            records[mode]["peak_gb"].append(phys_footprint_gb()[1])
-            if measured["decomposed"] is not None:
-                records[mode]["passes"].append(measured["decomposed"])
-                observed_counts.update(measured["decomposed"]["counts"])
-                records[mode].setdefault("shapes", {}).update(
-                    measured["shapes"])
-
-    # Expected over the regions the modes were told to mark, NOT over the
-    # regions that reported. A seam installed and never reached leaves its
-    # region absent from the log entirely, so checking only what appeared
-    # would let exactly the failure this check exists for pass silently.
-    marked = sorted({region for mode in modes for region in MODE_REGIONS[mode]})
-    checked = completeness(
-        observed_counts,
-        expected_counts(target.depth, target.adapted, marked))
+    widths, structural = {}, {}
+    for width in widths_for(cell):
+        guard.check(f"{cell} {width}: batch")
+        batch = _fixed_batch(plan, target.tokenizer,
+                             plan["bands"][width],
+                             batch=registered["batch"],
+                             mask_prompt=mask_prompt)
+        # Expected over EVERY region the instrument marks, not over the
+        # regions that reported. A seam installed and never reached leaves its
+        # region absent from the log entirely, so checking only what appeared
+        # would let exactly the failure this check exists for pass silently.
+        checked = _structural_pass(target.model, batch.batch)
+        checked["completeness"] = completeness(
+            checked["counts"],
+            expected_counts(target.depth, target.adapted, sorted(pi.REGIONS)))
+        structural[width] = checked
+        built = _build_width(target, batch, width, guard)
+        guard.check(f"{cell} {width}: {len(built['compiled'])} arms timed")
+        # Seconds become milliseconds HERE and nowhere else. Amendment 6
+        # clause 33 puts every rule's input in milliseconds, and one artifact
+        # carrying two unit conventions is exactly what that discipline exists
+        # to prevent, so the conversion happens at the single point where a
+        # timer's output becomes a recorded sample.
+        samples = pk.timed_rounds(built["compiled"], batch.batch,
+                                  rounds=rounds)
+        context = cell_context(
+            cell, width, batch=batch.rows, batch_width=batch.width,
+            model=model_name, adapted=target.adapted,
+            supervised=batch.supervised, supervised_of=batch.supervised_of,
+            batch_sha256=batch.digest)
+        widths[width] = {
+            "width": width,
+            "context": context,
+            # The process peak is monotonic, so it is a property of the width
+            # rather than of any one arm; recording it per arm would imply a
+            # per-arm measurement nothing took.
+            "peak_gb": phys_footprint_gb()[1],
+            "arms": {label: dict(built["roles"][label],
+                                 samples_ms=[value * 1000.0
+                                             for value in samples[label]],
+                                 context=context)
+                     for label in samples},
+            # Both counts, because `timed_rounds` proves they are equal by
+            # refusing the run otherwise, and a record that carried only one
+            # could not show that the proof had anything to prove.
+            "traces": {arm.label: {"after_warmup": arm.traced_by_warmup,
+                                   "after_timing": len(arm.traces)}
+                       for arm in built["compiled"]},
+        }
 
     return {
         "cell": cell,
-        "context": context,
         "depth": target.depth,
         "adapted": target.adapted,
-        "batch": {"rows": target.rows, "width": target.width,
-                  "tokens": target.rows * (target.width - 1),
-                  "supervised_tokens": supervised,
-                  "mask_prompt": mask_prompt},
-        "modes": records,
-        "identity": identity,
-        "completeness": checked,
+        "widths": widths,
+        "structural": structural,
         "stock": stock,
         "rounds": rounds,
     }
@@ -1116,24 +1412,20 @@ def _print_refusal(reason: object) -> None:
 
 
 def run_profile(plan: Mapping[str, object], runtime, *,
-                results_dir: str | Path = RESULTS_DIR,
-                calibrate: bool = False) -> int:
-    """Measure every requested cell, then let the closing gate decide."""
+                results_dir: str | Path = RESULTS_DIR) -> int:
+    """Measure every requested cell, then let the gates decide.
+
+    There is no `--calibrate` mode. The one that existed priced the boundary
+    instrument, and Amendment 5 clause 1 removed the instrument from the
+    timing path, so its band has no referent. What replaces it is a
+    calibration STAGE of its own, which runs identical and scaffold-only arms
+    with no candidate dialled and no share computed, and whose output enters
+    this harness as the registered resolution floor the plan carries.
+    """
     try:
         fixed = validate_plan(plan)
     except RunInvalid as error:
         _print_refusal(error)
-        return EXIT_PRECONDITION
-
-    if calibrate:
-        fixed = dict(fixed, cells=[rules.PRIMARY_CELL],
-                     rounds=int(plan.get("rounds", CALIBRATION_ROUNDS)))
-    elif rules.INSTRUMENT_COST_BAND is None:
-        _print_refusal(
-            "no instrument-cost band is registered, so a binding profile "
-            "cannot say whether the marked pass described the same step. Run "
-            "--calibrate, then write the band into profile_rules by "
-            "Amendment 5, then run this.")
         return EXIT_PRECONDITION
 
     acquired, lock_reason = runtime.acquire_lock()
@@ -1179,26 +1471,41 @@ def run_profile(plan: Mapping[str, object], runtime, *,
             return EXIT_PRECONDITION
 
         closing_idle = runtime.idle_check(machine["cores"])
+        floors = fixed["resolution"]["floors_ms"]
+        try:
+            for name, one in sorted(cells.items()):
+                one["readings"] = {
+                    width: width_reading(measured,
+                                         resolution_floor_ms=floors[width])
+                    for width, measured in sorted(one["widths"].items())}
+        except (RunInvalid, KeyError) as error:
+            _print_refusal(error)
+            return EXIT_PRECONDITION
         record = {
-            "schema_version": 1,
-            "kind": "calibration" if calibrate else "binding",
+            "schema_version": 2,
+            "kind": "binding",
+            "units": {"time": "ms", "fraction": "dimensionless"},
             "plan": fixed,
             "provenance": provenance,
             "machine": machine,
             "opening_idle": opening_idle,
             "closing_idle": closing_idle,
             "cells": cells,
-            "readings": {name: cell_reading(one)
-                         for name, one in sorted(cells.items())},
         }
+        # The matrix is built only where the ruling is computed. The other
+        # cells are reported in full under `cells` and decide nothing under
+        # section 4.3, so giving them a rule-facing table would invite one.
+        if rules.PRIMARY_CELL in cells:
+            try:
+                record["profile_matrix"] = profile_matrix(
+                    cells[rules.PRIMARY_CELL]["readings"])
+            except RunInvalid as error:
+                _print_refusal(error)
+                return EXIT_PRECONDITION
         record["binding_blockers"] = binding_blockers(record)
-        # A calibration run binds nothing by construction: it exists to
-        # measure the cost the band is written from, and a run that set its
-        # own limit would be setting it after seeing the number.
-        record["binding"] = bool(not calibrate and not record["binding_blockers"])
-        path = recording_path(results_dir, runtime.today(),
-                              kind="calibration" if calibrate else "binding",
-                              closing_idle=bool(closing_idle["idle"]))
+        record["binding"] = not record["binding_blockers"]
+        path = recording_path(results_dir, runtime.today(), kind="binding",
+                              binding=record["binding"])
         try:
             runtime.write_record(path, record)
         except PreconditionFailed as error:
@@ -1208,7 +1515,7 @@ def run_profile(plan: Mapping[str, object], runtime, *,
                           "binding": record["binding"],
                           "blockers": record["binding_blockers"]},
                          indent=2), flush=True)
-        return 0 if record["binding"] or calibrate else 1
+        return 0 if record["binding"] else 1
     finally:
         runtime.release_lock()
 
@@ -1251,9 +1558,6 @@ def run_decide(profile_path: Path, sweep_path: Path,
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--plan", type=Path)
-    parser.add_argument("--calibrate", action="store_true",
-                        help="price the instrument at the primary cell; binds "
-                             "nothing")
     parser.add_argument("--decide", action="store_true",
                         help="apply the registered rule to closed recordings")
     parser.add_argument("--profile", type=Path)
@@ -1281,8 +1585,7 @@ def main(argv=None) -> int:
     except PreconditionFailed as error:
         _print_refusal(error)
         return EXIT_PRECONDITION
-    return run_profile(plan, SystemRuntime(), results_dir=RESULTS_DIR,
-                       calibrate=args.calibrate)
+    return run_profile(plan, SystemRuntime(), results_dir=RESULTS_DIR)
 
 
 if __name__ == "__main__":

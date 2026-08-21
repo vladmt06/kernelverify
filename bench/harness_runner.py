@@ -314,6 +314,9 @@ def preflight_inputs(
             raise PreconditionFailed(
                 f"stack record does not bind {package} {expected_version}"
             )
+    if "data" not in plan and "bands" not in plan:
+        raise PreconditionFailed(
+            "a run plan must pin its training data, by `data` or by `bands`")
     if plan["kept_candidates"] and _absent_module(
             plan["measurement_module"], find_module):
         raise PreconditionFailed(
@@ -330,7 +333,14 @@ def preflight_inputs(
             "sha256": observed_model,
         },
         "model_manifest": model_manifest,
-        "data": _data_record(Path(plan["data"])),
+        # One caller pins one dataset and one pins two, because the profile's
+        # two registered widths come from two bands of one corpus. Both are
+        # bound the same way and the harness that asked for two says which is
+        # which; a caller that named neither is a caller with no data at all.
+        "data": (_data_record(Path(plan["data"])) if "data" in plan else None),
+        "data_bands": ({name: _data_record(Path(directory))
+                        for name, directory in sorted(plan["bands"].items())}
+                       if "bands" in plan else None),
         "stack": stack,
         "wrapper_sha256": wrapper_digest,
         "plan_sha256": _json_sha256(plan),
