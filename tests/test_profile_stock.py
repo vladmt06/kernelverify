@@ -1288,10 +1288,11 @@ def test_the_round_count_guard_reaches_the_exploratory_branch_too(rounds):
             ps.validate_plan(_plan(rounds=rounds, resolution=resolution))
 
 
-def _margin_inputs(width_kwargs=None, *, bench=None):
+def _margin_inputs(width_kwargs=None, *, bench=None, floor=R):
     readings = {w: ps.width_reading(_width(w, exploratory=True,
                                            **(width_kwargs or {})),
-                                    resolution_floor_ms=R, exploratory=True)
+                                    resolution_floor_ms=floor,
+                                    exploratory=True)
                 for w in rules.WIDTH_ORDER}
     profile = {"kind": "exploratory",
                "profile_matrix": ps.profile_matrix(readings),
@@ -1326,3 +1327,68 @@ def test_a_sweep_that_carries_no_contexts_at_all_is_refused():
     del sweep["contexts"]
     with pytest.raises(RunInvalid, match="context"):
         ps.exploratory_margins(profile, sweep)
+
+
+def test_the_sentinel_no_longer_decides_whether_a_margin_exists():
+    """Amendment 15 clause 64, and the reproduction that forced it.
+
+    The exploratory pass carries no registered floor, so the harness
+    substitutes an arbitrary sentinel. At 0.1 ms candidate L was a typed
+    absence at both widths and the margin was `None`; at 1.0 ms it was a
+    reading and the margin existed. A constant nothing registers decided the
+    one number three hours of the machine exist to produce.
+    """
+    margins = {}
+    for floor in (0.1, 1.0, 5.0):
+        profile, sweep = _margin_inputs(floor=floor)
+        out = ps.exploratory_margins(profile, sweep)
+        margins[floor] = {w: out["widths"][w]["margin_ms"]
+                          for w in rules.WIDTH_ORDER}
+        for width in rules.WIDTH_ORDER:
+            assert out["widths"][width]["sentinel_floor_ms"] == floor
+    assert margins[0.1] == margins[1.0] == margins[5.0]
+    assert all(value is not None
+               for row in margins.values() for value in row.values())
+
+
+def test_a_failed_gate_is_reported_beside_the_margin_and_not_applied():
+    """The verdicts survive; what stops is their power to remove a margin."""
+    profile, sweep = _margin_inputs({"scaffold_slopes": {"L": 2.0}},
+                                    floor=0.1)
+    entries = profile["profile_matrix"]["entries"]
+    assert entries["L"]["short"]["type"] == "missing_share"
+
+    out = ps.exploratory_margins(profile, sweep)
+    row = out["widths"]["short"]
+    assert row["margin_ms"] is not None
+    reported = row["gates_reported_not_applied"]
+    assert any("scaffold" in one for one in reported["L"])
+    assert row["gates_are_not_applied"]
+
+
+def test_a_floor_that_failed_its_gates_still_supplies_its_slope():
+    """Candidate Q can read while the floor its saving divides by does not.
+
+    That combination raised `KeyError` in the middle of the reduction, at the
+    very sentinel the harness substitutes.
+    """
+    profile, sweep = _margin_inputs({"scaffold_slopes": {"Qfloor": 2.0}})
+    entries = profile["profile_matrix"]["entries"]
+    assert entries["Q"]["short"]["floor"]["type"] == "missing_share"
+
+    out = ps.exploratory_margins(profile, sweep)
+    assert out["widths"]["short"]["margin_ms"] is not None
+    assert out["widths"]["short"]["gates_reported_not_applied"]["Qfloor"]
+
+
+def test_a_candidate_never_measured_at_a_width_is_still_a_typed_absence():
+    """Clause 64 reads THROUGH a failed gate and not through absent arms."""
+    profile, sweep = _margin_inputs()
+    entries = profile["profile_matrix"]["entries"]
+    entries["L"]["short"] = {"type": "missing_share", "candidate": "L",
+                             "certified": True,
+                             "reason_code": "not_measured_at_this_width"}
+    out = ps.exploratory_margins(profile, sweep)
+    assert out["widths"]["short"]["margin_ms"] is None
+    assert any("not_measured_at_this_width" in one
+               for one in out["widths"]["short"]["no_margin_because"])

@@ -1062,6 +1062,29 @@ def credited_operands(entry: Mapping[str, object]) -> dict:
             "T": entry["stock_median_ms"]}
 
 
+def _fit_through_a_gate(entry: Mapping[str, object]):
+    """Amendment 15 clause 64: the reading record, gate or no gate.
+
+    An exploratory pass carries no measured resolution floor, so the harness
+    substitutes an arbitrary sentinel and the floor-dependent gates of clause
+    26 and clause 21 then stood between the fit and the margin. Reproduced on
+    the reducer's own fixtures: at a sentinel of 0.1 ms candidate L was a
+    typed absence at both widths and the margin was `None`, and at 1.0 ms it
+    was a reading and the margin existed.
+
+    So the reader takes the fit whether or not the gates passed, and returns
+    their verdicts for the caller to record beside the margin rather than act
+    on. What it does NOT read through is absent arms: a candidate no width
+    measured has no fit to take, and that stays an absence.
+    """
+    if entry.get("type") == "reading":
+        return entry, []
+    evidence = entry.get("evidence")
+    if isinstance(evidence, Mapping):
+        return evidence, list(entry.get("blockers", ()))
+    return None, []
+
+
 def exploratory_margins(profile: Mapping[str, object],
                         sweep: Mapping[str, object]) -> dict:
     """Clause 57's reading: the L versus Q margin beside the machine's null.
@@ -1107,16 +1130,32 @@ def exploratory_margins(profile: Mapping[str, object],
                 f"share measured on another")
     out = {}
     for width in rules.WIDTH_ORDER:
-        row = {"pair_contrasts_ms": readings[width]["pair_contrasts_ms"]}
+        row = {"pair_contrasts_ms": readings[width]["pair_contrasts_ms"],
+               "sentinel_floor_ms": readings[width]["resolution_floor_ms"],
+               "gates_are_not_applied": (
+                   "clause 64: this pass has no measured resolution floor, so "
+                   "every gate's verdict is reported against the sentinel "
+                   "above and none of them removes a margin"),
+               "gates_reported_not_applied": {}}
         savings, absent = {}, []
         for candidate in ("L", "Q"):
-            entry = matrix["entries"][candidate][width]
-            if entry["type"] != "reading":
-                absent.append(f"{candidate}: {entry['reason_code']}")
+            # `profile_matrix` hangs the floor off the OUTER entry, so the
+            # fit record a failed gate leaves behind does not carry one.
+            typed = matrix["entries"][candidate][width]
+            entry, reported = _fit_through_a_gate(typed)
+            if entry is None:
+                absent.append(f"{candidate}: {typed['reason_code']}")
                 continue
+            row["gates_reported_not_applied"][candidate] = reported
             operands = credited_operands(entry)
             if candidate == "Q":
-                floor = entry["floor"]
+                floor, floor_reported = _fit_through_a_gate(typed["floor"])
+                if floor is None:
+                    absent.append(
+                        f"Q: its floor is "
+                        f"{typed['floor'].get('reason_code')}")
+                    continue
+                row["gates_reported_not_applied"]["Qfloor"] = floor_reported
                 denominator = max(fit["slope_ms"] for fit in floor["per_round"])
             else:
                 if width not in bench:

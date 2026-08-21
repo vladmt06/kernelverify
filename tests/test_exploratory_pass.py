@@ -330,3 +330,102 @@ def test_the_reader_composes_with_the_real_margin_over_three_real_passes():
 
     assert report["branch"]["clears"] in (True, False)
     assert report["branch"]["binds"] is False
+
+
+# ---------------------------------------------------------------------------
+# The runner
+# ---------------------------------------------------------------------------
+from datetime import date  # noqa: E402
+
+DAY = date(2026, 8, 21)
+
+
+def _driver(tmp_path, *, writes=(), fails=()):
+    """A fake stage runner that records its argv and touches what it claims."""
+    calls = []
+
+    def run(argv):
+        calls.append(list(argv))
+        stage = "profile" if argv[0].endswith("profile_stock.py") else "sweep"
+        index = int(argv[argv.index("--pass-index") + 1])
+        if (stage, index) in fails:
+            return 1
+        if (stage, index) in writes:
+            path = (ps.recording_path(tmp_path, DAY, kind="exploratory",
+                                      binding=False, pass_index=index)
+                    if stage == "profile"
+                    else ep.sweep_path(tmp_path, DAY, refused=True,
+                                       pass_index=index))
+            path.write_text("{}")
+        return 0
+
+    return run, calls
+
+
+def _all_stages():
+    return {(stage, index) for stage in ("profile", "sweep")
+            for index in (1, 2, 3)}
+
+
+def test_three_passes_run_profile_then_sweep_against_that_pass_s_recording(
+        tmp_path):
+    run, calls = _driver(tmp_path, writes=_all_stages())
+    outcomes = ep.run_passes(plan=tmp_path / "p.json",
+                             sweep_plan=tmp_path / "s.json",
+                             results_dir=tmp_path, runner=run,
+                             today=lambda: DAY)
+
+    assert len(calls) == 6
+    for index in (1, 2, 3):
+        profile, sweep = calls[2 * index - 2], calls[2 * index - 1]
+        assert profile[0].endswith("profile_stock.py")
+        assert sweep[0].endswith("ceiling_sweep.py")
+        # The sweep is joined to the profile of ITS OWN pass, which is what
+        # binds the bench's supervised counts to the step that measured them.
+        assert sweep[sweep.index("--profile") + 1] == outcomes[index - 1][
+            "profile"]
+    assert all(one["sweep_exit"] == 0 for one in outcomes)
+
+
+def test_a_pass_whose_profile_left_no_recording_does_not_run_its_sweep(
+        tmp_path):
+    run, calls = _driver(tmp_path,
+                         writes=_all_stages() - {("profile", 2)},
+                         fails={("profile", 2)})
+    outcomes = ep.run_passes(plan=tmp_path / "p.json",
+                             sweep_plan=tmp_path / "s.json",
+                             results_dir=tmp_path, runner=run,
+                             today=lambda: DAY)
+
+    assert outcomes[1]["sweep_exit"] is None
+    assert "no cell" in outcomes[1]["stopped"]
+    # Pass 3 still runs: a pass that dies must not take the ones after it.
+    assert outcomes[2]["sweep_exit"] == 0
+    assert [one for one in calls if "--pass-index" in one and
+            one[one.index("--pass-index") + 1] == "2"] == [calls[2]]
+
+
+def test_a_pass_already_recorded_is_skipped_rather_than_paid_for_twice(
+        tmp_path):
+    run, calls = _driver(tmp_path, writes=_all_stages())
+    ep.run_passes(plan=tmp_path / "p.json", sweep_plan=tmp_path / "s.json",
+                  results_dir=tmp_path, runner=run, today=lambda: DAY)
+    calls.clear()
+
+    again = ep.run_passes(plan=tmp_path / "p.json",
+                          sweep_plan=tmp_path / "s.json",
+                          results_dir=tmp_path, runner=run, today=lambda: DAY)
+    assert calls == []
+    assert all("skipped" in one for one in again)
+
+
+def test_a_half_finished_pass_reruns_only_the_stage_it_is_missing(tmp_path):
+    run, calls = _driver(tmp_path, writes=_all_stages())
+    ps.recording_path(tmp_path, DAY, kind="exploratory", binding=False,
+                      pass_index=1).write_text("{}")
+
+    ep.run_passes(plan=tmp_path / "p.json", sweep_plan=tmp_path / "s.json",
+                  results_dir=tmp_path, runner=run, today=lambda: DAY,
+                  passes=1)
+    assert len(calls) == 1
+    assert calls[0][0].endswith("ceiling_sweep.py")

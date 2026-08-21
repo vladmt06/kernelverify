@@ -5,9 +5,8 @@ Amendment 13 clause 57 registers a pass that runs before the calibration and
 decides what schedule the calibration takes. Amendment 14 registers how its
 two terms are built, because clause 57 named both and constructed neither.
 
-This module holds the READER, which reduces the six recordings three passes
-leave to one branch reading. The runner that drives them lands with the
-ceiling sweep's entry point, which does not exist yet.
+This module holds the RUNNER, which drives three passes and their sweeps, and
+the READER, which reduces the six recordings they leave to one branch reading.
 
 What this is NOT
 ----------------
@@ -51,11 +50,14 @@ import argparse
 import itertools
 import json
 import statistics
+import subprocess
+import sys
 from pathlib import Path
 from typing import Mapping, Sequence
 
 import profile_rules as rules
 import profile_stock as ps
+from ceiling_sweep import sweep_path
 from decode_rules import RunInvalid
 
 # Amendment 13 clause 57: three passes, and three because a margin read once
@@ -221,10 +223,12 @@ def branch_reading(margins: Sequence[Mapping[str, object]],
                 "the window-separated null is zero, and a ratio against it "
                 "would divide by a machine that never moved")
         else:
-            # The margin the branch reads is the one the three passes agree on
-            # least generously. Clause 57 reads the margin three times because
-            # a margin read once has unknown stability, and taking the largest
-            # of three would let one lucky pass buy the cheaper schedule.
+            # Amendment 15 clause 62: the smallest of the three. Taking the
+            # largest would let one pass that happened to read generously buy
+            # the cheaper schedule and a median would let two outvote the one
+            # that disagreed, and the smallest is the same direction clause 58
+            # takes over the four labels, so every reduction on this branch
+            # resolves against clearing it.
             row["margin_read_ms"] = min(readings)
             row["ratio"] = row["margin_read_ms"] / null
             ratios.append(row["ratio"])
@@ -296,15 +300,72 @@ def aggregate(passes: Sequence[tuple[Mapping[str, object],
 
 
 # ---------------------------------------------------------------------------
-# The runner
+# The runner: three passes, six stages, one process each
 # ---------------------------------------------------------------------------
-# Not here yet, and named rather than stubbed. Driving three passes means
-# driving three sweeps, clause 60 registers that each pass carries its own,
-# and `ceiling_sweep` has no entry point at all: `run_sweep` has never been
-# called by anything, and its one `context` argument feeds three consumers
-# that need three different objects. The runner lands with the entry point it
-# drives, because a driver written against a command line that does not exist
-# is a driver nothing can run.
+PROFILE = Path(__file__).resolve().parent / "profile_stock.py"
+SWEEP = Path(__file__).resolve().parent / "ceiling_sweep.py"
+
+
+def _subprocess(argv: Sequence[str]) -> int:
+    return subprocess.run([sys.executable, *argv], check=False).returncode
+
+
+def run_passes(*, plan: Path, sweep_plan: Path, results_dir: Path,
+               passes: int = PASSES, runner=_subprocess,
+               today=None) -> list[dict]:
+    """Each stage in its own process, in order, with the earlier ones kept.
+
+    A process per stage rather than one long one, for the reason the profile
+    already spawns a child per cell: five hours of a single-GPU machine is the
+    cost of a fault that only appears at run time, and a pass that dies half
+    way must leave the passes before it readable and the passes after it
+    runnable.
+
+    A pass whose recordings already exist is SKIPPED rather than re-run.
+    Recordings are created exclusively, so a re-run would refuse at the write
+    anyway, after paying for the arms; skipping is that refusal moved to
+    before the machine is spent.
+
+    The sweep runs against ITS OWN pass's profile recording, which is what
+    binds the bench's supervised counts and its cell to the step the same pass
+    measured. Clause 60 registers three sweeps rather than one for the reason
+    clause 57 reads the margin three times.
+    """
+    day = (today or _today)()
+    outcomes = []
+    for index in range(1, passes + 1):
+        profile_out = ps.recording_path(results_dir, day, kind="exploratory",
+                                        binding=False, pass_index=index)
+        sweep_out = sweep_path(results_dir, day, refused=True,
+                               pass_index=index)
+        outcome = {"pass": index, "profile": str(profile_out),
+                   "sweep": str(sweep_out)}
+        if profile_out.exists() and sweep_out.exists():
+            outcome["skipped"] = "both recordings already exist"
+            outcomes.append(outcome)
+            continue
+        if not profile_out.exists():
+            outcome["profile_exit"] = runner(
+                [str(PROFILE), "--plan", str(plan),
+                 "--pass-index", str(index)])
+        if not profile_out.exists():
+            outcome["sweep_exit"] = None
+            outcome["stopped"] = (
+                "the profile left no recording, so the sweep has no cell to "
+                "measure the same workload against")
+            outcomes.append(outcome)
+            continue
+        outcome["sweep_exit"] = runner(
+            [str(SWEEP), "--plan", str(sweep_plan),
+             "--profile", str(profile_out), "--pass-index", str(index)])
+        outcomes.append(outcome)
+    return outcomes
+
+
+def _today():
+    from datetime import date
+
+    return date.today()
 
 
 def _load(path: Path) -> dict:
@@ -319,6 +380,11 @@ def _load(path: Path) -> dict:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--plan", type=Path,
+                        help="the exploratory profile plan")
+    parser.add_argument("--sweep-plan", type=Path,
+                        help="the exploratory sweep plan")
+    parser.add_argument("--results", type=Path, default=ps.RESULTS_DIR)
     parser.add_argument("--read", action="store_true",
                         help="reduce recordings that already exist")
     parser.add_argument("--pass-recording", action="append", nargs=2,
@@ -341,9 +407,14 @@ def main(argv=None) -> int:
         print(text)
         return 0
 
-    print("REFUSED: only --read is built; the runner lands with the ceiling "
-          "sweep's entry point, which does not exist yet")
-    return ps.EXIT_PRECONDITION
+    if args.plan is None or args.sweep_plan is None:
+        print("REFUSED: --plan and --sweep-plan are both required to run")
+        return ps.EXIT_PRECONDITION
+    outcomes = run_passes(plan=args.plan, sweep_plan=args.sweep_plan,
+                          results_dir=args.results)
+    print(json.dumps({"passes": outcomes}, indent=2))
+    ran = [one for one in outcomes if "skipped" not in one]
+    return 0 if all(one.get("sweep_exit") == 0 for one in ran) else 1
 
 
 if __name__ == "__main__":
