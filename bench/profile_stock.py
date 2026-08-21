@@ -1008,6 +1008,91 @@ def validate_plan(plan: Mapping[str, object]) -> dict:
     return fixed
 
 
+def credited_operands(entry: Mapping[str, object]) -> dict:
+    """`M`, `N` and `F` for one candidate at one width, with each reduction named.
+
+    Amendment 6 clause 31 takes three DIFFERENT reductions of one measurement
+    and each is chosen to make its own rule harder to take, so they are pulled
+    out separately here rather than derived from one another:
+
+      M   the MEDIAN per-round credited numerator, which is the reading's own
+          `attributed`, slope alone for a retune and slope plus residue for a
+          rewrite by clause 18.
+      N   the SMALLEST per-round credited numerator. The residue is one
+          measured number and not a per-round one, so it enters every round's
+          numerator alike and the minimum is taken over the slopes.
+      F   the LARGEST credited denominator, so the maximum over the floor's
+          per-round slopes, plus `c_floor`, which clause 19 registers as zero
+          for candidate L and clause 18 omits for a retune.
+    """
+    residue = entry.get("credited_residue_ms") or 0.0
+    slopes = [fit["slope_ms"] for fit in entry["per_round"]]
+    return {"M": entry["attributed_ms"],
+            "N": min(slopes) + residue,
+            "T": entry["stock_median_ms"]}
+
+
+def exploratory_margins(profile: Mapping[str, object],
+                        sweep: Mapping[str, object]) -> dict:
+    """Clause 57's reading: the L versus Q margin beside the machine's null.
+
+    The margin is a TIME and it is `|K_L - K_Q|` outright. Clause 16 registers
+    the difference to resolve as `|T/g1 - T/g2|`, and at a shared width that
+    is exactly the difference of the credited savings, which `rules.separable`
+    records as verified over 200000 draws to 7e-13. So no score is computed
+    here and none needs to be.
+
+    Returns numbers and no verdict. Clause 57 registers that a margin clearing
+    any multiple of an observed pair contrast is a REPORTED fact about cost
+    and never a resolution, because the multiplier rests on a simulated ideal
+    null while clause 33's demand deliberately assumes nothing about the
+    null's shape.
+    """
+    matrix = profile.get("profile_matrix")
+    if matrix is None:
+        raise RunInvalid(
+            "the recording carries no profile matrix, so it measured no "
+            "deciding cell and there is no L versus Q margin in it")
+    readings = profile["cells"][rules.PRIMARY_CELL]["readings"]
+    bench = sweep.get("loss_bench", {}).get("readings", {})
+    out = {}
+    for width in rules.WIDTH_ORDER:
+        row = {"pair_contrasts_ms": readings[width]["pair_contrasts_ms"]}
+        savings, absent = {}, []
+        for candidate in ("L", "Q"):
+            entry = matrix["entries"][candidate][width]
+            if entry["type"] != "reading":
+                absent.append(f"{candidate}: {entry['reason_code']}")
+                continue
+            operands = credited_operands(entry)
+            if candidate == "Q":
+                floor = entry["floor"]
+                denominator = max(fit["slope_ms"] for fit in floor["per_round"])
+            else:
+                if width not in bench:
+                    absent.append("L: the sweep carries no bench at this width")
+                    continue
+                denominator = max(bench[width]["per_round_slopes_ms"])
+            try:
+                savings[candidate] = rules.credited_saving(
+                    operands["M"], operands["N"], denominator)
+            except RunInvalid as error:
+                absent.append(f"{candidate}: {error}")
+                continue
+            row[candidate] = dict(operands, F=denominator,
+                                  K_ms=savings[candidate])
+        if len(savings) == 2:
+            row["margin_ms"] = abs(savings["L"] - savings["Q"])
+        else:
+            row["margin_ms"] = None
+            row["no_margin_because"] = absent
+        out[width] = row
+    return {"cell": rules.PRIMARY_CELL, "widths": out,
+            "margin_is": "|K_L - K_Q|, which clause 16's time conversion "
+                         "equals exactly at a shared width",
+            "binds": False}
+
+
 def decide(profile: Mapping[str, object],
            sweep: Mapping[str, object]) -> dict:
     """Step 9's floors, refused here rather than half-done.

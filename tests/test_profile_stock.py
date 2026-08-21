@@ -1150,3 +1150,51 @@ def test_the_pairs_are_read_beside_the_reduction_and_never_inside_it():
 def test_a_half_pair_is_refused_rather_than_read_as_a_zero_contrast():
     with pytest.raises(RunInvalid, match="needs two arms"):
         ps.pair_contrasts({"pair0:a": [1.0, 2.0]})
+
+
+def test_the_margin_is_the_saving_difference_and_carries_no_verdict():
+    """Clause 57 reads a time, and clause 16's conversion makes that time the
+    difference of the two credited savings outright."""
+    readings = {w: ps.width_reading(_width(w, exploratory=True),
+                                    resolution_floor_ms=R, exploratory=True)
+                for w in rules.WIDTH_ORDER}
+    profile = {"profile_matrix": ps.profile_matrix(readings),
+               "cells": {rules.PRIMARY_CELL: {"readings": readings}}}
+    bench = {w: {"per_round_slopes_ms": [1.0, 1.2, 1.1, 1.05, 1.15]}
+             for w in rules.WIDTH_ORDER}
+    out = ps.exploratory_margins(profile, {"loss_bench": {"readings": bench}})
+
+    assert out["binds"] is False
+    # Checked over KEYS rather than over the rendered text, because the words
+    # a clause uses to say it rules nothing would match a search for a ruling.
+    def keys(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                yield key
+                yield from keys(value)
+        elif isinstance(node, list):
+            for value in node:
+                yield from keys(value)
+    assert not {k for k in keys(out)
+                if k in ("verdict", "selected", "terminal", "killed")}
+    for width in rules.WIDTH_ORDER:
+        row = out["widths"][width]
+        assert row["margin_ms"] == pytest.approx(
+            abs(row["L"]["K_ms"] - row["Q"]["K_ms"]))
+        assert set(row["pair_contrasts_ms"]) == {"pair0", "pair1"}
+        assert row["Q"]["F"] == pytest.approx(
+            max(fit["slope_ms"] for fit in
+                readings[width]["entries"]["Qfloor"]["per_round"]))
+
+
+def test_a_candidate_typed_absent_leaves_no_margin_rather_than_a_zero():
+    readings = {w: ps.width_reading(_width(w, exploratory=True),
+                                    resolution_floor_ms=R, exploratory=True)
+                for w in rules.WIDTH_ORDER}
+    profile = {"profile_matrix": ps.profile_matrix(readings),
+               "cells": {rules.PRIMARY_CELL: {"readings": readings}}}
+    out = ps.exploratory_margins(profile, {"loss_bench": {"readings": {}}})
+    for width in rules.WIDTH_ORDER:
+        assert out["widths"][width]["margin_ms"] is None
+        assert any("no bench" in one for one in
+                   out["widths"][width]["no_margin_because"])
