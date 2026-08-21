@@ -1,0 +1,16 @@
+{
+  "schema_version": 2,
+  "cells": ["B"],
+  "bands": {
+    "short": "bench/.data/ultrachat-64",
+    "long": "bench/.data/ultrachat-1056"
+  },
+  "seed": 7,
+  "rounds": 5,
+  "optimizer": "adam",
+  "optimizer_config": {},
+  "learning_rate": 1e-5,
+  "memory_ceiling_gb": 26.0,
+  "wall_cap_seconds": 9000.0,
+  "resolution": {"exploratory": true}
+}

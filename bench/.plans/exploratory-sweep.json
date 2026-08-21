@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "model": {"hidden": 2560, "vocab": 151936},
+  "resolution": {"exploratory": true}
+}
