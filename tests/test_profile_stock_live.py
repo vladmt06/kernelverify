@@ -372,3 +372,57 @@ def test_the_reducer_reads_a_real_width_end_to_end(target, batch, built):
     # P2 is measured by candidate A's dial and candidate A is at the long
     # width alone, so the short width can never PASS this test.
     assert reading["partition"]["outcome"] in ("NOT RUN", "REJECT")
+
+
+@requires_metal
+def test_the_exploratory_pass_runs_end_to_end_on_the_device(target, batch):
+    """Amendment 13 clause 57's whole path, on real arms and real samples.
+
+    Built separately from the `built` fixture rather than reusing it, because
+    the thing under test is that the four pair arms are BUILT, timed in the
+    same rounds, kept out of the reduction and read beside it, and a fixture
+    built without them could not show that.
+
+    It asserts the SHAPE and not the numbers: what a 0.6B proxy's margin is
+    says nothing about the target's, and a test that pinned it would be
+    pinning this machine's noise.
+    """
+    explored = ps._build_width(target, batch, WIDTH, _Guard(),
+                               exploratory=True)
+    labels = [arm.label for arm in explored["compiled"]]
+    assert labels == [arm.label
+                      for arm in ps.arm_manifest(WIDTH, exploratory=True)]
+
+    samples = pk.timed_rounds(explored["compiled"], batch.batch, rounds=2)
+    context = ps.cell_context(
+        "B", WIDTH, batch=batch.rows, batch_width=batch.width,
+        model=MODEL.name, adapted=target.adapted,
+        supervised=batch.supervised, supervised_of=batch.supervised_of,
+        batch_sha256=batch.digest)
+    measured = {
+        "width": WIDTH, "context": context, "peak_gb": 1.0,
+        "arms": {label: dict(explored["roles"][label], context=context,
+                             samples_ms=[value * 1000.0
+                                         for value in samples[label]])
+                 for label in samples},
+    }
+    reading = ps.width_reading(measured, resolution_floor_ms=0.155,
+                               exploratory=True)
+
+    # The pairs are read, and they are read beside the reduction rather than
+    # inside it: `reduce_width` refuses a width holding more than one stock
+    # arm, so a pair that reached it would have refused this call.
+    assert set(reading["pair_contrasts_ms"]) == {"pair0", "pair1"}
+    for contrast in reading["pair_contrasts_ms"].values():
+        assert contrast >= 0.0
+    assert set(reading["entries"]) == set(ps.CANDIDATES_AT_WIDTH[WIDTH])
+    # They are timed arms, so the spread gate reads them like any other: a
+    # pair whose own rounds describe the machine is a pair whose contrast
+    # describes it too.
+    for label in ("pair0:a", "pair0:b", "pair1:a", "pair1:b"):
+        assert label in reading["arms"]
+
+    # The margin reader is exercised device-free, because `profile_matrix`
+    # needs BOTH widths and this test builds one: the selection takes the
+    # highest minimum gain across the two, so a one-width matrix is a hole
+    # rather than a smaller matrix.
