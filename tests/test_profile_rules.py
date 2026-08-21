@@ -7,8 +7,11 @@ run happens to produce, and every constant is checked against the section of
 docs/research/2026-08-19-metalrunner-sprint1-prereg.md that fixed it.
 """
 
+import statistics
+
 import pytest
 
+import profile_rules
 from decode_rules import RunInvalid
 from profile_rules import (
     CANDIDATES,
@@ -459,3 +462,185 @@ def test_the_footprint_defaults_to_unmeasured():
     """A reading that says nothing about footprint must not read as zero,
     which would silently win every tie-break."""
     assert Reading("A", 0.5, 2.0).footprint_delta is None
+
+
+# ---------------------------------------------------------------------------
+# `R`, the calibrated demand `C`, and what Amendment 6 denominates in each
+#
+# Committed clause 21's wording admits two readings and clause 33 fixes the
+# of-medians one, because nothing in these rules consumes a single round.
+# Committed clause 16's `2 * R` is a false-separation RATE rather than a
+# resolution test, and clause 33 replaces the judgement with a registered
+# rate and a measured critical value.
+# ---------------------------------------------------------------------------
+def test_the_null_contrast_reduces_the_arms_the_way_the_rules_do():
+    """The two readings of clause 21's sentence differ, and this is the case
+    that separates them. The rules consume medians, so the null does too."""
+    a, b = [0.0, 0.0, 100.0], [0.0, 100.0, 100.0]
+    assert profile_rules.null_contrast(a, b) == 100.0
+    rejected = statistics.median([abs(x - y) for x, y in zip(a, b)])
+    assert rejected == 0.0, "the paired reading is the one NOT taken"
+
+
+def test_arms_that_agree_every_round_have_a_null_of_zero():
+    """The withdrawn rationale claimed of-medians could be large here, which
+    is arithmetically impossible."""
+    a = [10.0, 11.0, 12.0]
+    assert profile_rules.null_contrast(a, list(a)) == 0.0
+
+
+def test_a_null_contrast_pairs_its_arms_and_refuses_otherwise():
+    with pytest.raises(RunInvalid, match="same rounds"):
+        profile_rules.null_contrast([1.0, 2.0], [1.0])
+    with pytest.raises(RunInvalid, match="at least one round"):
+        profile_rules.null_contrast([], [])
+
+
+def test_r_is_a_median_over_blocks_because_one_block_cannot_estimate_it():
+    blocks = [0.5, 0.9, 1.2, 0.7, 1.8]
+    assert profile_rules.resolution(blocks) == pytest.approx(0.9)
+    with pytest.raises(RunInvalid, match="at least one"):
+        profile_rules.resolution([])
+
+
+def test_the_critical_value_is_an_order_statistic_not_a_multiple_of_r():
+    """`C` holds a future exchangeable null exceedance at or below alpha and
+    assumes nothing about the null's shape."""
+    blocks = [0.5, 0.9, 1.2, 0.7, 1.8, 0.4, 1.1, 0.6, 2.4, 0.8]
+    got = profile_rules.critical_value(blocks, alpha=0.05)
+    assert got == 2.4, "at m=10 and alpha=0.05 the demand is the largest block"
+    looser = profile_rules.critical_value(blocks, alpha=0.5)
+    assert looser < got, "a laxer rate demands less"
+    assert profile_rules.critical_value(blocks) == got, "alpha defaults to 0.05"
+
+
+def test_the_critical_value_refuses_a_rate_that_is_not_a_rate():
+    for bad in (0.0, 1.0, -0.1, 2.0):
+        with pytest.raises(RunInvalid, match="not a rate"):
+            profile_rules.critical_value([1.0, 2.0], alpha=bad)
+    with pytest.raises(RunInvalid, match="at least one block"):
+        profile_rules.critical_value([])
+
+
+def test_the_attainable_rate_bounds_what_a_block_count_can_promise():
+    """With m blocks the smallest holdable rate is 1/(m+1), so a registered
+    alpha of 0.05 needs at least 19 blocks to be attainable at all."""
+    assert profile_rules.attainable_rate(19) == pytest.approx(0.05)
+    assert profile_rules.attainable_rate(9) > profile_rules.ALPHA
+    assert profile_rules.attainable_rate(39) < profile_rules.ALPHA
+    with pytest.raises(RunInvalid):
+        profile_rules.attainable_rate(0)
+
+
+def test_a_resolution_floor_of_zero_is_refused():
+    """A floor of zero claims the machine resolves any difference at all,
+    which would let every positive slope clear 10R at once."""
+    assert profile_rules.resolution_admissible(0.155) == []
+    assert profile_rules.resolution_admissible(0.0)
+    assert profile_rules.resolution_admissible(-1.0)
+    assert profile_rules.resolution_admissible(float("nan"))
+    assert profile_rules.resolution_admissible(float("inf"))
+
+
+def test_the_effective_shipping_floor_sits_above_the_registered_one():
+    """Gating the floor on resolution raises the gain a candidate must
+    actually beat above the registered 1.10, by an amount set by C over T."""
+    got = profile_rules.smallest_shippable_gain(100.0, 0.31)
+    assert got > profile_rules.GAIN_FLOOR
+    assert profile_rules.smallest_shippable_gain(50.0, 2.0) > got, \
+        "a coarser demand, or a shorter step, raises it further"
+
+
+def test_a_coarse_enough_demand_admits_no_gain_at_all():
+    """Once C reaches T/1.10 nothing can ship, and step 10 reports that
+    before the binding window is spent rather than after."""
+    assert profile_rules.floor_is_clearable(10.0, 9.0)
+    assert not profile_rules.floor_is_clearable(10.0, 9.2)
+    assert profile_rules.smallest_shippable_gain(10.0, 9.2) is None
+    edge = 10.0 / profile_rules.GAIN_FLOOR
+    assert not profile_rules.floor_is_clearable(10.0, edge)
+
+
+# ---------------------------------------------------------------------------
+# Clause 31 v4: bound the ACTION, not the gap
+#
+# Three earlier versions of clause 31 compared a converted gap against a
+# scalar demand, which assumes each measurement's uncertainty reaches the
+# compared quantity one for one. It does not: the share takes the median
+# per-round numerator while `ratio_lo` takes smallest-over-largest, so a
+# floor movement is amplified by M/N.
+# ---------------------------------------------------------------------------
+def test_the_saving_reproduces_the_amplification_that_forced_the_rewrite():
+    """dK/dF = -M/N, so the predicted step moves by M/N times a floor move."""
+    T, M, N = 100.0, 50.0, 10.0
+    before = T - profile_rules.credited_saving(M, N, 3.00)
+    after = T - profile_rules.credited_saving(M, N, 3.11)
+    assert after - before == pytest.approx(0.55, abs=1e-9)
+    assert (after - before) / 0.11 == pytest.approx(M / N, abs=1e-9)
+
+
+def test_the_saving_and_the_registered_gain_agree():
+    """`gain = T/(T - K)` must equal the committed formula on the same
+    reduction, or the saving is a different quantity wearing its name."""
+    T, M, N, F = 100.0, 50.0, 50.0, 15.0
+    K = profile_rules.credited_saving(M, N, F)
+    assert T / (T - K) == pytest.approx(gain(M / T, N / F))
+
+
+def test_the_saving_refuses_a_denominator_outside_its_domain():
+    with pytest.raises(RunInvalid, match="not inside"):
+        profile_rules.credited_saving(50.0, 10.0, 10.0)
+    with pytest.raises(RunInvalid, match="not inside"):
+        profile_rules.credited_saving(50.0, 10.0, 0.0)
+    with pytest.raises(RunInvalid, match="divides by it"):
+        profile_rules.credited_saving(50.0, 0.0, 1.0)
+
+
+def test_the_saving_bounds_contain_every_point_of_their_box():
+    lo, hi = profile_rules.saving_bounds((49.0, 51.0), (9.8, 10.2), (2.9, 3.1))
+    for m in (49.0, 50.0, 51.0):
+        for n in (9.8, 10.0, 10.2):
+            for f in (2.9, 3.0, 3.1):
+                assert lo - 1e-9 <= profile_rules.credited_saving(m, n, f) <= hi + 1e-9
+    assert lo < hi
+
+
+def test_the_saving_bounds_refuse_a_box_that_leaves_the_domain():
+    with pytest.raises(RunInvalid, match="everywhere in the box"):
+        profile_rules.saving_bounds((49.0, 51.0), (3.0, 4.0), (2.9, 5.0))
+    with pytest.raises(RunInvalid, match="inverted"):
+        profile_rules.saving_bounds((51.0, 49.0), (9.8, 10.2), (2.9, 3.1))
+
+
+def test_shipping_needs_the_saving_to_beat_a_gain_of_1_10_everywhere():
+    """A gain of 1.10 IS a saving of T/11, so the margin is K - T/11."""
+    assert profile_rules.ships_above_floor(saving_low=10.0, step_total_high=100.0)
+    assert not profile_rules.ships_above_floor(saving_low=9.0, step_total_high=100.0)
+    edge = 100.0 / 11.0
+    assert not profile_rules.ships_above_floor(edge, 100.0), \
+        "exactly at the floor is not a supported action"
+
+
+def test_a_pair_separates_only_when_its_savings_do_not_overlap():
+    assert profile_rules.separable(saving_low=20.0, other_saving_high=19.0)
+    assert not profile_rules.separable(saving_low=20.0, other_saving_high=20.5)
+
+
+def test_the_band_expression_tracks_the_two_point_gain_test():
+    """`E_a - E_l - tau(1-E_a)(1-E_l)` has the same sign as `S_a - S_l - tau`
+    with `S = 1/(1-E)`, which is what lets the band be tested on savings."""
+    for ea, el in ((0.30, 0.10), (0.20, 0.19), (0.50, 0.49), (-0.10, -0.30)):
+        expr = profile_rules.outside_band(ea, el)
+        direct = (1 / (1 - ea)) - (1 / (1 - el)) - profile_rules.TIE_GAIN > 0
+        assert expr == direct, (ea, el)
+
+
+def test_a_kill_shape_counts_only_on_an_operand_margin():
+    """Converting the ratio through a shape's stock slope would amplify the
+    floor's uncertainty; the operand margin does not."""
+    assert profile_rules.shape_counts_toward_kill(
+        denominator_low=1.0, numerator_high=1.05)
+    assert not profile_rules.shape_counts_toward_kill(
+        denominator_low=1.0, numerator_high=1.15)
+    assert not profile_rules.shape_counts_toward_kill(1.0, 1.10), \
+        "exactly at the kill ratio is not a supported action"

@@ -12,6 +12,9 @@ sections 3, 4 and 5, as amended by its Amendment 4.
 
 from __future__ import annotations
 
+import math
+import statistics
+
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
@@ -321,6 +324,260 @@ def instrument_cost(instrumented_total: float, plain_total: float, *,
                        "same batch in the same child",
             "reason": "a ratio outside the band means the marked pass and the "
                       "plain pass are not describing the same step"}
+
+
+# Amendment 6 clause 33. The registered false-separation rate, fixed before
+# the null is measured. The multiplier on `R` is NOT registered: step 10
+# measures the null and reports the empirical critical value that holds a
+# future exchangeable null exceedance at or below this rate.
+ALPHA = 0.05
+
+
+def null_contrast(arm_a: Sequence[float], arm_b: Sequence[float]) -> float:
+    """ONE block's null: two identical arms reduced the way the rules reduce.
+
+    Committed clause 21's wording admits two readings and Amendment 6's
+    clause 33 fixes this one, the absolute difference of the two arms'
+    MEDIANS, because nothing in these rules consumes a single round: the
+    registered slope is the median of the per-round slopes, every fit runs
+    over arm medians, and every share and gain descends from those. The null
+    has to be carried through the same reduction the rule uses or it is
+    answering a question no rule asks.
+
+    An earlier version of this module took the median of the PAIRED absolute
+    differences, which measures single-round jitter and is about 2.46 times
+    larger under an ideal null. It looked conservative and was so only by
+    measuring a different quantity.
+    """
+    if len(arm_a) != len(arm_b):
+        raise RunInvalid(
+            f"the two arms have {len(arm_a)} and {len(arm_b)} rounds; a null "
+            f"contrast compares two arms measured over the same rounds")
+    if not arm_a:
+        raise RunInvalid("a null contrast needs at least one round")
+    return abs(statistics.median(arm_a) - statistics.median(arm_b))
+
+
+def resolution(blocks: Sequence[float]) -> float:
+    """`R`: the median null contrast over `m` INDEPENDENT complete blocks.
+
+    One block cannot estimate this. A single block's contrast is one draw
+    from a distribution rather than a scale estimate, and its relative spread
+    does not shrink with the round count: under an ideal null it converges to
+    an absolute Normal draw whose coefficient of variation is about 0.76 for
+    any number of rounds. Simulated over 400000 nine-round blocks, the
+    central 90% of single-block contrasts spans 0.09 to 2.91 times their own
+    median.
+
+    `R` feeds the READABILITY gates, clause 21's `3R` scaffold offset and
+    clause 26's `10R` excursion. It does NOT set the selection demand; that
+    is `critical_value` below, and the two are not interchangeable.
+    """
+    if not blocks:
+        raise RunInvalid("`R` is a median over blocks and needs at least one")
+    return statistics.median(blocks)
+
+
+def critical_value(blocks: Sequence[float], alpha: float = ALPHA) -> float:
+    """The demand clause 31's sites take, calibrated rather than judged.
+
+    Committed clause 16 demands `2 * R`, registered as a judgement before
+    anything had measured what it buys. Simulated under an ideal null with
+    `R` at its true value, a fresh null contrast exceeds `2 * R` 17.7% of the
+    time, so that test admits noise as a separation about one pair in six.
+
+    This returns the order statistic that holds a future exchangeable null
+    exceedance at or below `alpha`: the `ceil((m + 1) * (1 - alpha))`-th
+    smallest of `m` measured null contrasts. It assumes nothing about the
+    null's shape, which matters because timing noise is not Gaussian.
+
+    Where the block count is too small for the rate to be attainable, the
+    largest observed contrast is returned and the caller is entitled to
+    nothing better: with `m` blocks the smallest attainable rate is
+    `1 / (m + 1)`.
+    """
+    if not blocks:
+        raise RunInvalid("a critical value needs at least one block")
+    if not 0.0 < alpha < 1.0:
+        raise RunInvalid(f"alpha {alpha} is not a rate in (0, 1)")
+    ordered = sorted(blocks)
+    index = math.ceil((len(ordered) + 1) * (1.0 - alpha))
+    return ordered[min(index, len(ordered)) - 1]
+
+
+def attainable_rate(block_count: int) -> float:
+    """The smallest false-separation rate `m` blocks can hold, `1/(m + 1)`."""
+    if block_count < 1:
+        raise RunInvalid("a rate needs at least one block")
+    return 1.0 / (block_count + 1)
+
+
+def resolution_admissible(value: float) -> list[str]:
+    """Amendment 6: every registered `R` must be POSITIVE and finite.
+
+    A floor of zero claims the machine can resolve any difference at all,
+    which would let every positive slope clear `10R` and every strict excess
+    clear clause 31's demand. Whether this machine can produce a median of
+    exactly zero is a device question nobody has answered, so the refusal is
+    registered rather than assumed unnecessary.
+    """
+    problems = []
+    if not math.isfinite(value):
+        problems.append(f"the resolution floor is {value}, which is not finite")
+    elif value <= 0.0:
+        problems.append(
+            f"the resolution floor measured {value}, and a floor of zero or "
+            f"below claims the machine resolves any difference at all")
+    return problems
+
+
+def floor_is_clearable(step_total: float, demand: float) -> bool:
+    """A DIAGNOSTIC, never a gate: could the largest saving the floor can
+    credit exceed this cell's demand at all?
+
+    An earlier version of this module offered it as an acceptance rule, on the
+    reading that a score ships only if `T * (1/1.10 - 1/g)` reaches the
+    demand, and that as `g` grows this approaches `T / 1.10`. The arithmetic
+    is right and the RULE is withdrawn: under Amendment 6 a candidate's margin
+    is propagated from its own `M`, `N` and `F`, whose sensitivities differ
+    per candidate, so no candidate-independent effective floor exists for a
+    cell and none is claimed.
+
+    What survives is reporting. A cell where this is false is one where no
+    candidate could have shipped whatever it measured, and saying so beside
+    the result is how an empty kept list carries its reason.
+    """
+    return demand < step_total / GAIN_FLOOR
+
+
+def smallest_shippable_gain(step_total: float, demand: float) -> float | None:
+    """The EFFECTIVE shipping floor, which sits above the registered 1.10.
+
+    Returns None where the floor is unclearable at any gain.
+    """
+    if not floor_is_clearable(step_total, demand):
+        return None
+    return 1.0 / (1.0 / GAIN_FLOOR - demand / step_total)
+
+
+def credited_saving(median_numerator: float, min_numerator: float,
+                    max_denominator: float) -> float:
+    """`K`, the part of the step a candidate's credit says it removes.
+
+    Amendment 6 clause 31. The registered gain is `T/(T - K)` with
+
+        K = M * (1 - F/N)
+
+    where `M` is the MEDIAN per-round credited numerator that clause 21's
+    statistics table reports as the share's slope, `N` is the SMALLEST such
+    numerator and `F` the LARGEST credited denominator, which is what clause
+    9's `ratio_lo` pairs. Those are different reductions of one measurement,
+    each chosen to make its own rule harder to take, and writing the saving
+    this way is what makes the difference visible instead of hidden inside a
+    gain.
+
+    Its consequence is the whole reason clause 31 was rewritten: because
+    `dK/dF = -M/N`, the predicted step moves by `M/N` times a floor movement,
+    not one for one. Reproduced at `M=50`, `N=10`: a floor movement of 0.11
+    moves the predicted step by 0.55.
+    """
+    if min_numerator <= 0.0:
+        raise RunInvalid(
+            f"the smallest credited numerator is {min_numerator}, and a "
+            f"saving divides by it")
+    if not 0.0 < max_denominator < min_numerator:
+        raise RunInvalid(
+            f"the credited denominator {max_denominator} is not inside "
+            f"(0, {min_numerator}); outside that the saving's bounds below "
+            f"are not the ones clause 31 registers")
+    return median_numerator * (1.0 - max_denominator / min_numerator)
+
+
+def saving_bounds(median_numerator: tuple[float, float],
+                  min_numerator: tuple[float, float],
+                  max_denominator: tuple[float, float]) -> tuple[float, float]:
+    """The exact range of `K` over a box of its three reduced operands.
+
+    Each argument is a `(low, high)` interval. Exact while `0 < F < N` holds
+    across the box, which is checked rather than assumed.
+
+    This bounds the REDUCED scalars. Clause 31 registers that the
+    authoritative construction recomputes `M`, `N` and `F` from their shared
+    source samples instead, because independent intervals admit combinations
+    the raw rounds cannot produce; this is the conservative outer form and is
+    labelled as such wherever it is used.
+    """
+    m_lo, m_hi = median_numerator
+    n_lo, n_hi = min_numerator
+    f_lo, f_hi = max_denominator
+    for name, (lo, hi) in (("median numerator", median_numerator),
+                           ("smallest numerator", min_numerator),
+                           ("largest denominator", max_denominator)):
+        if lo > hi:
+            raise RunInvalid(f"the {name} interval is inverted: {lo} > {hi}")
+    if not 0.0 < f_hi < n_lo:
+        raise RunInvalid(
+            f"the denominator box reaches {f_hi} against a smallest "
+            f"numerator of {n_lo}; clause 31's bounds need `0 < F < N` "
+            f"everywhere in the box")
+    return (m_lo * (1.0 - f_hi / n_lo), m_hi * (1.0 - f_lo / n_hi))
+
+
+def ships_above_floor(saving_low: float, step_total_high: float) -> bool:
+    """Clause 24 under clause 31: a gain of 1.10 IS a saving of `T/11`.
+
+    The action is shipping, so it is supported only where the credited saving
+    exceeds `T/11` everywhere in the box, which is its lowest saving against
+    the largest step it might be a fraction of.
+    """
+    return saving_low - step_total_high / 11.0 > 0.0
+
+
+def excluded_by_arithmetic(share_high: float, step_total_low: float,
+                           median_numerator_high: float) -> bool:
+    """Clause 27's route 1 under clause 31, on candidate A's share alone.
+
+    The action is exclusion, so it is supported only where `T/11` exceeds the
+    attributed cost everywhere in the box.
+    """
+    del share_high  # the margin is on the cost, not the fraction
+    return step_total_low / 11.0 - median_numerator_high > 0.0
+
+
+def separable(saving_low: float, other_saving_high: float) -> bool:
+    """Clause 16's per-width pair under clause 31.
+
+    At a shared width the sign of a gain difference is the sign of a saving
+    difference, and the time conversion clause 16 registers is EXACTLY the
+    saving difference. Verified over 200000 random draws with no mismatch and
+    a worst discrepancy of 7e-13.
+    """
+    return saving_low - other_saving_high > 0.0
+
+
+def outside_band(anchor_fraction_low: float, lower_fraction_high: float) -> bool:
+    """Clause 16's two-point boundary, on saving FRACTIONS `E = K/T`.
+
+    `E_a - E_l - 0.02 * (1 - E_a) * (1 - E_l)` has the same sign as
+    `S_a - S_l - 0.02` where `S = 1/(1 - E)`, verified over 200000 draws with
+    no mismatch, so the band can be tested without leaving the saving domain.
+    """
+    return (anchor_fraction_low - lower_fraction_high
+            - TIE_GAIN * (1.0 - anchor_fraction_low)
+            * (1.0 - lower_fraction_high)) > 0.0
+
+
+def shape_counts_toward_kill(denominator_low: float,
+                             numerator_high: float) -> bool:
+    """Clause 23 under clause 31, as an operand margin and not a ratio.
+
+    A shape counts only where its floor cost exceeds its stock cost divided by
+    the kill ratio, everywhere in the box. Converting the ratio through a
+    shape's stock slope instead would amplify the floor's uncertainty by that
+    slope over the round's own numerator, which is the fault clause 31 exists
+    to remove.
+    """
+    return denominator_low - numerator_high / KILL_RATIO > 0.0
 
 
 def round_is_eligible(samples: Sequence[float], limit_pct: float) -> bool:
