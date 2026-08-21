@@ -293,10 +293,19 @@ def built(target, batch):
 
 @requires_metal
 def test_the_whole_registered_manifest_builds(built):
+    """Amendment 10's 35 arms at the short width, built, traced and warmed.
+
+    Nine of them are candidate Q's dense floor family, which clause 19 puts
+    inside this same step and clause 9 puts in these same rounds, so they are
+    arms of THIS manifest rather than a bench beside it.
+    """
     labels = [arm.label for arm in built["compiled"]]
     assert labels == [arm.label for arm in ps.arm_manifest(WIDTH)]
-    assert len(labels) == 26
+    assert len(labels) == 35
     assert set(built["roles"]) == set(labels)
+    floor = [label for label in labels if label.startswith("Qfloor:")]
+    assert len(floor) == 9
+    assert f"Qfloor:{pk.REFERENCE}" in floor
 
 
 @requires_metal

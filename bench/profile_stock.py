@@ -172,9 +172,18 @@ STOCK_MEASUREMENT_MODULE = "metalrunner.measurement"
 # reads it at both. The order is the order the arms are built and recorded in,
 # so two recordings can be compared row by row.
 CANDIDATES_AT_WIDTH = {
-    "short": ("L", "P3", "Q"),
-    "long": ("A", "L", "P3", "Q"),
+    "short": ("L", "P3", "Q", "Qfloor"),
+    "long": ("A", "L", "P3", "Q", "Qfloor"),
 }
+
+# Amendment 10 clause 45. Candidate Q's dense floor runs in the SAME context
+# as its share arms, so it lives in this manifest rather than in a bench of
+# its own, and it carries a no-dial reference arm because clause 5's offset
+# against a QUANTIZED stock would price the two implementations' speed
+# difference as scaffold overhead and refuse the family at clause 21's 3R.
+FLOOR_OF = {"Qfloor": "Q"}
+FLOOR_FAMILY = {share: floor for floor, share in FLOOR_OF.items()}
+NEEDS_REFERENCE = ("Qfloor",)
 
 # Amendment 7 clause 35: candidate A's dial is NAMED rather than measured, by
 # clause 15's own completeness tie-break, so no run reselects it.
@@ -235,6 +244,12 @@ def arm_manifest(width: str) -> tuple[ArmSpec, ...]:
     a residue. A retune carries no ablation at all rather than an unused one,
     because `KnobReading` refuses a retune that measured a residue nothing may
     consume.
+
+    Amendment 10 clause 45 adds candidate Q's floor family here rather than in
+    a bench: clause 19 puts the floor in the step at the same seam and clause
+    9 puts it at the same settings in the same rounds, which makes it nine
+    more arms of THIS manifest. Nine and not eight, because a family running
+    an implementation stock does not run needs its own no-dial reference.
     """
     if width not in rules.WIDTHS:
         raise RunInvalid(
@@ -250,6 +265,9 @@ def arm_manifest(width: str) -> tuple[ArmSpec, ...]:
         if pk.kind_of(candidate) == pk.REWRITE:
             arms.append(ArmSpec(label=f"{candidate}:{pk.ABLATION}",
                                 candidate=candidate, role=pk.ABLATION))
+        if candidate in NEEDS_REFERENCE:
+            arms.append(ArmSpec(label=f"{candidate}:{pk.REFERENCE}",
+                                candidate=candidate, role=pk.REFERENCE))
     labels = [arm.label for arm in arms]
     if len(set(labels)) != len(labels):
         raise RunInvalid(
@@ -359,7 +377,12 @@ def completeness(observed: Mapping[str, Mapping[str, int]],
 # their readings can stop a recording binding. Candidate A gates nothing by
 # ruling 2 and candidate P3 gates nothing because no certified margin reads
 # it; both are measured, published, and allowed to be absent.
-CERTIFIED_CANDIDATES = ("L", "Q")
+# Clause 34's three certified sites all read candidates L and Q, and
+# Amendment 10 clause 45 puts candidate Q's floor family in the certified
+# vector too, because the credited saving `K = M(1 - F/N)` reads its slope as
+# `F`. It is certified and it is not SCORED: no terminal ranks it, and
+# `rules.CANDIDATES` is what the profile matrix is built over.
+CERTIFIED_CANDIDATES = ("L", "Q", "Qfloor")
 
 
 def _fit_record(one: pk.Fit) -> dict:
@@ -655,6 +678,15 @@ def profile_matrix(readings: Mapping[str, Mapping[str, object]]) -> dict:
                     f"candidate {candidate} at the {width} width is typed "
                     f"{entry.get('type')!r}, and the matrix carries readings "
                     f"and typed absences and nothing else")
+            floor = FLOOR_FAMILY.get(candidate)
+            if floor is not None:
+                # Amendment 10 clause 45. The credited saving reads `F` off
+                # the floor's own fitted slope, so the floor travels in the
+                # SAME column as the share it divides, at the same width. A
+                # copy, because the width record owns the entry it came from.
+                entry = dict(entry)
+                entry["floor"] = readings[width]["entries"][floor]
+                entry["floor_candidate"] = floor
             column[width] = entry
         entries[candidate] = column
     return {
@@ -761,6 +793,12 @@ def binding_blockers(record: Mapping[str, object]) -> list[str]:
                 blockers.append(
                     f"cell {cell} {width}: region counts differ from the "
                     f"arrangement: {checked['completeness']['mismatches']}")
+            if checked.get("unregistered_shapes"):
+                blockers.append(
+                    f"cell {cell} {width}: this model runs quantized shapes "
+                    f"{checked['unregistered_shapes']} that Amendment 5 never "
+                    f"registered, so candidate Q's floor covers a site "
+                    f"clause 23's kill rule never priced")
             if not checked["loss_equal"] or checked["gradients_differing"]:
                 blockers.append(
                     f"cell {cell} {width}: the marked pass and the plain pass "
@@ -1059,6 +1097,12 @@ def _structural_pass(model, batch) -> dict:
             if not bool(mx.array_equal(plain_grad[name], marked_grad[name]))),
         "counts": pi.counts(recorder.entries),
         "foreign_on_removal": list(installation.foreign_on_removal),
+        # Amendment 10 clause 45's floor holds one dense weight per SHAPE, so
+        # it covers whatever shapes this model runs. Clause 23's kill prices
+        # exactly the six Amendment 5 registers, so a seventh would be a site
+        # the floor credits and the kill never looked at.
+        "unregistered_shapes": [list(shape)
+                                for shape in pk.unregistered_shapes(model)],
     }
 
 
@@ -1092,6 +1136,9 @@ def _kept_sizes(prepared: Mapping[str, object], phi: float) -> dict:
         if name == "projections":
             for site, value in entry.items():
                 sizes[(name, site)] = value[0]
+        elif name == "dense":
+            for shape, value in sorted(entry.items()):
+                sizes[(name, shape)] = value[0]
         elif name == "attention":
             sizes[(name, None)] = entry["kept"]
         else:
@@ -1184,6 +1231,8 @@ def _build_width(target, batch, width: str, guard: _ChildGuard) -> dict:
             elif spec.role == pk.SCAFFOLD:
                 seams_map = knob.scaffold(prepared[spec.candidate],
                                           spec.nominal_phi)
+            elif spec.role == pk.REFERENCE:
+                seams_map = knob.reference(prepared[spec.candidate])
             else:
                 seams_map = knob.ablate(prepared[spec.candidate])
             actual = (settings[spec.candidate][spec.nominal_phi]["actual_phi"]

@@ -182,6 +182,14 @@ class KnobReading:
     Held as raw samples plus derived properties rather than as numbers alone,
     because a share that cannot say which reduction produced it is a share
     nobody can check.
+
+    `scaffold_offset` is clause 5's `phi = 1` arm minus a no-dial baseline,
+    and WHICH baseline is not always stock. Amendment 10 clause 45 registers
+    that a family whose arms run a different implementation from stock takes
+    its own reference arm instead, because subtracting a quantized time from a
+    dense one reports the implementations' speed difference as scaffold
+    overhead and refuses the family at clause 21's `3R`. `reference_median`
+    records which baseline was used, and is None where it was stock's.
     """
 
     candidate: str
@@ -190,8 +198,9 @@ class KnobReading:
     per_round: tuple[Fit, ...]             # one fit per round
     pooled: Fit                            # one fit over the arm medians
     scaffold: Fit                          # the scaffold-only arm's own line
-    scaffold_offset: float                 # phi=1 arm minus stock
+    scaffold_offset: float                 # phi=1 arm minus its own baseline
     ablated_median: float | None = None    # rewrite candidates only
+    reference_median: float | None = None  # this candidate's OWN no-dial arm
     resolution_floor: float | None = None  # R, from the instrument-only stage
     span: float | None = None              # highest minus lowest ACTUAL phi
     scaffold_range: float | None = None    # the scaffold's own median range
@@ -668,7 +677,8 @@ def timed_rounds(arms: Sequence[CompiledArm], batch, *,
 
 
 STOCK, KNOB, SCAFFOLD, ABLATION = "stock", "knob", "scaffold", "ablation"
-ROLES = (STOCK, KNOB, SCAFFOLD, ABLATION)
+REFERENCE = "reference"
+ROLES = (STOCK, KNOB, SCAFFOLD, ABLATION, REFERENCE)
 
 
 @dataclass(frozen=True)
@@ -784,6 +794,13 @@ def reduce_width(samples: Mapping[str, Sequence[float]],
         knob = parts.get(KNOB, [])
         scaffold = parts.get(SCAFFOLD, [])
         ablation = parts.get(ABLATION, [])
+        reference = parts.get(REFERENCE, [])
+        if len(reference) > 1:
+            raise RunInvalid(
+                f"candidate {candidate} carries {len(reference)} reference "
+                f"arms and clause 5 takes one no-dial baseline")
+        reference_median = (statistics.median(samples[reference[0].label])
+                            if reference else None)
         knob_phis = {r.label: r.phi for r in knob}
         scaffold_phis = {r.label: r.phi for r in scaffold}
         if len(set(knob_phis.values())) < MIN_DIAL_SETTINGS:
@@ -815,7 +832,10 @@ def reduce_width(samples: Mapping[str, Sequence[float]],
             per_round=tuple(per_round_fits(samples, knob_phis, rounds)),
             pooled=pooled_fit(samples, knob_phis),
             scaffold=pooled_fit(samples, scaffold_phis),
-            scaffold_offset=scaffold_medians[full] - stock_median,
+            scaffold_offset=(scaffold_medians[full]
+                             - (stock_median if reference_median is None
+                                else reference_median)),
+            reference_median=reference_median,
             ablated_median=(statistics.median(samples[ablation[0].label])
                             if ablation else None),
             resolution_floor=resolution_floor,
@@ -858,6 +878,12 @@ class Knob:
 
     `regions` names entries in `profile_instrument.REGIONS` rather than
     repeating their seams, so where a region lives is written once.
+    `reference(prepared)` is the family's own no-dial baseline and exists
+    only where the family runs a different implementation from stock, which
+    Amendment 10 clause 45 registers for candidate Q's dense floor. Where it
+    is None the scaffold offset is taken against stock, which is clause 5 as
+    written.
+
     `prepare(model, width)` materialises every setting's operands OUTSIDE any
     timed region, so the arms differ in the work they do and not in when they
     paid for it. It takes the batch width because one dial's ladder is a
@@ -873,6 +899,7 @@ class Knob:
     arm: Callable
     scaffold: Callable
     ablate: Callable | None = None
+    reference: Callable | None = None
 
     def __post_init__(self):
         if self.kind == REWRITE and self.ablate is None:
@@ -1053,6 +1080,159 @@ def _projection_knob(candidate: str, regions: tuple[str, ...],
         prepare=prepare,
         arm=arm,
         scaffold=lambda prepared, phi: arm(prepared, phi, slice_operand=False),
+    )
+
+
+def quantized_shapes(model) -> tuple[tuple[int, int], ...]:
+    """Every DISTINCT logical shape a quantized site in this model has.
+
+    The head is included: the tied output head is a quantized matmul and
+    section 3.3 puts it inside candidate Q's region set.
+    """
+    import mlx.nn as nn
+
+    shapes = {_logical_shape(model.model.embed_tokens)}
+    for _name, module in model.named_modules():
+        if isinstance(module, nn.QuantizedLinear):
+            shapes.add(_logical_shape(module))
+    return tuple(sorted(shapes))
+
+
+def unregistered_shapes(model) -> tuple[tuple[int, int], ...]:
+    """Shapes this model runs that Amendment 5 never registered.
+
+    Reported rather than raised, and checked by the harness rather than by the
+    ladder, because the two questions are different. The ladder groups by
+    shape to hold one dense weight per shape instead of one per call site,
+    which is a memory technique and works on any model. That the shapes are
+    the SIX Amendment 5 registers is a property of the pinned model, and it
+    matters because the kill rule prices exactly those six: a seventh shape
+    would be a site candidate Q's floor covers and clause 23 never priced.
+    """
+    import profile_rules as pr
+
+    registered = set(pr.SHAPES.values())
+    return tuple(shape for shape in quantized_shapes(model)
+                 if shape not in registered)
+
+
+def _dense_ladder(model, phis=PHIS) -> dict:
+    """The dense fp16 ceiling, ONE weight per registered shape per setting.
+
+    Amendment 10 clause 45 registers the sharing and prices why. A dense
+    weight per call site costs 18.73 GiB of ladder against 12.64 GiB already
+    resident, which is 31.37 GiB of weights on a machine with 33.53 GiB of
+    unified memory, before one activation. One weight per shape costs 2.15
+    GiB, and a dense matmul's TIME at a logical shape does not depend on
+    which block's values the weight holds.
+
+    What it gives up is that a floor arm's OUTPUT is further from stock's than
+    a per-module floor would be. Nothing reads it: every arm at a setting
+    below 1.0 already slices its operands, so no dialled arm computes stock's
+    numbers, and a floor is read for its time alone.
+
+    Cut along the INPUT dimension, the same axis candidate Q's own dial cuts,
+    because clause 9 requires the floor at the same settings as the knob.
+    """
+    import mlx.core as mx
+    import mlx.nn as nn
+
+    group = None
+    for _name, module in model.named_modules():
+        if isinstance(module, nn.QuantizedLinear):
+            group = module.group_size
+            break
+    group = group or model.model.embed_tokens.group_size
+
+    ladder: dict[float, dict] = {}
+    for phi in phis:
+        weights = {}
+        for out_dims, in_dims in quantized_shapes(model):
+            kept = _group_aligned(phi, in_dims, group)
+            weights[(out_dims, in_dims)] = (
+                kept, mx.zeros((out_dims, kept), dtype=mx.float16))
+        mx.eval(*[weight for _kept, weight in weights.values()])
+        ladder[phi] = weights
+    return {"dense": ladder}
+
+
+def _logical_shape(module) -> tuple[int, int]:
+    """A quantized module's `(out, in)`, unpacked from its packed storage."""
+    out_dims, packed = module["weight"].shape
+    return out_dims, packed * 32 // module.bits
+
+
+DIALLED, SCAFFOLDED, REFERENCED = "dialled", "scaffolded", "referenced"
+
+
+def _dense_call(ladder, phi: float, *, mode: str):
+    """One site's replacement: the dense fp16 matmul at that site's shape.
+
+    The site names its own shape, read off the module the seam hands in, so
+    nothing carries a map from a module's identity to a weight and the same
+    replacement serves both of candidate Q's seams.
+
+    Three modes, differing in exactly one thing each.
+
+    `DIALLED` is the floor arm: the operand is cut to the setting's kept width
+    and multiplied by the dense weight of that width.
+
+    `SCAFFOLDED` is clause 5's scaffold arm: the cut is COMPUTED and then
+    discarded, and the matmul runs at full size, so what the arm costs over
+    the reference is the dial's own machinery. It does NOT fall through to the
+    original the way a quantized scaffold does; a floor family's scaffold has
+    to run the floor's implementation, or the family's line is fitted through
+    two implementations.
+
+    `REFERENCED` is Amendment 10 clause 45's baseline: full size, dense, and
+    no dial arithmetic at all. Its difference from `SCAFFOLDED` is the offset
+    clause 21 caps at `3R`.
+    """
+    import mlx.core as mx
+
+    def wrap(original):
+        def call(self, x):
+            name = _logical_shape(self)
+            if mode == DIALLED:
+                kept, weight = ladder[phi][name]
+                operand = x[..., :kept]
+            else:
+                if mode == SCAFFOLDED:
+                    _discarded = x[..., :ladder[phi][name][0]]
+                _kept, weight = ladder[1.00][name]
+                operand = x
+            return mx.matmul(operand.astype(mx.float16),
+                             weight.T).astype(x.dtype)
+        return call
+    return wrap
+
+
+def _floor_knob() -> Knob:
+    """Candidate Q's floor: the dense fp16 ceiling, dialled in the real step.
+
+    Clause 19 puts it inside the step at the same seam the knob uses, so `f`
+    and `r` are the same kind of quantity, and clause 9 puts it at the same
+    settings in the same rounds. Amendment 10 clause 45 puts it in the same
+    CONTEXT as candidate Q's share arms and gives it its own reference arm.
+
+    A retune, so no ablation: clause 18 credits candidate Q with its slope
+    alone and `F = d`, the floor's own fitted slope.
+    """
+    def prepare(model, _width):
+        return _dense_ladder(model)
+
+    def arm(prepared, phi, *, mode=DIALLED):
+        call = _dense_call(prepared["dense"], phi, mode=mode)
+        return {_seam("qmm"): call, _seam("head-matmul"): call}
+
+    return Knob(
+        candidate="Qfloor",
+        kind=RETUNE,
+        regions=("qmm", "head-matmul"),
+        prepare=prepare,
+        arm=arm,
+        scaffold=lambda prepared, phi: arm(prepared, phi, mode=SCAFFOLDED),
+        reference=lambda prepared: arm(prepared, 1.00, mode=REFERENCED),
     )
 
 
@@ -1306,6 +1486,7 @@ ATTENTION_KNOBS = {dial: _attention_knob(dial) for dial in ATTENTION_DIALS}
 # a dial somebody guessed at.
 KNOBS = {
     "Q": _projection_knob("Q", ("qmm", "head-matmul"), with_head=True),
+    "Qfloor": _floor_knob(),
     "P3": _projection_knob("P3", ("qmm",), with_head=False),
     "L": _loss_knob(),
 }

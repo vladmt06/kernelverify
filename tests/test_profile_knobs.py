@@ -24,6 +24,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bench"))
 
 import profile_knobs as pk  # noqa: E402
+import profile_rules as rules  # noqa: E402
 from decode_rules import RunInvalid  # noqa: E402
 
 
@@ -334,7 +335,7 @@ def test_a_span_that_was_never_recorded_blocks_rather_than_passes():
 
 def _width(*, knob_phis=(1.0, 0.75, 0.5, 0.25), scaffold_phis=None,
            slope=14.0, intercept=50.0, stock=64.0, scaffold_times=None,
-           ablation=None, rounds=5, candidate="Q"):
+           ablation=None, rounds=5, candidate="Q", reference=None):
     """One width's raw samples and the manifest that says what each label was."""
     scaffold_phis = knob_phis if scaffold_phis is None else scaffold_phis
     samples, roles = {}, [pk.ArmRole("stock", "stock", pk.STOCK)]
@@ -352,6 +353,9 @@ def _width(*, knob_phis=(1.0, 0.75, 0.5, 0.25), scaffold_phis=None,
     if ablation is not None:
         samples[f"{candidate}!"] = [ablation] * rounds
         roles.append(pk.ArmRole(f"{candidate}!", candidate, pk.ABLATION))
+    if reference is not None:
+        samples[f"{candidate}="] = [reference] * rounds
+        roles.append(pk.ArmRole(f"{candidate}=", candidate, pk.REFERENCE))
     return samples, roles
 
 
@@ -655,3 +659,68 @@ def test_the_registered_ladder_is_four_settings_descending():
     assert pk.PHIS == (1.00, 0.75, 0.50, 0.25)
     assert pk.WARMUPS == 3
     assert pk.ROUNDS == 5
+
+
+def test_a_family_with_no_reference_arm_takes_its_offset_against_stock():
+    """Clause 5 as written, and it is what every candidate but the floor uses."""
+    samples, roles = _width(stock=64.0, scaffold_times=[64.1] * 4)
+    reading = pk.reduce_width(samples, roles, resolution_floor=0.05)["Q"]
+    assert reading.reference_median is None
+    assert reading.scaffold_offset == pytest.approx(0.1)
+
+
+def test_a_family_with_its_own_reference_arm_takes_its_offset_against_that():
+    """Amendment 10 clause 45.
+
+    The failure this prevents is not hypothetical: candidate Q's floor runs a
+    DENSE matmul where stock runs a quantized one, so `scaffold minus stock`
+    is dominated by the two implementations' own speed difference. Here the
+    dense family runs at 40 against stock's 64 and its scaffold costs it 0.1,
+    so against stock the offset reads -23.9 and refuses at clause 21's 3R,
+    while against its own reference it reads the 0.1 the scaffold actually is
+    and passes.
+    """
+    samples, roles = _width(stock=64.0, scaffold_times=[40.1] * 4,
+                            reference=40.0, slope=6.0, intercept=30.0)
+    reading = pk.reduce_width(samples, roles, resolution_floor=0.05)["Q"]
+    assert reading.reference_median == pytest.approx(40.0)
+    assert reading.scaffold_offset == pytest.approx(0.1)
+    assert reading.blockers() == []
+
+    limit = pk.SCAFFOLD_OFFSET_R_MULTIPLE * 0.05
+    assert abs(reading.scaffold_offset) <= limit
+    assert abs(40.1 - 64.0) > limit
+
+
+def test_two_reference_arms_for_one_family_refuse():
+    """Clause 5 takes ONE no-dial baseline, and two would leave the reducer
+    picking which implementation the offset was measured against."""
+    samples, roles = _width(reference=40.0)
+    samples["Q=2"] = [41.0] * 5
+    roles.append(pk.ArmRole("Q=2", "Q", pk.REFERENCE))
+    with pytest.raises(RunInvalid, match="reference arms"):
+        pk.reduce_width(samples, roles, resolution_floor=0.05)
+
+
+def test_a_reference_arm_needs_no_dial_setting():
+    """It is a no-dial baseline, so demanding a phi of it would be demanding
+    the one thing it is defined by not having."""
+    role = pk.ArmRole("Q=", "Q", pk.REFERENCE)
+    assert role.phi is None
+
+
+def test_the_floor_is_a_retune_on_candidate_q_s_own_regions():
+    """Clause 18 gives candidate Q `F = d` with no `c_floor`, so its floor
+    carries no ablated arm, and clause 19 puts it at the same seams."""
+    floor = pk.KNOBS["Qfloor"]
+    assert floor.kind == pk.RETUNE
+    assert floor.ablate is None
+    assert floor.reference is not None
+    assert floor.regions == pk.KNOBS["Q"].regions
+
+
+def test_only_the_floor_family_carries_a_reference_builder():
+    """Clause 5 as written takes the offset against stock, and Amendment 10
+    changes that for one family and not for the rest."""
+    for name, knob in sorted(pk.KNOBS.items()):
+        assert (knob.reference is not None) == (name == "Qfloor")

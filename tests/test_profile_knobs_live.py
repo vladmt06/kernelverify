@@ -248,7 +248,7 @@ def test_every_seam_the_knobs_name_is_reached_at_least_once(rig):
     """A dial installed on a name nothing calls would read as a flat line."""
     from metalrunner import seams
 
-    for name in ("Q", "L", "P3"):
+    for name in ("Q", "L", "P3", "Qfloor"):
         knob = pk.KNOBS[name]
         prepared = knob.prepare(rig["model"], WIDTH)
         installation = seams.Installation()
@@ -314,7 +314,7 @@ def test_every_patched_class_is_put_back(rig):
     """
     from metalrunner import seams
 
-    for name in ("Q", "L", "P3"):
+    for name in ("Q", "L", "P3", "Qfloor"):
         knob = pk.KNOBS[name]
         prepared = knob.prepare(rig["model"], WIDTH)
         seam_map = knob.arm(prepared, 0.5)
@@ -817,3 +817,169 @@ def test_only_the_length_dial_can_drive_the_fused_floor_on_the_registered_ladder
                for dial in ("head-dim-qkv", "head-dim-qk")), (
         "a head-dimension dial can place three fused settings after all, so "
         "clause 15's escape hatch is not live and clause 28 is wrong")
+
+
+# --- candidate Q's dense floor, Amendment 10 clauses 44 and 45 -------------
+
+
+@requires_metal
+def test_the_dense_floor_holds_one_weight_per_shape_and_not_per_call_site(rig):
+    """Amendment 10 clause 45's memory registration, checked on real weights.
+
+    A weight per call site is what the obvious build produces, and at the 4B
+    target it costs 18.73 GiB of ladder on a machine with 33.53 GiB. Here the
+    proxy has far fewer distinct shapes than sites, so the count itself is the
+    check: one entry per shape at every setting, whatever the block count.
+    """
+    import mlx.nn as nn
+
+    model = rig["model"]
+    sites = sum(1 for _n, m in model.named_modules()
+                if isinstance(m, nn.QuantizedLinear)) + 1
+    shapes = pk.quantized_shapes(model)
+    assert len(shapes) < sites, (
+        "the proxy has to share at least one shape across sites or this test "
+        "cannot tell sharing from not sharing")
+
+    prepared = pk.KNOBS["Qfloor"].prepare(model, WIDTH)
+    for phi in pk.PHIS:
+        assert sorted(prepared["dense"][phi]) == sorted(shapes)
+
+
+@requires_metal
+def test_the_dense_floor_is_cut_on_the_same_axis_as_candidate_q_s_dial(rig):
+    """Clause 9 takes the ratio from the same dial at the same settings, so a
+    floor cut on a different axis is a ratio of two different dials."""
+    model = rig["model"]
+    floor = pk.KNOBS["Qfloor"].prepare(model, WIDTH)
+    share = pk.KNOBS["Q"].prepare(model, WIDTH)
+    for phi in pk.PHIS:
+        for (out_dims, _in_dims), (kept, weight) in floor["dense"][phi].items():
+            assert weight.shape == (out_dims, kept)
+        share_kept = {entry[0] for entry in share["projections"][phi].values()}
+        floor_kept = {kept for kept, _w in floor["dense"][phi].values()}
+        assert share_kept <= floor_kept, (
+            f"at phi={phi} candidate Q's dial kept {sorted(share_kept)} and "
+            f"its floor kept {sorted(floor_kept)}")
+
+
+@requires_metal
+def test_the_floor_arm_runs_a_dense_matmul_where_stock_runs_a_quantized_one(rig):
+    """The point of a ceiling: read off the graph MLX actually built.
+
+    A floor that still dispatched `QuantizedMatmul` would report a ratio near
+    1.0 that looked measured, which is the fault clause 27 found in candidate
+    A's floor and the reason candidate A has none at all.
+    """
+    import mlx.nn as nn
+    from mlx.utils import tree_flatten
+    from mlx_lm.tuner.trainer import default_loss
+    from metalrunner import seams
+
+    value_and_grad = nn.value_and_grad(rig["model"], default_loss)
+
+    def graph_for(seam_map):
+        installation = seams.Installation()
+        try:
+            for seam, wrap in seam_map.items():
+                installation.install(seam, wrap)
+            (loss, _toks), grad = value_and_grad(rig["model"], *rig["batch"])
+            leaves = [value for _key, value in tree_flatten(grad)]
+            return _primitives(loss, *leaves)
+        finally:
+            installation.remove()
+
+    prepared = pk.KNOBS["Qfloor"].prepare(rig["model"], WIDTH)
+    stock_graph = graph_for({})
+    floor_graph = graph_for(pk.KNOBS["Qfloor"].arm(prepared, 1.00))
+    assert "QuantizedMatmul" in stock_graph
+    assert "QuantizedMatmul" not in floor_graph, (
+        "the floor arm still dispatches a quantized matmul, so it is timing "
+        "stock and its ratio would read 1.0 by construction")
+    assert "Matmul" in floor_graph
+
+
+@requires_metal
+def test_the_floor_dial_does_not_change_how_often_the_seam_is_called(rig):
+    """The property clause 5 demands of every knob: a dial that deleted a
+    dispatch would be credited with time no kernel could win back."""
+    from metalrunner import seams
+
+    knob = pk.KNOBS["Qfloor"]
+    prepared = knob.prepare(rig["model"], WIDTH)
+
+    def count_for(seam_map):
+        installation = seams.Installation()
+        try:
+            for seam, wrap in seam_map.items():
+                installation.install(seam, wrap)
+            step, _traces = pk.build_step(rig["model"], rig["optimizer"],
+                                          rig["state"])
+            pk.one_step(pk.CompiledArm(label="floor", phi=1.0, step=step,
+                                       state=rig["state"], traces=[],
+                                       traced_by_warmup=0), rig["batch"])
+            return dict(installation.counts)
+        finally:
+            installation.remove()
+
+    full = count_for(knob.arm(prepared, 1.00))
+    assert full == count_for(knob.arm(prepared, 0.25))
+    assert full == count_for(knob.scaffold(prepared, 0.25))
+    assert full == count_for(knob.reference(prepared))
+    assert all(count > 0 for count in full.values())
+
+
+@requires_metal
+def test_the_floor_scaffold_and_reference_compute_the_same_thing(rig):
+    """Clause 5's scaffold applies the dial and discards it, so it must agree
+    with the no-dial reference. If it did not, the offset between them would
+    be a difference in WORK rather than the dial's own machinery, which is the
+    one quantity clause 21 caps at 3R.
+
+    Both differ from stock, and that is the point: they run the dense
+    implementation. It is exactly why Amendment 10 clause 45 gives the family
+    its own reference instead of taking clause 5's offset against stock.
+    """
+    import mlx.core as mx
+    import mlx.nn as nn
+    from mlx_lm.tuner.trainer import default_loss
+    from metalrunner import seams
+
+    value_and_grad = nn.value_and_grad(rig["model"], default_loss)
+
+    def loss_with(seam_map):
+        installation = seams.Installation()
+        try:
+            for seam, wrap in seam_map.items():
+                installation.install(seam, wrap)
+            (loss, _toks), _grad = value_and_grad(rig["model"], *rig["batch"])
+            mx.eval(loss)
+            return loss
+        finally:
+            installation.remove()
+
+    knob = pk.KNOBS["Qfloor"]
+    prepared = knob.prepare(rig["model"], WIDTH)
+    reference = loss_with(knob.reference(prepared))
+    for phi in pk.PHIS:
+        scaffolded = loss_with(knob.scaffold(prepared, phi))
+        assert mx.array_equal(reference, scaffolded), (
+            f"the floor's scaffold at phi={phi} computes something its own "
+            f"reference does not, so their difference is not the scaffold")
+    assert not mx.array_equal(reference, loss_with({}))
+
+
+@requires_metal
+def test_the_proxy_model_s_shapes_are_not_the_registered_ones(rig):
+    """Guards the split Amendment 10 clause 45 rests on.
+
+    The ladder groups by the model's OWN shapes, which is a memory technique
+    that works anywhere. That the shapes are Amendment 5's six is a property
+    of the pinned 4B, checked separately, and this proxy is the case proving
+    the two are different questions: had the ladder keyed on the registered
+    set, no live test could run at all.
+    """
+    assert pk.unregistered_shapes(rig["model"]), (
+        "the 0.6B proxy is expected to run shapes the 4B never does; if that "
+        "has changed, this test no longer guards anything")
+    assert pk.KNOBS["Qfloor"].prepare(rig["model"], WIDTH)["dense"]

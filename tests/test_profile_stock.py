@@ -37,7 +37,12 @@ DEPTH, ADAPTED = 36, 16
 R = 0.01
 STOCK_MS = 100.0
 INTERCEPT_MS = 60.0
-SLOPES = {"L": 20.0, "Q": 15.0, "P3": 10.0, "A": 8.0}
+# Candidate Q's floor is faster than candidate Q, which is what a ceiling is
+# for, so its slope is smaller. Its own no-dial reference arm is faster than
+# stock for the same reason, which is exactly why clause 5's offset cannot be
+# taken against stock: see Amendment 10 clause 45.
+SLOPES = {"L": 20.0, "Q": 15.0, "P3": 10.0, "A": 8.0, "Qfloor": 5.0}
+REFERENCES = {"Qfloor": 80.0}
 
 
 def _context(cell="B", width="short", **over):
@@ -49,13 +54,22 @@ def _context(cell="B", width="short", **over):
 
 
 def _arm_time(spec, *, slopes, residues, stock_ms, intercept_ms,
-              scaffold_slopes):
+              scaffold_slopes, references):
+    """One arm's time, so a clean default passes every gate at once.
+
+    A candidate with its own reference arm has its scaffold ladder based on
+    THAT arm rather than on stock, because clause 5's offset is measured
+    against whichever no-dial baseline the family owns.
+    """
+    baseline = references.get(spec.candidate, stock_ms)
     if spec.role == pk.STOCK:
         return stock_ms
+    if spec.role == pk.REFERENCE:
+        return baseline
     if spec.role == pk.KNOB:
         return intercept_ms + slopes[spec.candidate] * spec.nominal_phi
     if spec.role == pk.SCAFFOLD:
-        return stock_ms + (scaffold_slopes.get(spec.candidate, 0.0)
+        return baseline + (scaffold_slopes.get(spec.candidate, 0.0)
                            * spec.nominal_phi)
     return intercept_ms - residues.get(spec.candidate, 0.0)
 
@@ -63,7 +77,7 @@ def _arm_time(spec, *, slopes, residues, stock_ms, intercept_ms,
 def _width(width="short", *, cell="B", slopes=None, residues=None,
            scaffold_slopes=None, stock_ms=STOCK_MS,
            intercept_ms=INTERCEPT_MS, rounds=ps.ROUNDS, jitter=None,
-           context=None, actual=None, peak_gb=12.0):
+           context=None, actual=None, peak_gb=12.0, references=None):
     """One width's raw arms, in the shape the child records them.
 
     Every arm is a clean line by default, so a test that wants to fail one
@@ -73,6 +87,7 @@ def _width(width="short", *, cell="B", slopes=None, residues=None,
     slopes = dict(SLOPES if slopes is None else slopes)
     residues = dict(residues or {})
     scaffold_slopes = dict(scaffold_slopes or {})
+    references = dict(REFERENCES if references is None else references)
     jitter = dict(jitter or {})
     actual = dict(actual or {})
     context = _context(cell, width) if context is None else context
@@ -80,7 +95,8 @@ def _width(width="short", *, cell="B", slopes=None, residues=None,
     for spec in ps.arm_manifest(width):
         base = _arm_time(spec, slopes=slopes, residues=residues,
                          stock_ms=stock_ms, intercept_ms=intercept_ms,
-                         scaffold_slopes=scaffold_slopes)
+                         scaffold_slopes=scaffold_slopes,
+                         references=references)
         samples = [base] * rounds
         if spec.label in jitter:
             samples = list(jitter[spec.label])
@@ -94,7 +110,8 @@ def _width(width="short", *, cell="B", slopes=None, residues=None,
             "peak_gb": peak_gb}
 
 
-def _structural(counts=None, *, identity_ok=True, foreign=()):
+def _structural(counts=None, *, identity_ok=True, foreign=(),
+                unregistered=()):
     observed = counts if counts is not None else {
         "attn-core": {pi.FORWARD: DEPTH, pi.BACKWARD: ADAPTED},
         "head-matmul": {pi.FORWARD: 1, pi.BACKWARD: 1},
@@ -104,6 +121,7 @@ def _structural(counts=None, *, identity_ok=True, foreign=()):
     return {"gradients_compared": 56, "loss_equal": identity_ok,
             "gradients_differing": [] if identity_ok else ["layers.0.q"],
             "counts": observed, "foreign_on_removal": list(foreign),
+            "unregistered_shapes": list(unregistered),
             "completeness": ps.completeness(
                 observed,
                 ps.expected_counts(DEPTH, ADAPTED, sorted(pi.REGIONS)))}
@@ -152,14 +170,44 @@ def _plan(**over):
 # ---------------------------------------------------------------------------
 # The manifest
 # ---------------------------------------------------------------------------
-def test_amendment_eight_s_arm_counts_are_what_the_manifest_produces():
-    """26 at the short width and 35 at the long, leaf by leaf.
+def test_amendment_ten_s_arm_counts_are_what_the_manifest_produces():
+    """35 at the short width and 44 at the long, leaf by leaf.
 
-    Amendment 8 corrected Amendment 7's 27 by finding candidate P3 missing
-    from it, so the count is the check that the correction is what runs.
+    The count has been corrected twice and each correction added arms nobody
+    had listed. Amendment 8 found candidate P3 missing from Amendment 7's 27;
+    Amendment 10 clause 45 found candidate Q's floor family missing from
+    Amendment 8's 26, because clause 19 puts the floor in the step and clause
+    9 puts it in the same rounds. So the count IS the check.
     """
-    assert len(ps.arm_manifest("short")) == 26
-    assert len(ps.arm_manifest("long")) == 35
+    assert len(ps.arm_manifest("short")) == 35
+    assert len(ps.arm_manifest("long")) == 44
+    by_candidate = {}
+    for arm in ps.arm_manifest("long"):
+        by_candidate[arm.candidate] = by_candidate.get(arm.candidate, 0) + 1
+    assert by_candidate == {"stock": 1, "L": 9, "Q": 8, "Qfloor": 9,
+                            "P3": 8, "A": 9}
+
+
+def test_the_floor_family_carries_a_reference_arm_and_the_others_do_not():
+    """Clause 5's offset is the phi=1 arm minus a no-dial baseline, and
+    Amendment 10 clause 45 registers that a family running an implementation
+    stock does not run takes its own baseline rather than stock's."""
+    roles = {}
+    for arm in ps.arm_manifest("long"):
+        roles.setdefault(arm.candidate, set()).add(arm.role)
+    assert pk.REFERENCE in roles["Qfloor"]
+    for candidate in ("L", "Q", "P3", "A"):
+        assert pk.REFERENCE not in roles[candidate]
+
+
+def test_the_floor_is_dialled_at_the_same_settings_as_the_share_it_divides():
+    """Clause 9 takes `ratio_lo` from the same dial at the same settings in
+    the same rounds, so a floor ladder at other settings is not a ratio."""
+    placed = {}
+    for arm in ps.arm_manifest("long"):
+        if arm.role == pk.KNOB:
+            placed.setdefault(arm.candidate, []).append(arm.nominal_phi)
+    assert placed["Qfloor"] == placed["Q"] == list(pk.PHIS)
 
 
 def test_candidate_a_is_at_the_long_width_and_nowhere_else():
@@ -1014,3 +1062,18 @@ def test_the_child_refuses_a_kind_it_does_not_implement(tmp_path, monkeypatch):
     monkeypatch.setattr(ps, "_check_child_inputs", lambda task, stack: None)
     assert ps.child_main(task, out) == EXIT_PRECONDITION
     assert not out.exists()
+
+
+def test_a_model_running_a_shape_amendment_five_never_registered_blocks():
+    """Amendment 10 clause 45 gives candidate Q's floor one dense weight per
+    SHAPE, derived from the model, which works on any model. Clause 23's kill
+    prices exactly the six Amendment 5 registers, so a seventh shape is a site
+    the floor credits and the kill never looked at."""
+    cell = _cell("B")
+    cell["structural"]["short"] = _structural(unregistered=[[512, 512]])
+    blockers = ps.binding_blockers(_record(cells={"B": cell}))
+    assert any("never registered" in reason for reason in blockers), blockers
+
+
+def test_a_model_running_only_registered_shapes_does_not_block():
+    assert ps.binding_blockers(_record()) == []
