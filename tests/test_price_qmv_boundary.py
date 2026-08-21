@@ -86,6 +86,7 @@ def hardware_free(monkeypatch, tmp_path):
     guard-callback seam (it calls the guard once) so the refusal paths run
     the way the real gate drives them. Returns the results dir."""
     import machine_state
+    from memory_guard import machine_ram_gb
 
     monkeypatch.setattr(probe, "RESULTS_DIR", tmp_path)
     monkeypatch.setattr(probe, "build", lambda _mx: None)
@@ -108,6 +109,16 @@ def hardware_free(monkeypatch, tmp_path):
     monkeypatch.setattr(probe, "price_shape", lambda *a, **k: [point])
     monkeypatch.setattr(probe.machine_state, "fingerprint",
                         lambda: {"cores": 12})
+    # The machine-wide availability sample is a hardware seam like the rest,
+    # and it is the one this fixture missed. That went unnoticed while the gate
+    # read kern.memorystatus_level, which reports a pressure percentage sitting
+    # near 100 and so could never refuse. Against a real vm_stat reading these
+    # tests refuse with exit 5 on any machine whose free pages fall under the
+    # probe's default budget, which measures the machine rather than the
+    # behaviour under test. The gate's own arithmetic is covered by
+    # tests/test_serving_survival.py.
+    monkeypatch.setattr(probe, "require_available_memory",
+                        lambda _needed, _cell, **_kw: machine_ram_gb())
     return tmp_path
 
 
