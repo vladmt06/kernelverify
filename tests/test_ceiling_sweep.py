@@ -641,3 +641,36 @@ def test_a_sweep_plan_that_carries_everything_is_frozen():
     frozen = cs.validate_sweep_plan(_plan())
     assert frozen["floors_ms"] == {"short": 0.1, "long": 1.0}
     assert frozen["vocab"] == 151936
+
+
+def test_the_benches_interleave_their_arms_instead_of_running_each_to_completion():
+    """The fault this arrangement exists to prevent, pinned without a device.
+
+    Timing one arm to completion before starting the next separates two arm
+    medians by however long every arm between them took, so their difference
+    carries that much machine drift and gets WORSE as rounds are added.
+    Measured 2026-08-21 at the pinned 4B dimensions: tripling candidate L's
+    rounds from 5 to 15 moved its scaffold offset spread from 0.999 to 6.621
+    ms at the short width and from 48.026 to 109.666 at the long. Round noise
+    shrinks with rounds; this grew, which is the signature of drift.
+    """
+    order = []
+    calls = {name: (lambda name=name: order.append(name) or 0.0)
+             for name in ("a", "b", "c")}
+    samples = cs._timed_rounds(calls, warmups=2, rounds=4)
+
+    assert {k: len(v) for k, v in samples.items()} == {"a": 4, "b": 4, "c": 4}
+    timed = order[len(calls) * 2:]
+    assert timed == ["a", "b", "c", "b", "c", "a", "c", "a", "b",
+                     "a", "b", "c"], (
+        "every arm runs inside every round and the starting arm rotates, so "
+        "no arm always takes the coolest slot")
+    runs = [timed[i:i + 4] for i in range(0, len(timed), 4)]
+    assert not any(len(set(run)) == 1 for run in runs), (
+        "an arm timed to completion before the next one starts is the "
+        "arrangement that made more rounds read worse than fewer")
+
+
+def test_a_round_over_no_arms_is_refused():
+    with pytest.raises(RunInvalid, match="times nothing"):
+        cs._timed_rounds({}, warmups=1, rounds=1)

@@ -81,7 +81,7 @@ the step's.
 
 import math
 from dataclasses import dataclass
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 import profile_knobs as pk
 import profile_rules as rules
@@ -442,24 +442,47 @@ def _operands(shape: str, width: str, *, bits: int = 4, group: int = 64,
             "stock_layer": quantized, "dense_weight": dense}
 
 
-def _time(call, *, warmups: int = WARMUPS, rounds: int = ROUNDS) -> list[float]:
-    """One arm's per-round samples, in MILLISECONDS.
+def _timed_rounds(calls: Mapping[str, Callable], *, warmups: int = WARMUPS,
+                  rounds: int = ROUNDS) -> dict[str, list[float]]:
+    """Every arm timed inside every round, in rotation, in MILLISECONDS.
 
     Clause 33 puts every rule's input in milliseconds and converts once, at
     the point where a timer's output becomes a sample. This is that point for
-    this bench.
+    both benches.
+
+    The rotation is the same arrangement `profile_knobs.timed_rounds` gives
+    the step's arms, and these benches did not have it. An arm-at-a-time loop
+    separates two arms' medians by however long every arm between them took,
+    so the difference between them carries that much machine drift, and the
+    separation GROWS with the round count.
+
+    Measured 2026-08-21 at the pinned 4B dimensions, three repeats: tripling
+    the rounds from 5 to 15 made candidate L's scaffold offset spread WORSE,
+    0.999 to 6.621 ms at the short width and 48.026 to 109.666 at the long.
+    Round noise shrinks with rounds; drift between two windows does not, and
+    that is what identified the fault.
+
+    Only arms a rule COMPARES have to share rounds, which is why the kill
+    bench interleaves the four arms at one shape and width rather than all
+    forty-eight: clause 8 builds no ratio across shapes.
     """
     import time
 
     import mlx.core as mx
 
-    for _ in range(warmups):
-        mx.eval(call())
-    samples = []
-    for _ in range(rounds):
-        started = time.perf_counter()
-        mx.eval(call())
-        samples.append((time.perf_counter() - started) * 1000.0)
+    labels = list(calls)
+    if not labels:
+        raise RunInvalid("a round over no arms times nothing")
+    for label in labels:
+        for _ in range(warmups):
+            mx.eval(calls[label]())
+    samples: dict[str, list[float]] = {label: [] for label in labels}
+    for index in range(rounds):
+        cut = index % len(labels)
+        for label in labels[cut:] + labels[:cut]:
+            started = time.perf_counter()
+            mx.eval(calls[label]())
+            samples[label].append((time.perf_counter() - started) * 1000.0)
     return samples
 
 
@@ -480,6 +503,7 @@ def run_kill_bench(*, rounds: int = ROUNDS, warmups: int = WARMUPS,
         for shape in sorted(rules.SHAPES):
             built = _operands(shape, width, batch=batch)
             activation = built["activation"]
+            calls: dict[str, Callable] = {}
             for implementation in IMPLEMENTATIONS:
                 call = built[implementation]
                 output = call(activation)
@@ -496,7 +520,9 @@ def run_kill_bench(*, rounds: int = ROUNDS, warmups: int = WARMUPS,
 
                 for direction, run in ((FORWARD, forward), (BACKWARD, backward)):
                     label = f"{width}:{shape}:{implementation}:{direction}"
-                    samples[label] = _time(run, warmups=warmups, rounds=rounds)
+                    calls[label] = run
+            samples.update(_timed_rounds(calls, warmups=warmups,
+                                         rounds=rounds))
     return samples
 
 
@@ -709,15 +735,15 @@ def run_loss_bench(context: Mapping[str, object], *, width: str,
     operands = _loss_operands(width, hidden=hidden, vocab=vocab,
                               supervised=supervised)
 
-    samples, roles = {}, []
+    calls, roles = {}, []
     for arm in loss_manifest(width):
         kept = (ladder[arm.nominal_phi] if arm.nominal_phi is not None
                 else vocab)
-        run = _loss_arm(operands, kept, role=arm.role)
-        samples[arm.label] = _time(run, warmups=warmups, rounds=rounds)
+        calls[arm.label] = _loss_arm(operands, kept, role=arm.role)
         roles.append(pk.ArmRole(
             label=arm.label, candidate="L", role=arm.role,
             phi=(kept / vocab if arm.nominal_phi is not None else None)))
+    samples = _timed_rounds(calls, warmups=warmups, rounds=rounds)
     return samples, tuple(roles)
 
 

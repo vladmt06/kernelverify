@@ -116,14 +116,13 @@ def test_the_backward_arm_agrees_with_a_standalone_call_to_the_primitive(built):
     layer = built["stock_layer"]
     biases = layer.get("biases")
 
-    alone = min(cs._time(
-        lambda: mx.vjp(call, [activation], [cotangent])[1],
-        warmups=3, rounds=7))
-    standalone = min(cs._time(
-        lambda: mx.quantized_matmul(
+    timed = cs._timed_rounds({
+        "vjp": lambda: mx.vjp(call, [activation], [cotangent])[1],
+        "standalone": lambda: mx.quantized_matmul(
             cotangent, layer["weight"], scales=layer["scales"], biases=biases,
             transpose=False, group_size=layer.group_size, bits=layer.bits),
-        warmups=3, rounds=7))
+    }, warmups=3, rounds=7)
+    alone, standalone = min(timed["vjp"]), min(timed["standalone"])
     assert alone == pytest.approx(standalone, rel=0.25), (
         f"the vjp's gradients read {alone:.4f} ms and a standalone call to "
         f"the primitive its graph dispatches read {standalone:.4f} ms")
@@ -147,12 +146,11 @@ def test_the_two_cotangents_agree_and_clause_forty_four_s_factor_is_withdrawn(bu
     mx.eval(output)
     cotangent = cs._dense_cotangent(output)
 
-    by_sum = min(cs._time(
-        lambda: mx.grad(lambda x: call(x).sum())(activation),
-        warmups=3, rounds=7))
-    by_dense = min(cs._time(
-        lambda: mx.vjp(call, [activation], [cotangent])[1],
-        warmups=3, rounds=7))
+    timed = cs._timed_rounds({
+        "sum": lambda: mx.grad(lambda x: call(x).sum())(activation),
+        "dense": lambda: mx.vjp(call, [activation], [cotangent])[1],
+    }, warmups=3, rounds=7)
+    by_sum, by_dense = min(timed["sum"]), min(timed["dense"])
     assert by_dense == pytest.approx(by_sum, rel=0.25), (
         f"the dense-cotangent backward read {by_dense:.4f} ms and the "
         f"`sum()`-driven one {by_sum:.4f} ms; clause 47 withdraws the claim "
@@ -206,19 +204,20 @@ def test_one_shape_at_one_width_reduces_through_clause_eight():
     timed, summed within a round, and reduced to what `kill_q` reads."""
     built = cs._operands(SHAPE, WIDTH, batch=1)
     activation = built["activation"]
-    measured = {}
-    for implementation in cs.IMPLEMENTATIONS:
-        import mlx.core as mx
+    import mlx.core as mx
 
+    calls = {}
+    for implementation in cs.IMPLEMENTATIONS:
         call = built[implementation]
         output = call(activation)
         mx.eval(output)
         cotangent = cs._dense_cotangent(output)
-        measured[f"{implementation}:{cs.FORWARD}"] = cs._time(
-            lambda call=call: call(activation), warmups=2, rounds=3)
-        measured[f"{implementation}:{cs.BACKWARD}"] = cs._time(
+        calls[f"{implementation}:{cs.FORWARD}"] = (
+            lambda call=call: call(activation))
+        calls[f"{implementation}:{cs.BACKWARD}"] = (
             lambda call=call, cotangent=cotangent: mx.vjp(
-                call, [activation], [cotangent])[1], warmups=2, rounds=3)
+                call, [activation], [cotangent])[1])
+    measured = cs._timed_rounds(calls, warmups=2, rounds=3)
     entry = cs.shape_at_width(measured, {cs.FORWARD: 36, cs.BACKWARD: 16})
     assert entry.ratio > 0
     assert entry.numerator_high > 0
@@ -269,11 +268,11 @@ def test_the_knob_arm_cuts_the_vocabulary_and_the_extra_matmul_with_it():
     assert grads[0].shape == (PROXY["supervised"], PROXY["hidden"])
     assert grads[-1].shape == (PROXY["supervised"], PROXY["hidden"])
 
-    dialled = min(cs._time(cs._loss_arm(operands, kept, role=cs.pk.KNOB),
-                           warmups=3, rounds=7))
-    full = min(cs._time(
-        cs._loss_arm(operands, PROXY["vocab"], role=cs.pk.KNOB),
-        warmups=3, rounds=7))
+    timed = cs._timed_rounds({
+        "dialled": cs._loss_arm(operands, kept, role=cs.pk.KNOB),
+        "full": cs._loss_arm(operands, PROXY["vocab"], role=cs.pk.KNOB),
+    }, warmups=3, rounds=7)
+    dialled, full = min(timed["dialled"]), min(timed["full"])
     assert dialled < full / 2, (
         f"the arm at a quarter of the vocabulary read {dialled:.4f} ms and "
         f"the arm at all of it {full:.4f} ms; a dial that does nothing "
