@@ -77,15 +77,34 @@ wherever candidate L's gain appears.
 
 Nine arms and its own resolution context, which clause 21 forbids sharing with
 the step's.
+
+The profile recording is the workload source
+---------------------------------------------
+The command takes both a sweep plan and the closed profile recording it will
+be joined to. The deciding cell's recorded contexts supply each width's batch
+and supervised count, and its structural pass supplies clause 8's call tally.
+A sweep that rebuilt either input could measure a different workload while
+retaining the profile's label.
+
+Usage
+-----
+    bench/ceiling_sweep.py --plan <sweep-plan.json> \
+        --profile <profile-recording.json> [--pass-index N]
 """
 
+import argparse
+import json
 import math
 from dataclasses import dataclass
+from datetime import date
+from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 import profile_knobs as pk
 import profile_rules as rules
+import profile_stock as ps
 from decode_rules import RunInvalid
+from harness_runner import PreconditionFailed
 
 FORWARD, BACKWARD = "forward", "backward"
 DIRECTIONS = (FORWARD, BACKWARD)
@@ -106,6 +125,10 @@ CERTIFIED = False
 
 ROUNDS = pk.ROUNDS
 WARMUPS = pk.WARMUPS
+
+
+class LockHeld(RuntimeError):
+    """The machine-wide measurement lock has another live holder."""
 
 
 @dataclass(frozen=True)
@@ -754,11 +777,12 @@ def sweep_recording(kill_samples: Mapping[str, Sequence[float]],
                     loss_samples: Mapping[str, Mapping[str, Sequence[float]]],
                     loss_roles: Mapping[str, Sequence[pk.ArmRole]],
                     *, counts: Mapping[str, Mapping[str, int]],
-                    context: Mapping[str, object],
+                    contexts: Mapping[str, Mapping[str, object]],
                     resolution_floors_ms: Mapping[str, float],
                     fingerprint: Mapping[str, object],
                     idle_before: Mapping[str, object],
-                    idle_after: Mapping[str, object]) -> dict:
+                    idle_after: Mapping[str, object],
+                    exploratory: bool = False) -> dict:
     """Everything the sweep measured, reduced, with no verdict anywhere.
 
     The reduction runs HERE rather than at `--decide` time for the same reason
@@ -812,9 +836,10 @@ def sweep_recording(kill_samples: Mapping[str, Sequence[float]],
         }
 
     return {
-        "schema_version": 1,
-        "kind": "ceiling-sweep",
-        "context": dict(context),
+        "schema_version": 2,
+        "kind": "exploratory" if exploratory else "ceiling-sweep",
+        "contexts": {width: dict(contexts[width])
+                     for width in rules.WIDTH_ORDER},
         "kill": {
             "arms": {label: list(values)
                      for label, values in sorted(kill_samples.items())},
@@ -850,12 +875,13 @@ def sweep_recording(kill_samples: Mapping[str, Sequence[float]],
     }
 
 
-def sweep_path(results_dir, day, *, refused: bool):
+def sweep_path(results_dir, day, *, refused: bool,
+               pass_index: int | None = None) -> Path:
     """Where a sweep recording lands, with its verdict already in the name."""
-    from pathlib import Path
-
     suffix = ".REFUSED.json" if refused else ".json"
-    return Path(results_dir) / f"ceiling-sweep-{day.isoformat()}{suffix}"
+    pass_suffix = ps._pass_suffix(pass_index)
+    return Path(results_dir) / (
+        f"ceiling-sweep-{day.isoformat()}{pass_suffix}{suffix}")
 
 
 def sweep_blockers(record: Mapping[str, object]) -> list[str]:
@@ -869,6 +895,15 @@ def sweep_blockers(record: Mapping[str, object]) -> list[str]:
     protect. What it carries instead is its observed spread, labelled.
     """
     blockers = []
+    # Amendment 13 clause 57. This is structural, not a gate the run could
+    # clear: the reduction uses an arbitrary sentinel precisely because no
+    # exploratory result may bind whatever value that sentinel lets through.
+    if record.get("kind") == "exploratory":
+        blockers.append(
+            "this recording is exploratory and unusable for binding by "
+            "construction: clause 57 gives it no resolution floors, its "
+            "reduction ran on a sentinel, and it exists to size a schedule "
+            "rather than to name an operation")
     if not record.get("idle_after", {}).get("idle", False):
         blockers.append(
             "the machine went busy before the sweep closed, so its samples "
@@ -908,7 +943,23 @@ def validate_sweep_plan(plan: Mapping[str, object]) -> dict:
             f"the sweep plan is schema {plan['schema_version']!r} and this "
             f"harness reads schema 1")
     resolution = plan["resolution"]
-    floors = resolution.get("floors_ms") if isinstance(resolution, Mapping) else None
+    if not isinstance(resolution, Mapping):
+        raise RunInvalid(
+            "the sweep plan carries no `resolution.floors_ms`, and clause 26 "
+            "needs a positive floor per context before any fit is read")
+    exploratory = bool(resolution.get("exploratory"))
+    if exploratory:
+        smuggled = sorted({"floors_ms", "addendum_sha256"} & set(resolution))
+        if smuggled:
+            raise RunInvalid(
+                f"an exploratory plan carries {smuggled}, and clause 57 gives "
+                f"it no floors at all: a pass that binds nothing has nothing "
+                f"to trace a floor to, and one that carried floors could have "
+                f"chosen them")
+        floors = {width: ps.EXPLORATORY_FLOOR_MS
+                  for width in rules.WIDTH_ORDER}
+    else:
+        floors = resolution.get("floors_ms")
     if not isinstance(floors, Mapping):
         raise RunInvalid(
             "the sweep plan carries no `resolution.floors_ms`, and clause 26 "
@@ -920,7 +971,7 @@ def validate_sweep_plan(plan: Mapping[str, object]) -> dict:
                 f"the sweep plan's resolution floor for the {width} width is "
                 f"{value!r}; a floor of zero claims the machine can resolve "
                 f"any difference at all")
-    if not resolution.get("addendum_sha256"):
+    if not exploratory and not resolution.get("addendum_sha256"):
         raise RunInvalid(
             "the sweep plan names no addendum, so nothing says which "
             "committed measurement these floors came from")
@@ -930,14 +981,22 @@ def validate_sweep_plan(plan: Mapping[str, object]) -> dict:
             raise RunInvalid(
                 f"the sweep plan's model carries no positive {field!r}, and "
                 f"candidate L's bench is built at the pinned dimensions")
-    return {"floors_ms": {w: float(floors[w]) for w in rules.WIDTH_ORDER},
-            "addendum_sha256": resolution["addendum_sha256"],
-            "hidden": int(model["hidden"]), "vocab": int(model["vocab"])}
+    frozen = {
+        "floors_ms": {w: float(floors[w]) for w in rules.WIDTH_ORDER},
+        "hidden": int(model["hidden"]), "vocab": int(model["vocab"]),
+        "exploratory": exploratory,
+    }
+    if not exploratory:
+        frozen["addendum_sha256"] = resolution["addendum_sha256"]
+    return frozen
 
 
-def run_sweep(plan: Mapping[str, object], context: Mapping[str, object], *,
-              results_dir, rounds: int = ROUNDS, warmups: int = WARMUPS,
-              batch: int = 4) -> tuple[dict, list[str]]:
+def run_sweep(plan: Mapping[str, object],
+              contexts: Mapping[str, Mapping[str, object]], *,
+              structural: Mapping[str, object], results_dir,
+              rounds: int = ROUNDS, warmups: int = WARMUPS,
+              batch: int = 4,
+              pass_index: int | None = None) -> tuple[dict, list[str]]:
     """Both benches, once, into one closed recording. Rules nothing.
 
     The machine discipline is the shared vocabulary and is never copied: the
@@ -947,10 +1006,33 @@ def run_sweep(plan: Mapping[str, object], context: Mapping[str, object], *,
     import machine_state
     from machine_state import MeasurementLock
 
+    ps._pass_suffix(pass_index)
     frozen = validate_sweep_plan(plan)
-    supervised_rows(context)          # refuse before anything is timed
+    missing = sorted(set(rules.WIDTH_ORDER) - set(contexts))
+    if missing:
+        raise RunInvalid(
+            f"the sweep has no profile context for registered width "
+            f"{missing}; candidate L's floor is defined per width and a "
+            f"missing context is a missing workload")
+    for width in rules.WIDTH_ORDER:
+        context = contexts[width]
+        if not isinstance(context, Mapping):
+            raise RunInvalid(
+                f"the context filed under {width!r} is not a mapping")
+        recorded_width = context.get("width")
+        if recorded_width != width:
+            raise RunInvalid(
+                f"the context filed under {width!r} reports width "
+                f"{recorded_width!r}; using it would measure one width's "
+                f"floor and record it as another")
+        supervised_rows(context)       # refuse every width before timing
+    counts = shape_counts(structural)  # the structural pass, not a context
 
-    with MeasurementLock():
+    lock = MeasurementLock("ceiling_sweep")
+    acquired, detail = lock.acquire()
+    if not acquired:
+        raise LockHeld(f"machine measurement lock {detail}")
+    try:
         fingerprint = machine_state.fingerprint()
         before = machine_state.idle_check(fingerprint["cores"])
         kill_samples = run_kill_bench(rounds=rounds, warmups=warmups,
@@ -958,30 +1040,136 @@ def run_sweep(plan: Mapping[str, object], context: Mapping[str, object], *,
         loss_samples, loss_roles = {}, {}
         for width in rules.WIDTH_ORDER:
             samples, roles = run_loss_bench(
-                context, width=width, hidden=frozen["hidden"],
+                contexts[width], width=width, hidden=frozen["hidden"],
                 vocab=frozen["vocab"], rounds=rounds, warmups=warmups)
             loss_samples[width], loss_roles[width] = samples, roles
         after = machine_state.idle_check(fingerprint["cores"])
+    finally:
+        lock.release()
 
     record = sweep_recording(
         kill_samples, loss_samples, loss_roles,
-        counts=shape_counts(context), context=context,
+        counts=counts, contexts=contexts,
         resolution_floors_ms=frozen["floors_ms"], fingerprint=fingerprint,
-        idle_before=before, idle_after=after)
-    record["addendum_sha256"] = frozen["addendum_sha256"]
+        idle_before=before, idle_after=after,
+        exploratory=frozen["exploratory"])
+    if not frozen["exploratory"]:
+        record["addendum_sha256"] = frozen["addendum_sha256"]
     blockers = sweep_blockers(record)
     record["blockers"] = blockers
 
-    from datetime import date
-
-    destination = sweep_path(results_dir, date.today(), refused=bool(blockers))
+    destination = sweep_path(
+        results_dir, date.today(), refused=bool(blockers),
+        pass_index=pass_index)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    import json
 
     # Exclusive create: a recording is written once. A sweep that could
     # overwrite its own earlier run is a sweep that can be run until it says
     # what somebody wanted.
-    with destination.open("x") as handle:
-        handle.write(json.dumps(record, indent=2, sort_keys=True))
-        handle.write("\n")
+    try:
+        with destination.open("x") as handle:
+            handle.write(json.dumps(record, indent=2, sort_keys=True))
+            handle.write("\n")
+    except FileExistsError as error:
+        raise PreconditionFailed(
+            f"{destination} already exists and a recording is never "
+            f"overwritten") from error
+    print(json.dumps({"recording": str(destination),
+                      "binding": not blockers,
+                      "blockers": blockers}, indent=2), flush=True)
     return record, blockers
+
+
+def _profile_inputs(record: Mapping[str, object]
+                    ) -> tuple[dict[str, dict], dict]:
+    """The deciding cell's contexts and clause 8 tally, already recorded.
+
+    The structural pass runs at every width so each one is independently
+    checked by the profile. Clause 8 needs one call-count tally for the fixed
+    arrangement, and the first registered width is its canonical copy.
+    """
+    if record.get("schema_version") != 2:
+        raise RunInvalid(
+            f"the profile recording is schema "
+            f"{record.get('schema_version')!r} and the sweep reads schema 2, "
+            f"whose deciding-cell widths carry the contexts and structural "
+            f"pass needed to join the workloads")
+    cells = record.get("cells")
+    cell = (cells.get(rules.PRIMARY_CELL)
+            if isinstance(cells, Mapping) else None)
+    if not isinstance(cell, Mapping):
+        raise RunInvalid(
+            f"the profile recording carries no deciding cell "
+            f"{rules.PRIMARY_CELL!r}, so there is no workload for the sweep")
+
+    widths = cell.get("widths")
+    if not isinstance(widths, Mapping):
+        raise RunInvalid(
+            f"the profile recording carries no contexts for deciding cell "
+            f"{rules.PRIMARY_CELL!r}; rebuilding them would permit the sweep "
+            f"to measure a different workload")
+    contexts = {}
+    for width in rules.WIDTH_ORDER:
+        width_record = widths.get(width)
+        context = (width_record.get("context")
+                   if isinstance(width_record, Mapping) else None)
+        if not isinstance(context, Mapping):
+            raise RunInvalid(
+                f"the profile recording carries no context for deciding "
+                f"cell {rules.PRIMARY_CELL!r} at width {width!r}")
+        contexts[width] = dict(context)
+
+    structurals = cell.get("structural")
+    if not isinstance(structurals, Mapping):
+        raise RunInvalid(
+            f"the profile recording carries no structural record for "
+            f"deciding cell {rules.PRIMARY_CELL!r}; clause 8 has no call "
+            f"tally")
+    checked = {}
+    for width in rules.WIDTH_ORDER:
+        structural = structurals.get(width)
+        if not isinstance(structural, Mapping):
+            raise RunInvalid(
+                f"the profile recording carries no structural record for "
+                f"deciding cell {rules.PRIMARY_CELL!r} at width {width!r}; "
+                f"clause 8 has no call tally")
+        checked[width] = shape_counts(structural)
+    canonical_width = rules.WIDTH_ORDER[0]
+    for width in rules.WIDTH_ORDER[1:]:
+        if checked[width] != checked[canonical_width]:
+            raise RunInvalid(
+                f"the profile recording's structural call tallies disagree "
+                f"between widths {canonical_width!r} and {width!r}; one "
+                f"tally cannot weight both widths' clause 8 costs")
+    return contexts, dict(structurals[canonical_width])
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--plan", type=Path)
+    parser.add_argument("--profile", type=Path)
+    parser.add_argument("--pass-index", type=int)
+    args = parser.parse_args(argv)
+
+    if args.plan is None or args.profile is None:
+        print(f"REFUSED (exit {ps.EXIT_PRECONDITION}): --plan and --profile "
+              f"are required")
+        return ps.EXIT_PRECONDITION
+    try:
+        plan = ps._load_json(args.plan)
+        contexts, structural = _profile_inputs(ps._load_json(args.profile))
+        _, blockers = run_sweep(
+            plan, contexts, structural=structural, results_dir=ps.RESULTS_DIR,
+            pass_index=args.pass_index)
+    except LockHeld as error:
+        ps._print_refusal(error)
+        return ps.EXIT_LOCK_HELD
+    except (PreconditionFailed, RunInvalid) as error:
+        ps._print_refusal(error)
+        return ps.EXIT_PRECONDITION
+
+    return 0 if not blockers else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

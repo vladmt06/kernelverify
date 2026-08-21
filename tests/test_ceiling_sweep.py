@@ -11,6 +11,7 @@ from a `sum()`-driven one, that the stock arm dispatches a quantized matmul
 and the dense arm does not - lives in tests/test_ceiling_sweep_live.py.
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -21,7 +22,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bench"))
 import ceiling_sweep as cs  # noqa: E402
 import profile_knobs as pk  # noqa: E402
 import profile_rules as rules  # noqa: E402
+import profile_stock as ps  # noqa: E402
 from decode_rules import RunInvalid  # noqa: E402
+from harness_runner import PreconditionFailed  # noqa: E402
 
 
 def _samples(*, stock_f, stock_b, dense_f, dense_b, rounds=5):
@@ -526,7 +529,7 @@ def _sweep_record(**over):
     for width in rules.WIDTH_ORDER:
         loss_samples[width], loss_roles[width] = _loss_samples(width)
     kwargs = dict(
-        counts=counts, context={"supervised": 142, "supervised_of": 256},
+        counts=counts, contexts=_contexts(),
         resolution_floors_ms={"short": 0.1, "long": 1.0},
         fingerprint={"cores": 12}, idle_before={"idle": True},
         idle_after={"idle": True})
@@ -534,10 +537,323 @@ def _sweep_record(**over):
     return cs.sweep_recording(_all_arms(), loss_samples, loss_roles, **kwargs)
 
 
+def _contexts():
+    return {
+        "short": {"width": "short", "supervised": 91,
+                  "supervised_of": 256},
+        "long": {"width": "long", "supervised": 3699,
+                 "supervised_of": 4224},
+    }
+
+
+def _fake_sweep_runtime(monkeypatch, observed):
+    import machine_state
+
+    class Lock:
+        def __init__(self, owner):
+            observed["lock_owner"] = owner
+
+        def acquire(self):
+            observed["lock_acquired"] = True
+            return True, "acquired"
+
+        def release(self):
+            observed["lock_released"] = True
+
+    monkeypatch.setattr(machine_state, "MeasurementLock", Lock)
+    monkeypatch.setattr(machine_state, "fingerprint",
+                        lambda: {"cores": 12})
+    monkeypatch.setattr(machine_state, "idle_check",
+                        lambda _cores: {"idle": True})
+    monkeypatch.setattr(cs, "run_kill_bench", lambda **_kwargs: {})
+
+    def run_loss(context, *, width, **_kwargs):
+        observed.setdefault("loss", []).append(
+            (width, context["width"], context["supervised"]))
+        return {}, ()
+
+    def recording(*_args, **kwargs):
+        observed["recording"] = kwargs
+        return {"kind": "ceiling-sweep"}
+
+    monkeypatch.setattr(cs, "run_loss_bench", run_loss)
+    monkeypatch.setattr(cs, "sweep_recording", recording)
+    monkeypatch.setattr(cs, "sweep_blockers", lambda _record: [])
+
+
+def test_run_sweep_refuses_a_missing_registered_width_before_timing(
+        tmp_path, monkeypatch):
+    timed = []
+    monkeypatch.setattr(
+        cs, "run_kill_bench", lambda **_kwargs: timed.append(True))
+
+    contexts = _contexts()
+    del contexts["long"]
+    with pytest.raises(RunInvalid, match="long"):
+        cs.run_sweep(_plan(), contexts, structural=_structural(),
+                     results_dir=tmp_path)
+    assert timed == []
+
+
+def test_run_sweep_refuses_a_context_filed_under_the_wrong_width_before_timing(
+        tmp_path, monkeypatch):
+    timed = []
+    monkeypatch.setattr(
+        cs, "run_kill_bench", lambda **_kwargs: timed.append(True))
+
+    contexts = _contexts()
+    contexts["long"]["width"] = "short"
+    with pytest.raises(RunInvalid, match="long.*short"):
+        cs.run_sweep(_plan(), contexts, structural=_structural(),
+                     results_dir=tmp_path)
+    assert timed == []
+
+
+def test_each_loss_bench_uses_its_width_s_own_supervised_count(
+        tmp_path, monkeypatch):
+    observed = {}
+    _fake_sweep_runtime(monkeypatch, observed)
+
+    cs.run_sweep(_plan(), _contexts(), structural=_structural(),
+                 results_dir=tmp_path)
+
+    assert observed["loss"] == [
+        ("short", "short", 91),
+        ("long", "long", 3699),
+    ]
+
+
+def test_run_sweep_feeds_shape_counts_the_structural_tally(
+        tmp_path, monkeypatch):
+    observed = {}
+    _fake_sweep_runtime(monkeypatch, observed)
+
+    cs.run_sweep(_plan(), _contexts(), structural=_structural(),
+                 results_dir=tmp_path)
+
+    assert observed["recording"]["counts"]["S5"] == {
+        cs.FORWARD: 36, cs.BACKWARD: 16}
+    assert observed["lock_owner"] == "ceiling_sweep"
+    assert observed["lock_acquired"] is True
+    assert observed["lock_released"] is True
+
+
+def _profile_recording():
+    contexts = _contexts()
+    return {
+        "schema_version": 2,
+        "cells": {
+            rules.PRIMARY_CELL: {
+                "widths": {width: {"context": dict(contexts[width])}
+                           for width in rules.WIDTH_ORDER},
+                "structural": {width: _structural()
+                               for width in rules.WIDTH_ORDER},
+            },
+        },
+    }
+
+
+def test_the_entry_point_refuses_an_unknown_profile_recording_schema(
+        tmp_path, monkeypatch, capsys):
+    plan_path = tmp_path / "plan.json"
+    profile_path = tmp_path / "profile.json"
+    plan_path.write_text(json.dumps(_plan()))
+    profile = _profile_recording()
+    profile["schema_version"] = 1
+    profile_path.write_text(json.dumps(profile))
+    timed = []
+    monkeypatch.setattr(
+        cs, "run_sweep", lambda *_args, **_kwargs: timed.append(True))
+
+    assert cs.main(["--plan", str(plan_path),
+                    "--profile", str(profile_path)]) == ps.EXIT_PRECONDITION
+    assert "profile recording is schema 1" in capsys.readouterr().out
+    assert timed == []
+
+
+@pytest.mark.parametrize("missing, expected", [
+    ("cell", "no deciding cell"),
+    ("contexts", "no contexts"),
+    ("structural", "no structural record"),
+])
+def test_the_entry_point_names_each_missing_profile_input(
+        missing, expected, tmp_path, capsys):
+    plan_path = tmp_path / "plan.json"
+    profile_path = tmp_path / "profile.json"
+    plan_path.write_text(json.dumps(_plan()))
+    profile = _profile_recording()
+    if missing == "cell":
+        profile["cells"].clear()
+    elif missing == "contexts":
+        del profile["cells"][rules.PRIMARY_CELL]["widths"]
+    else:
+        del profile["cells"][rules.PRIMARY_CELL]["structural"]
+    profile_path.write_text(json.dumps(profile))
+
+    assert cs.main(["--plan", str(plan_path),
+                    "--profile", str(profile_path)]) == ps.EXIT_PRECONDITION
+    assert expected in capsys.readouterr().out
+
+
+def test_the_entry_point_joins_the_deciding_cell_s_recorded_inputs(
+        tmp_path, monkeypatch):
+    plan_path = tmp_path / "plan.json"
+    profile_path = tmp_path / "profile.json"
+    plan_path.write_text(json.dumps(_plan()))
+    profile = _profile_recording()
+    profile_path.write_text(json.dumps(profile))
+    observed = {}
+
+    def run(plan, contexts, *, structural, results_dir, pass_index,
+            **_kwargs):
+        observed.update(plan=plan, contexts=contexts,
+                        structural=structural, results_dir=results_dir,
+                        pass_index=pass_index)
+        return {"kind": "ceiling-sweep"}, []
+
+    monkeypatch.setattr(cs, "run_sweep", run)
+    assert cs.main(["--plan", str(plan_path),
+                    "--profile", str(profile_path),
+                    "--pass-index", "2"]) == 0
+    assert observed["contexts"] == _contexts()
+    assert observed["structural"] == profile["cells"][
+        rules.PRIMARY_CELL]["structural"][rules.WIDTH_ORDER[0]]
+    assert observed["pass_index"] == 2
+
+
+def test_the_entry_point_refuses_widths_with_different_structural_tallies(
+        tmp_path, monkeypatch, capsys):
+    plan_path = tmp_path / "plan.json"
+    profile_path = tmp_path / "profile.json"
+    plan_path.write_text(json.dumps(_plan()))
+    profile = _profile_recording()
+    out_dims, in_dims = rules.SHAPES["S1"]
+    profile["cells"][rules.PRIMARY_CELL]["structural"]["long"][
+        "shape_counts"]["qmm"][f"{out_dims}x{in_dims}"][cs.FORWARD] += 1
+    profile_path.write_text(json.dumps(profile))
+    timed = []
+    monkeypatch.setattr(
+        cs, "run_sweep", lambda *_args, **_kwargs: timed.append(True))
+
+    assert cs.main(["--plan", str(plan_path),
+                    "--profile", str(profile_path)]) == ps.EXIT_PRECONDITION
+    assert "structural call tallies disagree" in capsys.readouterr().out
+    assert timed == []
+
+
+def test_the_entry_point_reports_the_path_the_sweep_actually_wrote(
+        tmp_path, monkeypatch, capsys):
+    import datetime
+
+    plan_path = tmp_path / "plan.json"
+    profile_path = tmp_path / "profile.json"
+    plan_path.write_text(json.dumps(_plan()))
+    profile_path.write_text(json.dumps(_profile_recording()))
+    observed = {}
+    _fake_sweep_runtime(monkeypatch, observed)
+    monkeypatch.setattr(ps, "RESULTS_DIR", tmp_path)
+
+    class Midnight:
+        days = iter((datetime.date(2026, 8, 21),
+                     datetime.date(2026, 8, 22)))
+
+        @classmethod
+        def today(cls):
+            return next(cls.days)
+
+    monkeypatch.setattr(cs, "date", Midnight)
+    assert cs.main(["--plan", str(plan_path),
+                    "--profile", str(profile_path),
+                    "--pass-index", "2"]) == 0
+    output = capsys.readouterr().out
+    assert "ceiling-sweep-2026-08-21-pass2.json" in output
+    assert "ceiling-sweep-2026-08-22-pass2.json" not in output
+    assert (tmp_path / "ceiling-sweep-2026-08-21-pass2.json").exists()
+
+
+def test_the_entry_point_reuses_the_profile_s_lock_refusal_exit(
+        tmp_path, monkeypatch, capsys):
+    plan_path = tmp_path / "plan.json"
+    profile_path = tmp_path / "profile.json"
+    plan_path.write_text(json.dumps(_plan()))
+    profile_path.write_text(json.dumps(_profile_recording()))
+
+    def locked(*_args, **_kwargs):
+        raise cs.LockHeld("held by another measurement")
+
+    monkeypatch.setattr(cs, "run_sweep", locked)
+    assert cs.main(["--plan", str(plan_path),
+                    "--profile", str(profile_path)]) == ps.EXIT_LOCK_HELD
+    assert "held by another measurement" in capsys.readouterr().out
+
+
+def test_no_pass_index_keeps_the_legacy_sweep_names_byte_identical():
+    import datetime
+
+    day = datetime.date(2026, 8, 21)
+    assert cs.sweep_path(
+        "/tmp", day, refused=False,
+        pass_index=None).name == "ceiling-sweep-2026-08-21.json"
+    assert cs.sweep_path(
+        "/tmp", day, refused=True,
+        pass_index=None).name == "ceiling-sweep-2026-08-21.REFUSED.json"
+
+
+@pytest.mark.parametrize("pass_index", [0, -1, True, "2"])
+def test_a_sweep_path_refuses_an_invalid_pass_index(pass_index):
+    import datetime
+
+    with pytest.raises(RunInvalid, match="positive integer"):
+        cs.sweep_path(
+            "/tmp", datetime.date(2026, 8, 21), refused=True,
+            pass_index=pass_index)
+
+
+def test_three_sweep_passes_have_three_distinct_recording_paths():
+    import datetime
+
+    day = datetime.date(2026, 8, 21)
+    paths = [cs.sweep_path(
+        "/tmp", day, refused=True, pass_index=index)
+             for index in (1, 2, 3)]
+    assert [path.name for path in paths] == [
+        "ceiling-sweep-2026-08-21-pass1.REFUSED.json",
+        "ceiling-sweep-2026-08-21-pass2.REFUSED.json",
+        "ceiling-sweep-2026-08-21-pass3.REFUSED.json",
+    ]
+    assert len(set(paths)) == 3
+
+
+@pytest.mark.parametrize("pass_index", [0, -1, True, "2"])
+def test_run_sweep_refuses_an_invalid_pass_before_timing(
+        pass_index, tmp_path, monkeypatch):
+    timed = []
+    monkeypatch.setattr(
+        cs, "run_kill_bench", lambda **_kwargs: timed.append(True))
+    with pytest.raises(RunInvalid, match="positive integer"):
+        cs.run_sweep(
+            _plan(), _contexts(), structural=_structural(),
+            results_dir=tmp_path, pass_index=pass_index)
+    assert timed == []
+
+
+def test_the_same_sweep_pass_index_is_still_never_overwritten(
+        tmp_path, monkeypatch):
+    observed = {}
+    _fake_sweep_runtime(monkeypatch, observed)
+    kwargs = dict(structural=_structural(), results_dir=tmp_path,
+                  pass_index=2)
+
+    cs.run_sweep(_plan(), _contexts(), **kwargs)
+    with pytest.raises(PreconditionFailed, match="never overwritten"):
+        cs.run_sweep(_plan(), _contexts(), **kwargs)
+
+
 def test_the_recording_carries_both_benches_and_no_verdict():
     """The sweep measures and the rules rule, and the two live in different
     files so a harness cannot quietly become the thing that decides."""
     record = _sweep_record()
+    assert record["schema_version"] == 2
     assert record["kind"] == "ceiling-sweep"
     assert sorted(record["kill"]["per_shape"]) == sorted(rules.SHAPES)
     assert sorted(record["loss_bench"]["readings"]) == sorted(rules.WIDTH_ORDER)
@@ -557,6 +873,11 @@ def test_the_recording_carries_both_benches_and_no_verdict():
     named = set(keys(record))
     for word in ("killed", "verdict", "selected", "terminal", "at_ceiling"):
         assert word not in named, f"the recording carries a {word!r} field"
+
+
+def test_the_recording_keeps_the_context_for_each_measured_width():
+    record = _sweep_record()
+    assert record["contexts"] == _contexts()
 
 
 def test_the_kill_half_is_labelled_reported_and_carries_no_certified_bound():
@@ -641,6 +962,47 @@ def test_a_sweep_plan_that_carries_everything_is_frozen():
     frozen = cs.validate_sweep_plan(_plan())
     assert frozen["floors_ms"] == {"short": 0.1, "long": 1.0}
     assert frozen["vocab"] == 151936
+
+
+def test_an_exploratory_sweep_plan_has_no_floors_to_choose():
+    frozen = cs.validate_sweep_plan(
+        _plan(resolution={"exploratory": True}))
+    assert frozen["exploratory"] is True
+    assert frozen["floors_ms"] == {
+        width: ps.EXPLORATORY_FLOOR_MS for width in rules.WIDTH_ORDER}
+
+    for smuggled in ({"floors_ms": {"short": 0.1, "long": 1.0}},
+                      {"addendum_sha256": "addendum-sha"}):
+        with pytest.raises(RunInvalid, match="could have chosen them"):
+            cs.validate_sweep_plan(_plan(
+                resolution=dict({"exploratory": True}, **smuggled)))
+
+
+def test_an_exploratory_sweep_recording_can_never_bind():
+    record = _sweep_record(exploratory=True)
+    assert record["kind"] == "exploratory"
+    blockers = cs.sweep_blockers(record)
+    assert any("unusable for binding by construction" in one
+               for one in blockers)
+
+    record["idle_after"] = {"idle": True}
+    for reading in record["loss_bench"]["readings"].values():
+        reading["blockers"] = []
+    assert any("unusable for binding by construction" in one
+               for one in cs.sweep_blockers(record))
+
+
+def test_run_sweep_threads_the_exploratory_kind_without_an_addendum(
+        tmp_path, monkeypatch):
+    observed = {}
+    _fake_sweep_runtime(monkeypatch, observed)
+
+    record, _blockers = cs.run_sweep(
+        _plan(resolution={"exploratory": True}), _contexts(),
+        structural=_structural(), results_dir=tmp_path)
+
+    assert observed["recording"]["exploratory"] is True
+    assert "addendum_sha256" not in record
 
 
 def test_the_benches_interleave_their_arms_instead_of_running_each_to_completion():

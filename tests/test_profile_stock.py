@@ -871,6 +871,44 @@ def test_a_refused_run_says_so_in_the_file_name():
     assert refused.name.endswith("REFUSED.json")
 
 
+def test_no_pass_index_keeps_the_legacy_recording_names_byte_identical():
+    import datetime
+
+    day = datetime.date(2026, 8, 21)
+    assert ps.recording_path(
+        "/tmp", day, kind="binding", binding=True,
+        pass_index=None).name == "profile-stock-binding-2026-08-21.json"
+    assert ps.recording_path(
+        "/tmp", day, kind="exploratory", binding=False,
+        pass_index=None).name == (
+            "profile-stock-exploratory-2026-08-21.REFUSED.json")
+
+
+@pytest.mark.parametrize("pass_index", [0, -1, True, "2"])
+def test_a_profile_recording_path_refuses_an_invalid_pass_index(pass_index):
+    import datetime
+
+    with pytest.raises(RunInvalid, match="positive integer"):
+        ps.recording_path(
+            "/tmp", datetime.date(2026, 8, 21), kind="exploratory",
+            binding=False, pass_index=pass_index)
+
+
+def test_three_profile_passes_have_three_distinct_recording_paths():
+    import datetime
+
+    day = datetime.date(2026, 8, 21)
+    paths = [ps.recording_path(
+        "/tmp", day, kind="exploratory", binding=False, pass_index=index)
+             for index in (1, 2, 3)]
+    assert [path.name for path in paths] == [
+        "profile-stock-exploratory-2026-08-21-pass1.REFUSED.json",
+        "profile-stock-exploratory-2026-08-21-pass2.REFUSED.json",
+        "profile-stock-exploratory-2026-08-21-pass3.REFUSED.json",
+    ]
+    assert len(set(paths)) == 3
+
+
 def test_the_name_follows_the_verdict_and_not_the_idle_gate_alone():
     """A run that measured everything cleanly on a quiet machine and then
     failed a fit gate used to land under the name of one that bound."""
@@ -892,6 +930,19 @@ def test_a_recording_is_never_overwritten(tmp_path):
     with pytest.raises(PreconditionFailed, match="never overwritten"):
         runtime.write_record(path, {"a": 2})
     assert json.loads(path.read_text()) == {"a": 1}
+
+
+def test_the_same_profile_pass_index_is_still_never_overwritten(tmp_path):
+    import datetime
+
+    runtime = ps.SystemRuntime()
+    path = ps.recording_path(
+        tmp_path, datetime.date(2026, 8, 21), kind="exploratory",
+        binding=False, pass_index=2)
+    runtime.write_record(path, {"pass": 2})
+    with pytest.raises(PreconditionFailed, match="never overwritten"):
+        runtime.write_record(path, {"pass": 2, "replacement": True})
+    assert json.loads(path.read_text()) == {"pass": 2}
 
 
 # ---------------------------------------------------------------------------
@@ -949,6 +1000,35 @@ def test_a_clean_run_binds_and_writes_schema_two():
     assert "REFUSED" not in path.name
     assert record["profile_matrix"]["width_order"] == list(rules.WIDTH_ORDER)
     assert set(record["profile_matrix"]["entries"]) == set(rules.CANDIDATES)
+
+
+def test_run_profile_threads_the_pass_index_into_its_recording_name():
+    runtime = _Runtime()
+    assert ps.run_profile(_plan(), runtime, pass_index=2) == 0
+    (path, _recorded), = runtime.writes
+    assert path.name == "profile-stock-binding-2026-08-21-pass2.json"
+
+
+def test_run_profile_refuses_an_invalid_pass_before_taking_the_lock():
+    runtime = _Runtime()
+    assert ps.run_profile(_plan(), runtime, pass_index=True) == EXIT_PRECONDITION
+    assert runtime.events == []
+
+
+def test_the_profile_entry_point_exposes_the_pass_index(
+        tmp_path, monkeypatch):
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(json.dumps(_plan()))
+    observed = {}
+
+    def run(plan, runtime, *, results_dir, pass_index):
+        observed.update(plan=plan, runtime=runtime, results_dir=results_dir,
+                        pass_index=pass_index)
+        return 0
+
+    monkeypatch.setattr(ps, "run_profile", run)
+    assert ps.main(["--plan", str(plan_path), "--pass-index", "2"]) == 0
+    assert observed["pass_index"] == 2
 
 
 def test_the_readings_are_derived_by_the_parent_and_not_by_the_child():

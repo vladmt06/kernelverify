@@ -872,8 +872,25 @@ def binding_blockers(record: Mapping[str, object]) -> list[str]:
     return blockers
 
 
+def _pass_suffix(pass_index: int | None) -> str:
+    """A pass identity for filenames, or the exact legacy empty suffix.
+
+    A bool is refused explicitly because it is an int in Python and would
+    otherwise let `True` name pass 1. The same distinction protects the plan's
+    seed, where accepting a bool would not register the number it appeared to.
+    """
+    if pass_index is None:
+        return ""
+    if (not isinstance(pass_index, int) or isinstance(pass_index, bool)
+            or pass_index < 1):
+        raise RunInvalid(
+            f"pass index {pass_index!r} is not a positive integer; each pass "
+            f"needs a numbered recording identity")
+    return f"-pass{pass_index}"
+
+
 def recording_path(results_dir: str | Path, day: date, *, kind: str,
-                   binding: bool) -> Path:
+                   binding: bool, pass_index: int | None = None) -> Path:
     """Where a recording lands, with its verdict already in the name.
 
     Keyed on the final verdict rather than on the closing idle gate alone.
@@ -883,7 +900,9 @@ def recording_path(results_dir: str | Path, day: date, *, kind: str,
     difference was visible only inside the file.
     """
     suffix = ".json" if binding else ".REFUSED.json"
-    return Path(results_dir) / f"profile-stock-{kind}-{day.isoformat()}{suffix}"
+    pass_suffix = _pass_suffix(pass_index)
+    return Path(results_dir) / (
+        f"profile-stock-{kind}-{day.isoformat()}{pass_suffix}{suffix}")
 
 
 def validate_plan(plan: Mapping[str, object]) -> dict:
@@ -1662,7 +1681,8 @@ def _print_refusal(reason: object) -> None:
 
 
 def run_profile(plan: Mapping[str, object], runtime, *,
-                results_dir: str | Path = RESULTS_DIR) -> int:
+                results_dir: str | Path = RESULTS_DIR,
+                pass_index: int | None = None) -> int:
     """Measure every requested cell, then let the gates decide.
 
     There is no `--calibrate` mode. The one that existed priced the boundary
@@ -1674,6 +1694,7 @@ def run_profile(plan: Mapping[str, object], runtime, *,
     """
     try:
         fixed = validate_plan(plan)
+        _pass_suffix(pass_index)
     except RunInvalid as error:
         _print_refusal(error)
         return EXIT_PRECONDITION
@@ -1757,7 +1778,8 @@ def run_profile(plan: Mapping[str, object], runtime, *,
         record["binding"] = not record["binding_blockers"]
         path = recording_path(results_dir, runtime.today(),
                               kind=record["kind"],
-                              binding=record["binding"])
+                              binding=record["binding"],
+                              pass_index=pass_index)
         try:
             runtime.write_record(path, record)
         except PreconditionFailed as error:
@@ -1815,6 +1837,7 @@ def main(argv=None) -> int:
     parser.add_argument("--profile", type=Path)
     parser.add_argument("--sweep", type=Path)
     parser.add_argument("--out", type=Path)
+    parser.add_argument("--pass-index", type=int)
     parser.add_argument("--child-task", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--child-out", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
@@ -1837,7 +1860,8 @@ def main(argv=None) -> int:
     except PreconditionFailed as error:
         _print_refusal(error)
         return EXIT_PRECONDITION
-    return run_profile(plan, SystemRuntime(), results_dir=RESULTS_DIR)
+    return run_profile(plan, SystemRuntime(), results_dir=RESULTS_DIR,
+                       pass_index=args.pass_index)
 
 
 if __name__ == "__main__":
