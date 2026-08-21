@@ -2840,3 +2840,122 @@ Its recording carries a blocker no gate clears, the same unclearable ground clau
 | 19, its bench exception | UNCHANGED. Clause 60 changes how many times the bench runs and nothing about what it computes |
 | 33, its `alpha`, its estimator and its block count | UNCHANGED and untouched. Nothing in this amendment reaches the calibration's rate, its demand or its schedule |
 | 46, its outstanding reserve for idle refusals | STILL OUTSTANDING and named again. Clause 60 adds 9.87 minutes to a pass budget and registers no reserve, and step 10 still cannot be armed until one exists |
+
+## Amendment 15, 2026-08-21: four things the exploratory pass reads that the document does not determine
+
+An independent adversarial pass over Amendment 13 checked 48 derived numeric claims, of which 38 held, 6 failed and 4 were underdetermined by the committed construction.
+A second pass over the code those clauses govern checked 55 claims and reproduced 21 failures.
+Neither pass saw Amendment 14, and what it registered is not re-registered here.
+
+Four of the findings reach committed text rather than code, and this amendment settles them.
+The rest are code that fails to do what registered text already says, and they are fixed against the text rather than by moving it.
+
+Two clauses below correct figures this document has published twice, once in Amendment 13 and once in Amendment 14, and both are WITHDRAWN in the same way every other withdrawn figure has been.
+
+### Clause 61. Clause 54's same-round-count rule is SCOPED, and clause 57's lean schedule survives it
+
+Clause 54 registers that "a context's calibration blocks and its binding pass take the SAME round count", makes `rounds_per_block` one value per context, and registers that a stage whose round count disagrees REFUSES.
+Clause 57's lean schedule puts a 5-block pilot at two rounds beside 19 fresh blocks at five, in one context.
+So the cheaper branch of clause 57 would have been refused by the rule two clauses above it, and the 43.23 hours it prices describes a schedule the registered schema cannot express.
+
+Measured before it is settled, because the reading that makes clause 54 right and the reading that makes clause 57 right cannot both hold.
+Simulated 2026-08-21 under clause 33's own ideal null, 27 leaves in four groups whose true spreads differ by a factor of six so the per-group standardisation is load-bearing, the demand taken as clause 37 registers it and the exceedance measured against fresh draws at five rounds:
+
+| Pilot | Exceedance against `alpha = 0.05` | Mean demand |
+|---|---|---|
+| 20 blocks at five rounds, as clause 37 registers it | 0.0501 | 2.60 |
+| 5 blocks at five rounds | 0.0494 | 2.69 |
+| 5 blocks at two rounds, clause 57's lean branch | 0.0471 | 2.85 |
+| 1 block at one round | 0.0580 | 7.83 |
+
+**Registered: clause 54's rule binds the DEMAND-BEARING blocks and the binding pass, and not the pilot.**
+The reason is in clause 54's own argument and in clause 37's own estimator.
+Clause 54 objects to "a demand estimated at one round count and applied at another", and the demand is the order statistic of the FRESH blocks' scores; the pilot estimates no demand.
+Clause 37's scale is "the median absolute leaf contrast within that group, over the pilot blocks, taken across blocks and rounds rather than within one block", which is a PER-ROUND quantity, so the round count changes how many samples are pooled and not what is being estimated.
+The table is the check on that argument rather than the argument itself, and it holds: the rate is attained at every pilot down to five blocks at two rounds.
+
+`rounds_per_block` therefore carries a `pilot` entry beside the one it already has, keyed the same way, and a pilot whose round count disagrees with THAT entry refuses.
+Clause 33's schema is amended in that one field and in nothing else, which is the same single-field amendment clause 54 made.
+
+**What the lean pilot costs, which clause 57 asserts and never quantifies.**
+Clause 57 says the schedule moves "the demand's VARIANCE and not its rate".
+The rate holds, and the cost is not only variance: the mean demand rises from 2.60 to 2.85, about ten percent, so the lean branch makes every certified margin clear a bar ten percent higher.
+That is registered here as a measured cost of the lean branch rather than left inside the word variance.
+One block at one round is recorded because it bounds the other end: the demand runs away to 7.83 and the rate degrades to 0.058, so the pilot is not free to shrink further and clause 57's five blocks is not an arbitrary floor.
+
+### Clause 62. Three margins reduce by the SMALLEST
+
+Clause 57 reads the margin three times and clause 59 forms a ratio from "the margin at that width".
+There are three of them and no clause says which.
+
+**Registered: the smallest of the three.**
+Taking the largest would let one pass that happened to read generously buy the cheaper schedule, and taking a median would make two passes able to outvote the one that disagreed.
+The smallest is also the same direction clause 58 takes when it maximises over the four identical-arm labels, and for the same reason: clearing the bar takes the lean schedule, so every reduction on this branch resolves against clearing it.
+
+The three margins are recorded individually beside the reduction, because clause 57's stated reason for reading it three times is that a margin read once has unknown stability, and a reduction that hid the other two would discard exactly what the third reading was for.
+
+### Clause 63. The pass price is WITHDRAWN for the second time, and what it omits is named
+
+Clause 57 prices the exploratory pass at 3.07 hours and Amendment 14 clause 60 corrects that to 3.23 by adding the sweeps.
+Both are wrong in the same way and clause 60's correction inherited the fault it was correcting.
+
+Clause 45's binding pass of 3372 seconds is FIVE TIMED ROUNDS over 35 arms at the short width and 44 at the long, and nothing else: `5 * (35 * 0.7891 + 44 * 14.7008)` is 3372.3 seconds, which reproduces the registered figure to its own precision.
+Section 3 registers exactly three warm-up passes per arm before any timed round, and clause 52 measures a whole build at 3.03 timed steps.
+Neither is in that 3372, and therefore neither is in 3.07 or in 3.23.
+
+| Item, one pass | Cost |
+|---|---|
+| timed rounds over the binding manifest | 3372.3 s |
+| the four identical arms clause 57 adds | 309.8 s |
+| build and warm every arm of both widths once | 2231.3 s |
+| that pass's own sweep, per clause 60 | 197.3 s |
+| one pass | 6110.7 s, 101.85 min |
+| **three passes** | **5.09 h** |
+
+Clause 57's 3.07 hours and clause 60's 3.23 are both WITHDRAWN as prices.
+Their arithmetic is untouched and reproduces its own figures exactly on the items each counted; what moved is that neither counted a warm-up or a build.
+
+This does not reach the calibration's own figures.
+Clause 52's schedule arithmetic and clause 57's 43.23 and 76.18 already price a build at 3.03 timed steps in every block, which is why those reproduce and these did not.
+
+### Clause 64. The exploratory sentinel is NOT inert, and the gates it drives are not applied
+
+Clause 57 registers that the exploratory pass has no resolution floor.
+The harness has to reduce something, so it substitutes an arbitrary sentinel and records that the choice cannot matter because the recording can never bind.
+
+That defence is wrong, and it is wrong about the one number the pass exists to produce.
+Reproduced 2026-08-21 on the reducer's own fixtures: at a sentinel of 0.1 ms candidate L is a typed absence at both widths and the margin is `None`; at 1.0 ms it is a reading and the margin exists.
+The floor-dependent gates of clause 26 and clause 21 stand between the fit and the margin, so an implementation constant nothing registers decides whether the branch can be read at all, and in one arrangement it also decided that candidate Q read while its own floor did not.
+
+**Registered: the exploratory reader computes its margin from the FITS, and applies no gate.**
+Every gate's verdict is recorded beside the margin, named, and labelled as reported and not applied, together with the sentinel the annotations were computed against.
+So the sentinel annotates and decides nothing, which is what clause 57 claimed and what the code did not do.
+
+The reason this is safe is specific rather than general.
+A resolution gate refuses a reading the machine cannot tell from zero, and it does that against a floor measured in the calibration this pass runs BEFORE.
+Clause 58's branch already makes that comparison from this run's own data: the margin is placed against the largest window-separated contrast between two arms that ought to agree, which is a resolution test built from the measurement rather than from a registered constant.
+So the exploratory pass is not going ungated; it is gated by the only null available to it, and a gate driven by a sentinel would be a second test against a number nobody chose.
+
+What this does NOT do is make an ungated fit credible.
+A margin whose fit failed the linearity floor is reported with that failure named, and clause 57 already registers that nothing this pass produces resolves anything.
+The floor-dependent gates return in full at the binding run, where a measured `R` exists and where the reading binds.
+
+### Ledger: what Amendment 15 does to committed text
+
+| Clause | What happens to it |
+|---|---|
+| 54, its same-round-count rule | SCOPED to the demand-bearing blocks and the binding pass. Its argument is about the demand and the pilot estimates none; clause 37's scale is a per-round quantity whose estimand does not move with the round count. Its refusal is untouched and now has a pilot entry to refuse against |
+| 54, its `rounds_per_block` field | EXTENDED by one key. It stays per-context and gains a `pilot` entry, which is the same single-field amendment clause 54 itself made to clause 33's schema |
+| 57, its lean schedule | UNCHANGED and now executable. It would have been refused by clause 54 as committed, and the simulation says the schedule was the right side of that contradiction |
+| 57, its "variance and not rate" | UNCHANGED as to rate and QUANTIFIED as to cost. The rate holds at 0.0471 against a registered 0.05, and the mean demand rises about ten percent, which the lean branch pays on every certified margin |
+| 57, its price of 3.07 hours | WITHDRAWN as a price. It counts timed rounds and omits the three warm-ups section 3 registers and the builds clause 52 measures |
+| 60, its price of 3.23 hours | WITHDRAWN as a price, one day after it landed. It corrected clause 57 for the sweeps and inherited the omission it was correcting; the pass is 5.09 hours |
+| 60, its per-pass sweep | UNCHANGED. Clause 63 changes what a pass costs and nothing about what it runs |
+| 59, its per-width ratio | COMPLETED by clause 62, which supplies the reduction across the three margins that clause 59 left as "the margin at that width" |
+| 58, its maximum over four labels | UNCHANGED and cited. Clause 62 takes the same direction for the same reason, so the branch resolves against clearing itself at every reduction |
+| 57, its sentinel floor | REVERSED in its claim and not in its value. The pass still carries no registered floor; what is withdrawn is the claim that the sentinel cannot matter, which is false and was false about the margin itself |
+| 26 and 21, their floor-dependent gates | UNCHANGED at the binding run and NOT APPLIED at the exploratory pass, where no measured floor exists to apply them against. Their verdicts are recorded beside the margin, labelled as reported |
+| 37, its scale estimator | UNCHANGED and load-bearing. It is a per-round quantity pooled across blocks and rounds, which is the whole of clause 61's argument |
+| 37, its fresh set of 19 | UNCHANGED. Nothing here reaches the rate-bearing count, and the simulation holds the fresh set at five rounds throughout |
+| 33, its `alpha` and its estimator | UNCHANGED. The measured exceedance is 0.0471 to 0.0501 across every pilot clause 61 admits |
+| 46, its outstanding reserve for idle refusals | STILL OUTSTANDING and named a third time. Clause 63 moves a pass from 3.23 to 5.09 hours and registers no reserve, and step 10 still cannot be armed until one exists |
