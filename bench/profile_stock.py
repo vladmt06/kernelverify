@@ -204,6 +204,28 @@ PROJECTIONS_PER_BLOCK = 7
 INPUT_CONSUMING_PROJECTIONS = 3
 
 
+# Amendment 17 clause 67: the structural pass is taken at the SHORT width
+# alone. Measured 2026-08-22 at the pinned 4B, batch 4, each figure in its own
+# fresh process: the short width's marked pass peaks at 9.090 GB against a
+# plain 3.730, and the long width's marked pass reached 38.00 GB before the
+# device refused, against 36 GiB of unified memory and a 28.08 GB wired limit.
+# No quieter window makes that run. The cost is the FENCE and not the mark
+# count - an eval inside a lazy gradient trace forces the forward to be held
+# rather than streamed, so four marks cost 2.41 GB, 722 cost 5.33, and all
+# four regions together cost exactly what the worst single region costs - so
+# splitting the installation across passes saves nothing.
+#
+# The check survives the scoping because neither of its claims reads a width:
+# `expected_counts` takes no width argument at all, and a mark that is an
+# identity at 65 tokens is an identity at 1057 for the same reason.
+STRUCTURAL_WIDTH = "short"
+
+# Clause 68: an absent check and a passed check must never read alike, so the
+# width that carries no structural pass says so in the record rather than
+# arriving as a gap for a reader to interpret.
+STRUCTURAL_NOT_TAKEN = "clause_67_long_width_exceeds_the_device"
+
+
 # ---------------------------------------------------------------------------
 # Pure functions: no MLX, no device, no machine
 # ---------------------------------------------------------------------------
@@ -846,10 +868,35 @@ def binding_blockers(record: Mapping[str, object]) -> list[str]:
                             f"cell {cell} {width}: candidate {candidate} was "
                             f"not measured, and the selection takes the "
                             f"highest minimum gain across both widths")
-        # Per width, because the widths run different batches through the
-        # same seams and a fault at the second one would otherwise be recorded
-        # and never read.
-        for width, checked in sorted(cell_record.get("structural", {}).items()):
+        # Over the cell's registered widths rather than over what the record
+        # happens to hold, because clause 68 makes a MISSING entry the fault
+        # it is: after clause 67 one width legitimately carries no pass, and a
+        # reader iterating the record alone cannot tell that absence from a
+        # width whose entry was dropped.
+        for width in widths_for(cell):
+            checked = cell_record.get("structural", {}).get(width)
+            if checked is None:
+                blockers.append(
+                    f"cell {cell} {width}: no structural entry at all, which "
+                    f"clause 68 makes INCOMPLETE rather than passed")
+                continue
+            if not checked.get("taken"):
+                # The absence clause 67 registers is legal at the width it
+                # names and nowhere else. Accepting it anywhere would let the
+                # one width that DOES carry the check opt out of it silently,
+                # which is the same fault clause 68 exists to prevent read
+                # from the other direction.
+                if width == STRUCTURAL_WIDTH:
+                    blockers.append(
+                        f"cell {cell} {width}: clause 67 takes the structural "
+                        f"pass at this width and this record says it was not "
+                        f"taken")
+                elif checked.get("reason_code") != STRUCTURAL_NOT_TAKEN:
+                    blockers.append(
+                        f"cell {cell} {width}: the structural pass was not "
+                        f"taken for {checked.get('reason_code')!r}, which is "
+                        f"not the absence clause 67 registers")
+                continue
             if not checked["completeness"]["ok"]:
                 blockers.append(
                     f"cell {cell} {width}: region counts differ from the "
@@ -1560,10 +1607,15 @@ def _profile_child(task: Mapping[str, object], guard: _ChildGuard) -> dict:
         # regions that reported. A seam installed and never reached leaves its
         # region absent from the log entirely, so checking only what appeared
         # would let exactly the failure this check exists for pass silently.
-        checked = _structural_pass(target.model, batch.batch)
-        checked["completeness"] = completeness(
-            checked["counts"],
-            expected_counts(target.depth, target.adapted, sorted(pi.REGIONS)))
+        if width == STRUCTURAL_WIDTH:
+            checked = _structural_pass(target.model, batch.batch)
+            checked["completeness"] = completeness(
+                checked["counts"],
+                expected_counts(target.depth, target.adapted,
+                                sorted(pi.REGIONS)))
+            checked["taken"] = True
+        else:
+            checked = {"taken": False, "reason_code": STRUCTURAL_NOT_TAKEN}
         structural[width] = checked
         built = _build_width(target, batch, width, guard,
                              exploratory=bool(plan.get("exploratory")))

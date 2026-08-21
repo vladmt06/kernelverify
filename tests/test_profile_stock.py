@@ -123,9 +123,15 @@ def _structural(counts=None, *, identity_ok=True, foreign=(),
             "gradients_differing": [] if identity_ok else ["layers.0.q"],
             "counts": observed, "foreign_on_removal": list(foreign),
             "unregistered_shapes": list(unregistered),
-            "completeness": ps.completeness(
+            "taken": True, "completeness": ps.completeness(
                 observed,
                 ps.expected_counts(DEPTH, ADAPTED, sorted(pi.REGIONS)))}
+
+
+def _structural_absent():
+    """Amendment 17 clause 68's typed absence: the width that carries no
+    structural pass says why, rather than arriving as a gap."""
+    return {"taken": False, "reason_code": ps.STRUCTURAL_NOT_TAKEN}
 
 
 def _cell(cell="B", *, widths=None, structural=None, **over):
@@ -133,7 +139,9 @@ def _cell(cell="B", *, widths=None, structural=None, **over):
               if widths is None else widths)
     record = {
         "cell": cell, "depth": DEPTH, "adapted": ADAPTED, "widths": widths,
-        "structural": ({name: _structural() for name in widths}
+        "structural": ({name: (_structural() if name == ps.STRUCTURAL_WIDTH
+                               else _structural_absent())
+                       for name in widths}
                        if structural is None else structural),
         "stock": {"certified": 0}, "rounds": ps.ROUNDS,
     }
@@ -727,34 +735,77 @@ def test_a_certified_candidate_measured_at_only_one_width_blocks():
 
 def test_a_seam_that_never_fired_blocks():
     cell = _cell("B", structural={
-        "short": _structural(),
-        "long": _structural({"qmm": {pi.FORWARD: 7 * DEPTH,
-                                     pi.BACKWARD: 7 * ADAPTED - 3}})})
+        "short": _structural({"qmm": {pi.FORWARD: 7 * DEPTH,
+                                      pi.BACKWARD: 7 * ADAPTED - 3}}),
+        "long": _structural_absent()})
     blockers = ps.binding_blockers(_record(cells={"B": cell}))
     assert any("region counts differ" in one for one in blockers)
 
 
 def test_a_marked_pass_that_changed_the_computation_blocks():
-    cell = _cell("B", structural={"short": _structural(),
-                                  "long": _structural(identity_ok=False)})
+    cell = _cell("B", structural={"short": _structural(identity_ok=False),
+                                  "long": _structural_absent()})
     blockers = ps.binding_blockers(_record(cells={"B": cell}))
     assert any("do not compute the same thing" in one for one in blockers)
 
 
-def test_the_structural_pass_is_read_at_every_width_and_not_only_the_first():
-    """The widths run different batches through the same seams, so a fault at
-    the second one would otherwise be recorded and never read."""
-    for broken in ("short", "long"):
-        cell = _cell("B", structural={
-            name: _structural(identity_ok=name != broken)
-            for name in ("short", "long")})
+def test_the_long_width_carries_a_typed_absence_rather_than_a_pass():
+    """Amendment 17 clause 67, REVERSING the rule that the pass is read at
+    every width. Measured at the pinned 4B: the marked pass reached 38.00 GB
+    at the long width before the device refused, against 36 GiB of unified
+    memory, so it is taken at the short width alone."""
+    cell = _cell("B")
+    assert cell["structural"]["long"] == {
+        "taken": False, "reason_code": ps.STRUCTURAL_NOT_TAKEN}
+    blockers = ps.binding_blockers(_record(cells={"B": cell}))
+    assert not [one for one in blockers if "structural" in one]
+
+
+def test_a_missing_structural_entry_is_incomplete_and_not_passed():
+    """Clause 68. After clause 67 one width legitimately carries no pass, so
+    a reader iterating the record alone cannot tell that from a dropped one,
+    which is why the reader iterates the cell's registered widths instead."""
+    cell = _cell("B")
+    del cell["structural"]["long"]
+    blockers = ps.binding_blockers(_record(cells={"B": cell}))
+    assert any("long: no structural entry at all" in one for one in blockers)
+
+
+def test_an_absence_for_an_unregistered_reason_blocks():
+    cell = _cell("B", structural={
+        "short": _structural(),
+        "long": {"taken": False, "reason_code": "the machine was busy"}})
+    blockers = ps.binding_blockers(_record(cells={"B": cell}))
+    assert any("not the absence clause 67 registers" in one
+               for one in blockers)
+
+
+def test_the_width_that_keeps_the_check_cannot_opt_out_of_it():
+    """The registered absence is legal at the width clause 67 names and
+    nowhere else, or the one width that still carries the check could skip
+    it by reusing the long width's reason."""
+    cell = _cell("B", structural={"short": _structural_absent(),
+                                  "long": _structural_absent()})
+    blockers = ps.binding_blockers(_record(cells={"B": cell}))
+    assert any("clause 67 takes the structural pass at this width" in one
+               for one in blockers)
+
+
+def test_the_short_width_still_reads_every_structural_fault():
+    """Clause 67 removes a width, not a check."""
+    cases = ((_structural(identity_ok=False), "do not compute the same thing"),
+             (_structural(foreign=["attn-core"]), "was replaced while"),
+             (_structural(unregistered=[[512, 512]]), "never registered"))
+    for entry, needle in cases:
+        cell = _cell("B", structural={"short": entry,
+                                      "long": _structural_absent()})
         blockers = ps.binding_blockers(_record(cells={"B": cell}))
-        assert any(f"{broken}: the marked pass" in one for one in blockers)
+        assert any(needle in one for one in blockers), needle
 
 
 def test_a_seam_replaced_under_the_structural_pass_blocks():
-    cell = _cell("B", structural={"short": _structural(),
-                                  "long": _structural(foreign=["attn-core"])})
+    cell = _cell("B", structural={"short": _structural(foreign=["attn-core"]),
+                                  "long": _structural_absent()})
     blockers = ps.binding_blockers(_record(cells={"B": cell}))
     assert any("was replaced while the structural pass ran" in one
                for one in blockers)
