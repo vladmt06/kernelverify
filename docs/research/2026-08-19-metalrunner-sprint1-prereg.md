@@ -1986,3 +1986,64 @@ Its separate line for candidate A's nine reported arms inside the pass, 180 seco
 | Amendment 7's LEDGER row for clause 22 | SCOPED by the same correction, and named separately because a reader following the ledger would otherwise not reach it. Its words "the short width falls permanently into its own third outcome" govern the PASS branch alone; the REJECT branch runs at both widths |
 | Amendment 7's clause 37, its statement that the reporting cells need no candidate A | UNCHANGED and now complete: clause 22 rejects the PROFILE rather than a cell, so every cell measured at the short width carries the same 26 arms, and none of them carries candidate A |
 | 22 | UNCHANGED by this clause, and restored to its full reach. Its three outcomes, its per-width evaluation and its REJECT's precedence over every terminal all stand as Amendment 6 leaves them |
+
+## Amendment 9, 2026-08-21: two readings the reducer had to make, and the document did not supply
+
+Step 7's reducer is the first code to evaluate clause 26's scaffold cases and clause 18's residue on real arms.
+Building it surfaced two places where the registered text does not determine an answer that real measurements reach, and a rule the code picks is a rule made after the numbers.
+Both are settled here.
+
+### Clause 41. Clause 26's third scaffold case takes everything at or above `R` the second does not
+
+Clause 26 registers three cases for a scaffold arm and states that "the three cases are exhaustive at every boundary".
+Its second case requires THREE things together: an observed range at or above `R(w)`, a fitted excursion at or above `R(w)`, and the scaffold's own pooled fit clearing clause 6's two shape limits.
+Its third case is worded as an arm "at or above `R(w)` and NEITHER of the other two conditions holds".
+
+Read literally those are not exhaustive, and the gap is not at a boundary.
+An arm whose range and excursion both clear `R(w)` while its shape limits fail meets ONE of the two conditions, so the second case rejects it and the third does not take it, and clause 26 has no answer.
+
+**Clause 26's OWN worked example is in that gap**, which is what makes this a contradiction inside the clause rather than a case it forgot.
+It offers scaffold medians of 100, 130, 110 and 105.5 at `R = 1`, and says of them that the range is 30 and "a fitted excursion of 1.05, which clears `R`", while the coefficient of determination is 0.0012 and the largest residual is over eighteen times `R`.
+So the excursion condition HOLDS in the clause's own illustration of its third case, and the words "meeting neither of those" describe an arm the example is not.
+
+The registered reading is the one the exhaustiveness claim forces: the third case takes EVERYTHING with an observed range at or above `R(w)` that the second case does not take, whether it fails the excursion condition, the shape limits, or both.
+Nothing about the first case moves: a range strictly below `R(w)` is still clamped to a slope of zero, and the boundary is still strictly-below against at-or-above.
+
+This is not academic and the reading is load-bearing on the first real data it met.
+Reproduced 2026-08-21 on the 0.6B proxy: candidate L's scaffold fitted a slope of 0.489 over an actual span of 0.75, an excursion of 0.3668 against an assumed floor of 0.155, so the excursion condition cleared by more than twice over while the shape limits failed.
+Under the literal reading that arm falls through all three cases; under the registered one it is unreadable and the dial is not eligible at that width, which is the conservative direction and the one the clause's own example demonstrates.
+
+### Clause 42. Candidate L's ablation stand-in is named, and what it biases is stated
+
+Clause 33 records that candidate L had no true in-step ablation and makes building one a step 7 obligation, saying it should be built the way candidate A's is: "something of the same output shape doing almost none of the work, with the tensors a lazy graph might drop kept alive".
+That description does not transfer, and the reason has to be registered rather than worked around silently.
+
+Candidate A's ablated arm multiplies its operands by zero and relies on the queries passing through with a gradient of one.
+The loss is the ROOT of the backward, so an ablated loss whose derivative in the logits is zero makes every cotangent below it zero and deletes the whole step rather than candidate L's two regions, while still producing a number and a faster time.
+"The same output shape" does not transfer either: the head's output IS the full logits tensor, and building one is precisely the cost a streamed kernel removes, so an arm of the same output shape would remove almost nothing.
+
+**The registered stand-in.**
+The head returns a one-column slice of its own input and the loss reads that column.
+No logits tensor is built at all, which is what a streamed mask-aware kernel also never builds, and the hidden states keep a gradient of one on the surviving column so the model's own backward runs at full size.
+Its call counts are unchanged, so the arm removes work rather than a call site.
+
+**Its bias, stated the way clause 27 states candidate A's.**
+The slice's backward SCATTERS into a zeros tensor of the hidden width, which the operation it replaces does not pay in that form, and a reduction over the hidden axis would BROADCAST instead.
+Both are defensible stand-ins and they do not agree.
+Measured 2026-08-21 on the proxy in one arrangement of nine rounds: the slice gives a residue of -0.188 ms and the reduction gives +0.192 ms, so the two differ by 0.380 ms while the quantity they measure is about 0.19.
+
+**The residue is not resolvable at the proxy, and that is recorded rather than resolved.**
+Across three arrangements differing in round count and in which arms were interleaved, candidate L's residue read -1.115, -0.484 and -0.188 milliseconds with the registered stand-in and +0.192 with the alternative, a spread of about 1.3 against an assumed floor of 0.155.
+So at the proxy the residue is dominated by the arrangement it was measured in rather than by any non-scaling cost, and crediting it would credit noise.
+No new rule is invented for that: clause 18's clamp already records a residue below `R` as zero and clause 33 already makes one below `-R` a fault, and which of the two applies at the registered cell depends on that cell's own `R`, which step 10 measures and nothing else supplies.
+What this clause adds is that the stand-in is NAMED, so the residue's sign cannot be moved later by an unregistered change of construction, and its bias is printed beside the number.
+
+**This is a proxy figure and it binds nothing.**
+Every measurement above was taken at the 0.6B proxy against an `R` of 0.155 that was measured UNCOMPILED, while these arms are compiled.
+It is registered as evidence that the residue needs a measured floor before it can be credited, not as a value for any rule to read.
+
+| Clause | What happens to it |
+|---|---|
+| 26, its third scaffold case | RESOLVED, not changed. Its three cases keep their conditions and their boundaries; what is fixed is that the third takes everything at or above `R(w)` the second does not, which is what its own exhaustiveness claim and its own worked example both require |
+| 18, its residue | UNCHANGED. Its clamp below `R` and clause 33's fault below `-R` both stand exactly as written, and clause 42 supplies the ablated arm they read rather than altering what they do with it |
+| 33, its step 7 ablation obligation | DISCHARGED, with its stated method corrected. Its instruction to build candidate L's ablation the way candidate A's is built does not transfer, because the loss is the root of the backward and the head's output shape is itself the cost being removed |
