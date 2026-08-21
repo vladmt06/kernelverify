@@ -442,7 +442,11 @@ class KnobReading:
                     f"resolution floor of {self.resolution_floor:.6f}; the "
                     f"step ran slower with the operation removed than the fit "
                     f"predicts without its scaling part, which cannot be true")
-        if not 0.0 < self.share < 1.0:
+        # A FLOOR reading has no share to check, and that is not a gate it
+        # escapes: clause 19 measures candidate L's SHARE in the step, where
+        # this same check runs on it. Checking a share here would need a step
+        # total this bench never measured.
+        if self.family == SHARE and not 0.0 < self.share < 1.0:
             problems.append(
                 f"candidate {self.candidate}: the share is "
                 f"{self.share:.4f}, which is not a fraction of a step")

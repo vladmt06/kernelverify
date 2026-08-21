@@ -719,3 +719,243 @@ def run_loss_bench(context: Mapping[str, object], *, width: str,
             label=arm.label, candidate="L", role=arm.role,
             phi=(kept / vocab if arm.nominal_phi is not None else None)))
     return samples, tuple(roles)
+
+
+# ---------------------------------------------------------------------------
+# The run: two benches, one recording, no verdict
+# ---------------------------------------------------------------------------
+def sweep_recording(kill_samples: Mapping[str, Sequence[float]],
+                    loss_samples: Mapping[str, Mapping[str, Sequence[float]]],
+                    loss_roles: Mapping[str, Sequence[pk.ArmRole]],
+                    *, counts: Mapping[str, Mapping[str, int]],
+                    context: Mapping[str, object],
+                    resolution_floors_ms: Mapping[str, float],
+                    fingerprint: Mapping[str, object],
+                    idle_before: Mapping[str, object],
+                    idle_after: Mapping[str, object]) -> dict:
+    """Everything the sweep measured, reduced, with no verdict anywhere.
+
+    The reduction runs HERE rather than at `--decide` time for the same reason
+    the profile's does: the raw samples and the numbers derived from them land
+    in one file that is then closed and hashed, so a later reader can redo the
+    derivation and get the same answer or find out why not.
+
+    What this file does NOT contain is a ruling. `profile_rules.kill_q` reads
+    the per-shape entries and `select_first_operation` reads the floor slope,
+    and both were committed before this file existed.
+    """
+    readings = kill_readings(kill_samples, counts)
+    loss_readings = {}
+    for width, samples in sorted(loss_samples.items()):
+        floor = resolution_floors_ms.get(width)
+        if floor is None:
+            raise RunInvalid(
+                f"candidate L's bench ran at the {width} width and the plan "
+                f"carries no resolution floor for it; clause 21 forbids "
+                f"reusing another context's and a stage that needs one the "
+                f"addendum does not carry REFUSES")
+        rounds = {len(values) for values in samples.values()}
+        if len(rounds) != 1:
+            raise RunInvalid(
+                f"candidate L's bench at {width} recorded {sorted(rounds)} "
+                f"rounds across its arms")
+        reading = pk.reduce_width(samples, tuple(loss_roles[width]),
+                                  resolution_floor=floor,
+                                  rounds=rounds.pop(), family=pk.FLOOR)["L"]
+        loss_readings[width] = {
+            "family": reading.family,
+            "floor_slope_ms": reading.pooled.slope,
+            "per_round_slopes_ms": [fit.slope for fit in reading.per_round],
+            "median_slope_ms": reading.slope,
+            "intercept_ms": reading.pooled.intercept,
+            "r_squared": reading.pooled.r_squared,
+            "max_residual_ms": reading.pooled.max_residual,
+            "scaffold_offset_ms": reading.scaffold_offset,
+            "reference_median_ms": reading.reference_median,
+            "resolution_floor_ms": floor,
+            "blockers": reading.blockers(),
+            # Clause 19's two facts, carried with the number rather than left
+            # in a document, because both are reported wherever candidate L's
+            # gain appears and a reader of this file is one of those places.
+            "c_floor_ms": 0.0,
+            "bench_exception": (
+                "candidate L's floor is a streamed kernel that does not exist, "
+                "so clause 19 measures its `d` in isolation and registers its "
+                "`c_floor` as zero; its share is measured in the step and this "
+                "bench is a different resolution context"),
+        }
+
+    return {
+        "schema_version": 1,
+        "kind": "ceiling-sweep",
+        "context": dict(context),
+        "kill": {
+            "arms": {label: list(values)
+                     for label, values in sorted(kill_samples.items())},
+            "counts": {shape: dict(directions)
+                       for shape, directions in sorted(counts.items())},
+            "per_shape": {shape: {width: {
+                "ratio": entry.ratio,
+                "numerator_high_ms": entry.numerator_high,
+                "denominator_low_ms": entry.denominator_low,
+            } for width, entry in sorted(widths.items())}
+                for shape, widths in sorted(readings.items())},
+            **observed_spread(kill_samples),
+        },
+        "loss_bench": {
+            "arms": {width: {label: list(values)
+                             for label, values in sorted(samples.items())}
+                     for width, samples in sorted(loss_samples.items())},
+            "readings": loss_readings,
+        },
+        "candidate_a": {
+            "floor": None,
+            "reason": (
+                "Amendment 6 clause 27 gives candidate A no floor and no "
+                "credited ratio anywhere: MLX composes fused attention inside "
+                "any gradient trace, so an in-step floor arm would run stock's "
+                "own computation and report a ratio of 1.0 that looked "
+                "measured. What replaces it is a ceiling on its best possible "
+                "score, computed by the ruling and not by any arm here"),
+        },
+        "machine": dict(fingerprint),
+        "idle_before": dict(idle_before),
+        "idle_after": dict(idle_after),
+    }
+
+
+def sweep_path(results_dir, day, *, refused: bool):
+    """Where a sweep recording lands, with its verdict already in the name."""
+    from pathlib import Path
+
+    suffix = ".REFUSED.json" if refused else ".json"
+    return Path(results_dir) / f"ceiling-sweep-{day.isoformat()}{suffix}"
+
+
+def sweep_blockers(record: Mapping[str, object]) -> list[str]:
+    """Every reason this sweep cannot be read, in plain words.
+
+    Gathered rather than raised, because a sweep that measured everything and
+    then failed one gate is evidence and the reason is worth naming.
+
+    The KILL half contributes no blockers at all. Amendment 7 clause 36 makes
+    it REPORTED: it reaches no terminal, so there is nothing for a gate here to
+    protect. What it carries instead is its observed spread, labelled.
+    """
+    blockers = []
+    if not record.get("idle_after", {}).get("idle", False):
+        blockers.append(
+            "the machine went busy before the sweep closed, so its samples "
+            "describe the machine rather than the arms")
+    for width, reading in sorted(record.get("loss_bench", {})
+                                 .get("readings", {}).items()):
+        for reason in reading.get("blockers", ()):
+            blockers.append(f"candidate L's bench at {width}: {reason}")
+        if reading.get("c_floor_ms") != 0.0:
+            blockers.append(
+                f"candidate L's bench at {width} carries a non-zero `c_floor` "
+                f"of {reading.get('c_floor_ms')!r} and clause 19 registers it "
+                f"as zero")
+    missing = sorted(set(rules.WIDTH_ORDER)
+                     - set(record.get("loss_bench", {}).get("readings", {})))
+    if missing:
+        blockers.append(
+            f"candidate L's bench did not run at {missing}, and the selection "
+            f"takes the highest minimum saving across both widths")
+    return blockers
+
+
+def validate_sweep_plan(plan: Mapping[str, object]) -> dict:
+    """Freeze the unregistered choices together, before any arm runs.
+
+    The same three the profile's plan carries, for the same reason: the
+    resolution floors reach the harness through the committed addendum and
+    nothing else, and a stage that needs a context the addendum does not carry
+    REFUSES rather than borrowing another's.
+    """
+    required = {"schema_version", "resolution", "model"}
+    missing = sorted(required - set(plan))
+    if missing:
+        raise RunInvalid(f"the sweep plan is missing {missing}")
+    if plan["schema_version"] != 1:
+        raise RunInvalid(
+            f"the sweep plan is schema {plan['schema_version']!r} and this "
+            f"harness reads schema 1")
+    resolution = plan["resolution"]
+    floors = resolution.get("floors_ms") if isinstance(resolution, Mapping) else None
+    if not isinstance(floors, Mapping):
+        raise RunInvalid(
+            "the sweep plan carries no `resolution.floors_ms`, and clause 26 "
+            "needs a positive floor per context before any fit is read")
+    for width in rules.WIDTH_ORDER:
+        value = floors.get(width)
+        if value is None or not float(value) > 0.0:
+            raise RunInvalid(
+                f"the sweep plan's resolution floor for the {width} width is "
+                f"{value!r}; a floor of zero claims the machine can resolve "
+                f"any difference at all")
+    if not resolution.get("addendum_sha256"):
+        raise RunInvalid(
+            "the sweep plan names no addendum, so nothing says which "
+            "committed measurement these floors came from")
+    model = plan["model"]
+    for field in ("hidden", "vocab"):
+        if not isinstance(model, Mapping) or not int(model.get(field, 0)) > 0:
+            raise RunInvalid(
+                f"the sweep plan's model carries no positive {field!r}, and "
+                f"candidate L's bench is built at the pinned dimensions")
+    return {"floors_ms": {w: float(floors[w]) for w in rules.WIDTH_ORDER},
+            "addendum_sha256": resolution["addendum_sha256"],
+            "hidden": int(model["hidden"]), "vocab": int(model["vocab"])}
+
+
+def run_sweep(plan: Mapping[str, object], context: Mapping[str, object], *,
+              results_dir, rounds: int = ROUNDS, warmups: int = WARMUPS,
+              batch: int = 4) -> tuple[dict, list[str]]:
+    """Both benches, once, into one closed recording. Rules nothing.
+
+    The machine discipline is the shared vocabulary and is never copied: the
+    lock, the idle gate and the fingerprint come from `machine_state`, the
+    same ones every other binding measurement in this repository takes.
+    """
+    import machine_state
+    from machine_state import MeasurementLock
+
+    frozen = validate_sweep_plan(plan)
+    supervised_rows(context)          # refuse before anything is timed
+
+    with MeasurementLock():
+        fingerprint = machine_state.fingerprint()
+        before = machine_state.idle_check(fingerprint["cores"])
+        kill_samples = run_kill_bench(rounds=rounds, warmups=warmups,
+                                      batch=batch)
+        loss_samples, loss_roles = {}, {}
+        for width in rules.WIDTH_ORDER:
+            samples, roles = run_loss_bench(
+                context, width=width, hidden=frozen["hidden"],
+                vocab=frozen["vocab"], rounds=rounds, warmups=warmups)
+            loss_samples[width], loss_roles[width] = samples, roles
+        after = machine_state.idle_check(fingerprint["cores"])
+
+    record = sweep_recording(
+        kill_samples, loss_samples, loss_roles,
+        counts=shape_counts(context), context=context,
+        resolution_floors_ms=frozen["floors_ms"], fingerprint=fingerprint,
+        idle_before=before, idle_after=after)
+    record["addendum_sha256"] = frozen["addendum_sha256"]
+    blockers = sweep_blockers(record)
+    record["blockers"] = blockers
+
+    from datetime import date
+
+    destination = sweep_path(results_dir, date.today(), refused=bool(blockers))
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    import json
+
+    # Exclusive create: a recording is written once. A sweep that could
+    # overwrite its own earlier run is a sweep that can be run until it says
+    # what somebody wanted.
+    with destination.open("x") as handle:
+        handle.write(json.dumps(record, indent=2, sort_keys=True))
+        handle.write("\n")
+    return record, blockers

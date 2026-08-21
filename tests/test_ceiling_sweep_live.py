@@ -229,7 +229,13 @@ def test_one_shape_at_one_width_reduces_through_clause_eight():
 # The pinned model's own head is (151936, 2560) and an arm at the long width
 # runs for about two seconds. These tests check WHAT the arm computes, which
 # does not depend on the size, so they run at a proxy vocabulary.
-PROXY = dict(hidden=256, vocab=2048, supervised=64)
+#
+# Not an arbitrarily small one. At (2048, 256) over 64 rows the whole arm is
+# 0.4 ms and a quarter of the vocabulary reads 0.31, a ratio of 1.28 that
+# dispatch overhead dominates; at (32768, 512) the same cut reads 4.07. A
+# proxy too small to show the dial cannot tell a working dial from a dead one,
+# which is the fault these tests exist to catch.
+PROXY = dict(hidden=512, vocab=32768, supervised=256)
 
 
 @requires_metal
@@ -268,10 +274,11 @@ def test_the_knob_arm_cuts_the_vocabulary_and_the_extra_matmul_with_it():
     full = min(cs._time(
         cs._loss_arm(operands, PROXY["vocab"], role=cs.pk.KNOB),
         warmups=3, rounds=7))
-    assert dialled < full, (
+    assert dialled < full / 2, (
         f"the arm at a quarter of the vocabulary read {dialled:.4f} ms and "
         f"the arm at all of it {full:.4f} ms; a dial that does nothing "
-        f"produces a clean fit through a horizontal line")
+        f"produces a clean fit through a horizontal line, which looks better "
+        f"than a bad fit rather than worse")
 
 
 @requires_metal
@@ -298,7 +305,8 @@ def test_the_bench_times_nine_arms_and_reduces_through_the_shared_reducer():
     """The whole path at one width: nine arms timed, reduced by the same code
     the step's arms go through, with `family=FLOOR` so the reading carries a
     floor slope and refuses a share."""
-    context = {"supervised": PROXY["supervised"], "supervised_of": 128}
+    context = {"supervised": PROXY["supervised"],
+               "supervised_of": PROXY["supervised"] * 2}
     samples, roles = cs.run_loss_bench(
         context, width="short", hidden=PROXY["hidden"], vocab=PROXY["vocab"],
         rounds=3, warmups=2)

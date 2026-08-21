@@ -491,3 +491,153 @@ def test_a_stock_less_width_whose_family_has_no_reference_refuses():
     with pytest.raises(RunInvalid, match="no baseline at all"):
         pk.reduce_width(samples, tuple(roles), resolution_floor=0.05,
                         rounds=pk.ROUNDS, family=pk.FLOOR)
+
+
+# --- the recording, and what it refuses ------------------------------------
+def _plan(**over):
+    plan = {"schema_version": 1,
+            "resolution": {"floors_ms": {"short": 0.1, "long": 1.0},
+                           "addendum_sha256": "addendum-sha"},
+            "model": {"hidden": 2560, "vocab": 151936}}
+    plan.update(over)
+    return plan
+
+
+def _loss_samples(width, *, slope=60.0, intercept=30.0, scaffold=90.1,
+                  reference=90.0, rounds=None):
+    rounds = pk.ROUNDS if rounds is None else rounds
+    samples, roles = {}, []
+    for arm in cs.loss_manifest(width):
+        if arm.role == pk.KNOB:
+            value = intercept + slope * arm.nominal_phi
+        elif arm.role == pk.SCAFFOLD:
+            value = scaffold
+        else:
+            value = reference
+        samples[arm.label] = [value] * rounds
+        roles.append(pk.ArmRole(label=arm.label, candidate="L", role=arm.role,
+                                phi=arm.nominal_phi))
+    return samples, tuple(roles)
+
+
+def _sweep_record(**over):
+    counts = {shape: _counts() for shape in rules.SHAPES}
+    loss_samples, loss_roles = {}, {}
+    for width in rules.WIDTH_ORDER:
+        loss_samples[width], loss_roles[width] = _loss_samples(width)
+    kwargs = dict(
+        counts=counts, context={"supervised": 142, "supervised_of": 256},
+        resolution_floors_ms={"short": 0.1, "long": 1.0},
+        fingerprint={"cores": 12}, idle_before={"idle": True},
+        idle_after={"idle": True})
+    kwargs.update(over)
+    return cs.sweep_recording(_all_arms(), loss_samples, loss_roles, **kwargs)
+
+
+def test_the_recording_carries_both_benches_and_no_verdict():
+    """The sweep measures and the rules rule, and the two live in different
+    files so a harness cannot quietly become the thing that decides."""
+    record = _sweep_record()
+    assert record["kind"] == "ceiling-sweep"
+    assert sorted(record["kill"]["per_shape"]) == sorted(rules.SHAPES)
+    assert sorted(record["loss_bench"]["readings"]) == sorted(rules.WIDTH_ORDER)
+
+    def keys(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                yield key
+                yield from keys(value)
+        elif isinstance(node, list):
+            for value in node:
+                yield from keys(value)
+
+    # KEYS and not a substring search: the words appear in the prose that
+    # labels a reported quantity, and prose explaining that a verdict reaches
+    # no terminal is the opposite of carrying one.
+    named = set(keys(record))
+    for word in ("killed", "verdict", "selected", "terminal", "at_ceiling"):
+        assert word not in named, f"the recording carries a {word!r} field"
+
+
+def test_the_kill_half_is_labelled_reported_and_carries_no_certified_bound():
+    """Amendment 7 clause 36 demoted it, and clause 37 registers what a
+    reported quantity carries instead of a calibrated interval."""
+    record = _sweep_record()
+    assert record["kill"]["certified"] is False
+    assert "not an interval at any registered rate" in (
+        record["kill"]["observed_spread_is_not_a_bound"])
+
+
+def test_candidate_a_is_recorded_as_having_no_floor_and_why():
+    """Clause 27 gives it none, and an absence with no reason beside it reads
+    as a measurement that failed."""
+    record = _sweep_record()
+    assert record["candidate_a"]["floor"] is None
+    assert "ratio of 1.0" in record["candidate_a"]["reason"]
+
+
+def test_candidate_l_s_reading_carries_clause_nineteen_s_two_facts():
+    """Both are reported wherever candidate L's gain appears, and a reader of
+    this file is one of those places."""
+    record = _sweep_record()
+    for width in rules.WIDTH_ORDER:
+        reading = record["loss_bench"]["readings"][width]
+        assert reading["c_floor_ms"] == 0.0
+        assert reading["family"] == pk.FLOOR
+        assert "in isolation" in reading["bench_exception"]
+        assert reading["floor_slope_ms"] == pytest.approx(60.0)
+
+
+def test_a_width_with_no_resolution_floor_refuses_the_recording():
+    """Clause 21 forbids reusing another context's `R`, and clause 33 makes a
+    missing context a refusal rather than a floor of zero."""
+    with pytest.raises(RunInvalid, match="forbids"):
+        _sweep_record(resolution_floors_ms={"short": 0.1})
+
+
+def test_a_busy_machine_at_the_close_blocks():
+    record = _sweep_record(idle_after={"idle": False})
+    assert any("went busy" in reason for reason in cs.sweep_blockers(record))
+
+
+def test_a_bench_missing_a_width_blocks():
+    """The selection takes the highest minimum saving across both widths, so a
+    floor at one width has no minimum to take."""
+    record = _sweep_record()
+    del record["loss_bench"]["readings"]["long"]
+    assert any("did not run at" in reason
+               for reason in cs.sweep_blockers(record))
+
+
+def test_a_clean_sweep_has_no_blockers():
+    assert cs.sweep_blockers(_sweep_record()) == []
+
+
+def test_the_kill_half_contributes_no_blockers_because_it_is_reported():
+    """A reported quantity reaches no terminal, so there is nothing here for a
+    gate to protect. The concession is clause 36's and it is deliberate."""
+    record = _sweep_record()
+    for direction in cs.DIRECTIONS:
+        record["kill"]["arms"][f"long:S5:{cs.STOCK}:{direction}"] = [
+            1.0, 500.0, 1.0, 500.0, 1.0]
+    assert cs.sweep_blockers(record) == []
+
+
+@pytest.mark.parametrize("mutate, expected", [
+    ({"schema_version": 2}, "schema 1"),
+    ({"resolution": {"addendum_sha256": "x"}}, "no `resolution.floors_ms`"),
+    ({"resolution": {"floors_ms": {"short": 0.1, "long": 0.0},
+                     "addendum_sha256": "x"}}, "resolve any difference"),
+    ({"resolution": {"floors_ms": {"short": 0.1, "long": 1.0}}},
+     "names no addendum"),
+    ({"model": {"hidden": 0, "vocab": 151936}}, "pinned dimensions"),
+])
+def test_a_sweep_plan_missing_what_it_needs_refuses(mutate, expected):
+    with pytest.raises(RunInvalid, match=expected):
+        cs.validate_sweep_plan(_plan(**mutate))
+
+
+def test_a_sweep_plan_that_carries_everything_is_frozen():
+    frozen = cs.validate_sweep_plan(_plan())
+    assert frozen["floors_ms"] == {"short": 0.1, "long": 1.0}
+    assert frozen["vocab"] == 151936
