@@ -943,7 +943,11 @@ def test_a_nearly_full_machine_no_longer_reads_as_nearly_empty(monkeypatch):
     """
     monkeypatch.setattr(mg_subprocess, "run", _vm_stat_returning(_BUSY_VM_STAT))
     available = available_memory_gb()
-    assert available < 0.1 * machine_ram_gb()
+    # Against the FAKE's own pages, not against this machine. Comparing to
+    # machine_ram_gb() made the assertion depend on the host: it reads a real
+    # sysctl on a cold cache and 0.1 * 16 GB would fail on a 16 GB machine,
+    # which is a test measuring the hardware rather than the gate.
+    assert available < 2.0
     with pytest.raises(LowMemoryRefusal):
         require_available_memory(23.8, "B short", reader=available_memory_gb)
 

@@ -86,7 +86,6 @@ def hardware_free(monkeypatch, tmp_path):
     guard-callback seam (it calls the guard once) so the refusal paths run
     the way the real gate drives them. Returns the results dir."""
     import machine_state
-    from memory_guard import machine_ram_gb
 
     monkeypatch.setattr(probe, "RESULTS_DIR", tmp_path)
     monkeypatch.setattr(probe, "build", lambda _mx: None)
@@ -117,8 +116,11 @@ def hardware_free(monkeypatch, tmp_path):
     # probe's default budget, which measures the machine rather than the
     # behaviour under test. The gate's own arithmetic is covered by
     # tests/test_serving_survival.py.
+    # A literal rather than machine_ram_gb(), which shells out to sysctl on a
+    # cold cache and would leave one hardware read inside the fixture that
+    # exists to remove them all.
     monkeypatch.setattr(probe, "require_available_memory",
-                        lambda _needed, _cell, **_kw: machine_ram_gb())
+                        lambda _needed, _cell, **_kw: 1024.0)
     return tmp_path
 
 
