@@ -1177,10 +1177,15 @@ def _dense_ladder(model, phis=PHIS) -> dict:
 
     Amendment 10 clause 45 registers the sharing and prices why. A dense
     weight per call site costs 18.73 GiB of ladder against 12.64 GiB already
-    resident, which is 31.37 GiB of weights on a machine with 33.53 GiB of
-    unified memory, before one activation. One weight per shape costs 2.15
-    GiB, and a dense matmul's TIME at a logical shape does not depend on
-    which block's values the weight holds.
+    resident, which is 31.37 GiB of weights before one activation. Clause 45
+    put that against 33.53 GiB of unified memory; hw.memsize is 38654705664
+    bytes, so this machine is 36.000 GiB or 38.655 GB, and Amendment 18
+    clause 73 corrects the denominator. The decision stands on the corrected
+    one: 31.37 GiB of weights leaves 4.63 GiB for every activation, optimizer
+    state and compiled graph, and the long width's build alone was measured
+    needing about 21 GiB beyond its operands and model. One weight per shape
+    costs 2.15 GiB, and a dense matmul's TIME at a logical shape does not
+    depend on which block's values the weight holds.
 
     What it gives up is that a floor arm's OUTPUT is further from stock's than
     a per-module floor would be. Nothing reads it: every arm at a setting
