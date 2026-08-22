@@ -880,18 +880,39 @@ def binding_blockers(record: Mapping[str, object]) -> list[str]:
                     f"cell {cell} {width}: no structural entry at all, which "
                     f"clause 68 makes INCOMPLETE rather than passed")
                 continue
-            if not checked.get("taken"):
-                # The absence clause 67 registers is legal at the width it
-                # names and nowhere else. Accepting it anywhere would let the
-                # one width that DOES carry the check opt out of it silently,
-                # which is the same fault clause 68 exists to prevent read
-                # from the other direction.
-                if width == STRUCTURAL_WIDTH:
+            # Clause 68 defines a TYPED UNION with exactly two members, and
+            # `taken` is its discriminator, so it is validated as one rather
+            # than tested for truthiness. Truthiness accepted three records
+            # the clauses forbid, all three reproduced 2026-08-22: a
+            # long-width entry carrying a full passing result, which clause 67
+            # says cannot exist; an absence with no `taken` key at all, which
+            # names no variant; and a short-width `taken` of "not_run", which
+            # is a string saying the pass did NOT run and reads as true.
+            taken = checked.get("taken")
+            if not isinstance(taken, bool):
+                blockers.append(
+                    f"cell {cell} {width}: the structural entry's 'taken' is "
+                    f"{taken!r} rather than a boolean, so the record does not "
+                    f"say which of clause 68's two variants it is")
+                continue
+            if width == STRUCTURAL_WIDTH:
+                # The absence is legal at the width clause 67 names and
+                # nowhere else, or the one width that DOES carry the check
+                # could opt out of it by reusing the other width's reason.
+                if not taken:
                     blockers.append(
                         f"cell {cell} {width}: clause 67 takes the structural "
                         f"pass at this width and this record says it was not "
                         f"taken")
-                elif checked.get("reason_code") != STRUCTURAL_NOT_TAKEN:
+                    continue
+            else:
+                if taken:
+                    blockers.append(
+                        f"cell {cell} {width}: the structural pass was taken "
+                        f"at a width clause 67 does not run it at, so this "
+                        f"record did not come from the registered arrangement")
+                    continue
+                if checked.get("reason_code") != STRUCTURAL_NOT_TAKEN:
                     blockers.append(
                         f"cell {cell} {width}: the structural pass was not "
                         f"taken for {checked.get('reason_code')!r}, which is "

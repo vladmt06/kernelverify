@@ -14,6 +14,7 @@ published.
 """
 
 import json
+import types
 import sys
 from pathlib import Path
 
@@ -126,6 +127,13 @@ def _structural(counts=None, *, identity_ok=True, foreign=(),
             "taken": True, "completeness": ps.completeness(
                 observed,
                 ps.expected_counts(DEPTH, ADAPTED, sorted(pi.REGIONS)))}
+
+
+class _NoGuard:
+    """The child's budget guard, reduced to what the producer calls."""
+
+    def check(self, _cell):
+        return 0.0
 
 
 def _structural_absent():
@@ -761,6 +769,64 @@ def test_the_long_width_carries_a_typed_absence_rather_than_a_pass():
     assert not [one for one in blockers if "structural" in one]
 
 
+def test_the_producer_takes_the_pass_at_one_width_and_types_the_other(
+        monkeypatch):
+    """Clause 67 at the PRODUCER, not at the reader.
+
+    The typed-absence test above asserts a record the test helper built, so it
+    cannot see `_profile_child` running the pass at both widths or failing to
+    emit the absence. This drives the real producer with its hardware seams
+    faked, and fails on exactly the mutation that test survives: replacing
+    `width == STRUCTURAL_WIDTH` with a condition that is always true.
+    """
+    seen = []
+
+    def fake_structural(_model, _batch):
+        seen.append("called")
+        return dict(_structural())
+
+    target = types.SimpleNamespace(
+        model=object(), tokenizer=object(), optimizer=object(),
+        state=[], depth=DEPTH, adapted=ADAPTED)
+    # Keyed by the band the producer asks for, because cell_context checks the
+    # batch's width against the registered band and a single stub width would
+    # fail the second one for a reason that is not what this test is about.
+    def fake_batch(_plan, _tokenizer, data_dir, **_kw):
+        width = next(name for name, one in rules.WIDTHS.items()
+                     if one["data"] == data_dir)
+        return types.SimpleNamespace(
+            batch=(), width=rules.WIDTHS[width]["batch_width"], rows=4,
+            supervised=10, supervised_of=20, digest="d" * 64)
+    arm = types.SimpleNamespace(label="stock", traced_by_warmup=1, traces=[1])
+
+    monkeypatch.setattr(ps, "stock_process", lambda: {"certified": 0})
+    monkeypatch.setattr(ps, "_load_model", lambda _plan, _prov: target)
+    monkeypatch.setattr(ps, "_fixed_batch", fake_batch)
+    monkeypatch.setattr(ps, "_structural_pass", fake_structural)
+    monkeypatch.setattr(ps, "_build_width",
+                        lambda *a, **k: {"compiled": [arm],
+                                         "roles": {"stock": {"candidate": None}}})
+    monkeypatch.setattr(ps.pk, "timed_rounds",
+                        lambda *a, **k: {"stock": [0.001] * ps.ROUNDS})
+    monkeypatch.setattr(ps, "phys_footprint_gb", lambda: (1.0, 2.0))
+
+    task = {"plan": {"rounds": ps.ROUNDS,
+                     "bands": {name: one["data"]
+                               for name, one in rules.WIDTHS.items()},
+                     "seed": 7},
+            "provenance": {"base_model": {"directory": "/tmp/qwen3-4b"}},
+            "cell_name": "B"}
+    result = ps._profile_child(task, _NoGuard())
+
+    assert len(seen) == 1, "the pass ran at more than one width"
+    assert result["structural"][ps.STRUCTURAL_WIDTH]["taken"] is True
+    for width in ps.widths_for("B"):
+        if width == ps.STRUCTURAL_WIDTH:
+            continue
+        assert result["structural"][width] == {
+            "taken": False, "reason_code": ps.STRUCTURAL_NOT_TAKEN}
+
+
 def test_a_missing_structural_entry_is_incomplete_and_not_passed():
     """Clause 68. After clause 67 one width legitimately carries no pass, so
     a reader iterating the record alone cannot tell that from a dropped one,
@@ -769,6 +835,36 @@ def test_a_missing_structural_entry_is_incomplete_and_not_passed():
     del cell["structural"]["long"]
     blockers = ps.binding_blockers(_record(cells={"B": cell}))
     assert any("long: no structural entry at all" in one for one in blockers)
+
+
+def test_a_structural_pass_at_a_width_clause_67_does_not_run_blocks():
+    """A long-width entry carrying a full passing result cannot have come from
+    the registered arrangement, because clause 67 does not run the pass there.
+    Truthiness accepted it, which is why the discriminator is validated as the
+    boolean of a typed union rather than tested for truth."""
+    cell = _cell("B", structural={"short": _structural(),
+                                  "long": _structural()})
+    blockers = ps.binding_blockers(_record(cells={"B": cell}))
+    assert any("taken at a width clause 67 does not run it at" in one
+               for one in blockers)
+
+
+@pytest.mark.parametrize("taken,label", [
+    (None, "absent"), ("not_run", "a string that reads as true"),
+    (1, "an int"), ("", "a string that reads as false")])
+def test_a_non_boolean_discriminator_blocks(taken, label):
+    """`taken` names which of clause 68's two variants an entry is, so a value
+    that is not a boolean names neither. "not_run" is the case that mattered:
+    it says the pass did NOT run and is true."""
+    entry = _structural()
+    if taken is None:
+        entry.pop("taken")
+    else:
+        entry["taken"] = taken
+    cell = _cell("B", structural={"short": entry,
+                                  "long": _structural_absent()})
+    blockers = ps.binding_blockers(_record(cells={"B": cell}))
+    assert any("rather than a boolean" in one for one in blockers), label
 
 
 def test_an_absence_for_an_unregistered_reason_blocks():
