@@ -3111,3 +3111,207 @@ This is the same rule Amendment 8 was written to enforce elsewhere, and it is re
 | Amendment 7 clause 37, its typed absences | EXTENDED by clause 68 to a second kind of absence, and its rule that a typed absence is never incompleteness is untouched |
 | Amendment 13 clause 57 and its exploratory pass | UNCHANGED as a design. Its three passes could not have completed under the committed scope, which is a fact about this machine and not a fault in the clause |
 | Every price, schedule, rate and demand in this document | UNCHANGED. Nothing here is a timing measurement, and the structural pass has never been timed or costed |
+
+## Amendment 18, 2026-08-22: the width reversal Amendment 17 mislabelled, the call tally it broke, and the memory ceiling it could not set
+
+Amendment 17 removed an impossible long-width structural pass and made three process faults while doing it.
+It said Amendment 5 clause 3 names no width when that clause names every width and gives the one-width-only fault as its reason, it promoted a width-free expected count into a width-free observed conclusion, and it labelled binary GiB readings as decimal GB.
+The first fault made its own ledger use a label clause 66 reserves for something weaker, and the second left clause 8 without the live call tally its sweep requires.
+A new long-width build measurement also proves that the run plan's declared 26.0 GB ceiling is too low while leaving the production ceiling unknown.
+
+Every execution result below was reproduced on 2026-08-22 before it was written here.
+
+### Clause 69. Amendment 17 reversed clause 3 and called the reversal scoped
+
+Amendment 17 opens by saying that Amendment 5 clause 3 "retains the marks as a structural check on counts and gradient identity and names no width".
+That is false.
+Amendment 5 clause 3 says, in full:
+
+> The profile runs one structural pass per cell AND per width, because a fault that only appears at one width would otherwise pass, and it takes no time from that pass.
+
+The clause names the width explicitly, and the reason it gives is precisely the width-specific fault Amendment 17 clause 67 now concedes can pass.
+Before clause 67, a structural pass at the long width was REQUIRED.
+After clause 67, that pass is FORBIDDEN because the device cannot run it.
+
+**Registered: Amendment 17 reverses Amendment 5 clause 3 at the long width.**
+
+Clause 66's test is whether text or a state that was valid before remains valid after, not whether the new direction sounds narrower.
+A recording with a completed structural pass at every width satisfied clause 3, while a post-clause-67 recording must carry no long-width pass.
+Amendment 17's ledger row reading "SCOPED, not withdrawn" is therefore RELABELLED to REVERSED, and using the weaker label is recorded as a process fault rather than softened.
+
+The rest of clause 3 stands.
+The marks remain a structural check on counts and gradient identity, they remain untimed, and the short-width pass remains required.
+
+### Clause 70. Only the expected side of the count check is width-free
+
+Clause 67 says neither claim of the structural pass reads a width and rests the count claim on `expected_counts(depth, adapted, regions)` taking no width argument.
+That establishes only the EXPECTED side of the comparison.
+`completeness` compares that expected table against OBSERVED counts, and those observed counts come from the width whose structural pass actually ran.
+A function that cannot receive a width proves that its own output cannot vary with width, and it does not prove that a different width would produce the same observations to compare against it.
+
+The gradient-identity conclusion has the same boundary.
+The short-width pass proves that the marked and plain short-width executions agree on the loss and every gradient leaf.
+It does not execute the long-width path and therefore does not prove that path's marked and plain executions agree.
+
+**Registered: the expected multiplicities are width-free on the fixed model and adapter arrangement, while the structural pass's conclusions are established at the short width alone.**
+
+Clause 67's own concession remains the controlling statement of what is lost: a seam that fires at one width and not the other can pass, and the different attention mask forms show that the two widths do not provably enter every operation through the same path.
+
+### Clause 71. Clause 8 takes one weight-derived call tally from the short width
+
+Clause 67 removes a live input to clause 8's kill rule.
+`ceiling_sweep._profile_inputs` reads one per-shape call tally from each width's structural entry, so every legitimate post-clause-67 recording reaches the long typed absence and raises `RunInvalid`:
+
+> clause 8 weights shape S1 at (4096, 2560) by its call counts and the structural pass recorded none
+
+The sweep therefore cannot run as Amendment 17 leaves it.
+
+The clause 8 tally is narrower than the structural verdict clause 70 corrects.
+For every quantized layer, `bench/profile_instrument.py` computes the logical shape as `out_dims, packed = layer.weight.shape` followed by `packed * 32 // layer.bits` for the input dimension.
+That construction reads the WEIGHT and the bit width and reads no token count, batch width or mask form.
+That settles the shape LABEL and not the per-shape COUNT, and the two rest on different evidence, which is stated here rather than blurred.
+A tally has both, because `Recorder.note_shape` increments a counter keyed by that label once per wrapped invocation, so a label that cannot move still leaves the number of invocations to account for.
+The count is width-free by the registered arrangement rather than by construction: a quantized layer is invoked once per layer per direction in a step and the token count enters as the SIZE of its operand rather than as more invocations, which is the same fact `expected_counts` encodes when it derives `7 * depth` forward and `7 * adapted - 3` backward from the layer count alone.
+The first half is a proof, because a quantity a function never receives cannot vary with it.
+The second half is an argument from the pinned arrangement, and it is weaker, and clause 70 forbids upgrading it by pointing at the short width's completeness result.
+
+**Registered: the deciding-cell recording carries the clause 8 call tally once, taken from the short-width structural pass, and both width contexts use that one tally.**
+
+The recording does not duplicate the tally inside both per-width structural entries.
+Its per-width structural status remains separate, so the long width still carries clause 68's typed absence and never reads as a passed structural check.
+The sweep does not demand a long-width `shape_counts`, does not compare two width copies, and does not rebuild the tally from declared geometry.
+
+This recovery is specific to clause 8's quantized-weight shape tally.
+It does not reinstate clause 67's broader claim that the observed completeness check or gradient identity is width-free.
+
+### Clause 72. Clause 67 measured GiB and labelled the readings GB
+
+Every clause 67 figure labelled `GB` was produced by dividing bytes by `2**30` and is therefore GiB.
+The document's memory budgets and `phys_footprint` convention use decimal GB, dividing bytes by `1e9`, so clause 67 compares two units under one label.
+
+The absolute readings convert as follows:
+
+| Clause 67 text | Correct binary reading | Decimal equivalent |
+|---|---|---|
+| short plain backward, 3.730 GB | 3.730 GiB | 4.005 GB |
+| short marked pass, 9.090 GB | 9.090 GiB | 9.760 GB |
+| long plain backward, 24.364 GB | 24.364 GiB | 26.161 GB |
+| long marked refusal, 38.000 GB | 38.000 GiB | 40.802 GB |
+| cross-entropy peak, 6.139 GB | 6.139 GiB | 6.592 GB |
+| head-matmul peak, 6.140 GB | 6.140 GiB | 6.593 GB |
+| attention and all-four peak, 9.090 GB | 9.090 GiB | 9.760 GB |
+| qmm peak, 9.064 GB | 9.064 GiB | 9.732 GB |
+| wired limit, 28.08 GB | 28.08 GiB | 30.151 GB |
+
+The excess column carries the same unit error:
+
+| Clause 67 text | Correct binary reading | Decimal equivalent |
+|---|---|---|
+| +2.409 GB | +2.409 GiB | +2.587 GB |
+| +2.410 GB | +2.410 GiB | +2.588 GB |
+| +5.361 GB | +5.361 GiB | +5.756 GB |
+| +5.334 GB | +5.334 GiB | +5.727 GB |
+
+The machine contains 38654705664 bytes, which is 36.000 GiB and 38.655 GB.
+Clause 67's long marked pass reached 38.000 GiB, which is 40.802 GB, against a machine holding 38.655 GB.
+
+**Registered: clause 67's units are corrected and its conclusion is unchanged.**
+
+The long marked pass exceeds the machine by either consistent reading, and the correction changes no peak, difference or refusal verdict.
+
+### Clause 73. Clause 45 used 36 decimal GB as though it were this machine
+
+Amendment 10 clause 45 records this machine as 33.53 GiB.
+That is wrong.
+The figure 33.53 GiB is the binary conversion of 36.00 decimal GB to the precision quoted, not the capacity of this machine.
+The machine's measured capacity is 38654705664 bytes, which is exactly 36.000 GiB and 38.655 GB.
+
+Amendment 17's statement that this is a 36 GiB machine is correct, and it contradicts clause 45 without naming the contradiction.
+
+**Registered: clause 45's machine capacity is corrected from 33.53 GiB to 36.000 GiB, or 38.655 GB.**
+
+This correction reaches the machine denominator alone.
+Clause 45's 12.64, 18.73, 31.37, 2.15 and 14.80 GiB ladder arithmetic and its registration of one dense weight per shape are not re-adjudicated here.
+
+### Clause 74. The long-width build alone exceeds the declared ceiling, and no replacement is known
+
+Measured 2026-08-22 on the pinned 4B at the long width, batch 4 by 1057 tokens, with all 48 exploratory arms built in one process:
+Every `GB` figure in this clause is decimal GB.
+
+| Quantity | Measured fact |
+|---|---|
+| Dials' operands before any arm existed | 9.125 GB |
+| Per-arm build time | 13.6 to 41.7 seconds, mean 31.2, median 34.0 |
+| All 48 arms built | 25.0 minutes |
+| Peak footprint | 32.524 GiB, which is 34.922 GB |
+| Final running footprint | 25.370 GB |
+| Peak shape | flat from roughly arm 31 through arm 48 |
+
+The complete-build measurement above ran through all 48 arms, and it carried no budget guard, which is why it could pass a ceiling a guarded run refuses.
+Its 48 per-arm times sum to the 25.0 minutes reported, which is the check that the range above is the manifest's own and not the opening arms': 48 arms at the 34-second figure this clause first carried would be 27.2 minutes, more than the run took.
+In the guarded execution under the run plan's declared 26.0 GB ceiling, the running footprint crosses that ceiling at arm 2 and the budget guard refuses at arm 3 of 48.
+
+**Registered: the declared 26.0 GB ceiling is known by measurement to be too low and may not arm this run.**
+
+No replacement ceiling is registered.
+The arms were built but their timed rounds were not run, and production retains the short-width arms while it builds and runs the long width, whereas this measurement did not carry the short-width arms.
+The true production peak is therefore bounded BELOW by 34.922 GB and is not yet known.
+
+### Clause 75. Clause 67's saturation table does not establish that a mark is free
+
+Clause 67 draws two conclusions from its five-row table: that "the cost is the fence and not the mark count", and that no cheaper arrangement of the same check exists.
+Neither follows from those five rows.
+
+Reproduced by execution 2026-08-22, a model with a STRICTLY POSITIVE per-mark cost reproduces every row exactly.
+Take a per-region retention of 6.137, 6.138, 9.038 and 8.703 GiB and charge 0.0005 GiB for every mark.
+
+| Region | Marks | Model | Clause 67's reading |
+|---|---|---|---|
+| cross-entropy | 4 | 6.137 + 0.002 = 6.139 | 6.139 |
+| head-matmul | 4 | 6.138 + 0.002 = 6.140 | 6.140 |
+| attn-core | 104 | 9.038 + 0.052 = 9.090 | 9.090 |
+| qmm | 722 | 8.703 + 0.361 = 9.064 | 9.064 |
+| all four | 834 | the maximum, 9.090 | 9.090 |
+
+So the table cannot separate a fence that costs everything from a per-mark cost paired with region-specific retention, and it measures no subdivision finer than a whole region.
+
+**Registered: clause 67's causal claim is WITHDRAWN and its universal claim is narrowed to what was measured.**
+
+What the table does establish is the narrow claim, that installing the four regions together costs no more than installing the most expensive one alone, because the largest single-region reading and the four-region reading are the same number.
+The operational conclusion is unchanged, because the arrangement clause 67 declined to adopt is one of the four it measured and that one saves nothing.
+What is withdrawn is the reason given for declining it, and any implication that a finer split inside a region was ruled out.
+
+### Clause 76. Clause 68 gives the uncovered width two opposite record shapes
+
+Clause 68's opening sentence says clause 67 creates "the first place in this profile where a width carries no structural entry at all".
+Its registered sentence says "the recording carries a structural entry for every width it measured", with a typed absence at the uncovered one.
+These are opposite statements about the same record, standing three lines apart.
+
+**Registered: the uncovered width carries a structural ENTRY and does not carry a structural CHECK.**
+
+The registered sentence is the one the harness implements and the one the clause exists to require, so it stands and the opening sentence is corrected: "no structural entry at all" reads "no structural check at all".
+The distinction is the whole substance of the clause rather than a wording preference, because an entry is exactly what separates a width that was deliberately not checked from a width whose result went missing.
+
+### Ledger: what Amendment 18 does to committed text
+
+| Clause | What happens to it |
+|---|---|
+| Amendment 17's opening claim about Amendment 5 clause 3 | CORRECTED as false. Clause 3 explicitly requires one structural pass per cell AND per width and gives a fault that appears at one width as the reason |
+| Amendment 5 clause 3, its per-width requirement | REVERSED at the long width. A long-width structural pass was required and is now forbidden by the measured device limit; the marks' structural purpose, their short-width requirement and their exclusion from timing all stand |
+| Amendment 17's ledger row for Amendment 5 clause 3 | RELABELLED to REVERSED. Its "SCOPED, not withdrawn" wording fails clause 66's validity test and is itself the process fault clause 69 records |
+| Amendment 17 clause 67, its width-free argument | CORRECTED in its conclusion. `expected_counts` makes the expected multiplicities width-free and says nothing about the observed counts or gradient identity at a width that did not run; clause 67's own seam-path concession stands |
+| Amendment 5 clause 8, its call-tally source | REVERSED at the long width. Its formula, direction weighting, within-round reduction and both-width kill test are unchanged, while the long-width costs now take the one short-width weight-derived call tally rather than a long-width structural record |
+| Amendment 17 clause 68, its recording shape | EXTENDED by one shared field and otherwise UNCHANGED. The clause 8 tally is carried once outside the per-width structural statuses, and the long width still carries a typed structural absence that can never read as a pass |
+| Amendment 17 clause 67, its memory figures | CORRECTED in units. Every figure labelled GB in its two tables, its prose deltas and its wired limit is GiB, and clause 72 gives the decimal-GB equivalents |
+| Amendment 17 clause 67, its physical-memory conclusion | UNCHANGED. The long marked pass is 40.802 GB against a 38.655 GB machine and still exceeds what the machine holds |
+| Amendment 10 clause 45, its machine capacity | CORRECTED from 33.53 GiB to the measured 36.000 GiB, which is 38.655 GB. Its ladder arithmetic and one-dense-weight-per-shape registration are not re-adjudicated |
+| Amendment 17 clause 67, its 36 GiB machine | UNCHANGED and now reconciled with clause 45. Amendment 17 had the right capacity and failed to name the older contradiction |
+| Amendment 17's ledger row for Amendment 5 clause 17 | OVERTAKEN in fact and unchanged in conclusion. Clause 74 supplies a 34.922 GB long-width build peak and proves the run plan's 26.0 GB ceiling too low, while the all-arms, both-widths production peak clause 17 needs remains unmeasured |
+| Amendment 5 clause 17, its budget rule | UNCHANGED and still not discharged. The budget still comes from the largest production peak across all arms and both widths, multiplied by 1.25 and rounded as registered, and clause 74 supplies only a lower bound |
+| Amendment 13 clause 57 and its exploratory pass | UNCHANGED as a design and BLOCKED under the current run plan. Its 48-arm long-width manifest cannot complete under the declared 26.0 GB ceiling, while its prices, schedule, branch and refusal status are untouched and no replacement ceiling is registered |
+| The run plan's 26.0 GB ceiling | REVERSED as an admissible ceiling. The guarded build crosses it at arm 2 and refuses at arm 3, so no run using that value can produce the registered manifest |
+| Nothing else in committed text | REGISTERS the 2026-08-22 long-width build measurement and no replacement ceiling. The timed rounds and the production coexistence of both widths remain unmeasured, so 34.922 GB is a lower bound and not the next budget |
+| 67, its "the cost is the fence and not the mark count" | WITHDRAWN as a causal claim, and its "no cheaper arrangement exists" narrowed to the four whole-region arrangements measured. A positive per-mark model reproduces all five readings, so the table never separated the two explanations |
+| 67, its decision not to split the installation | UNCHANGED. The split it declined is one of the four arrangements it measured and that one saves nothing; only the reason given for declining it moves |
+| 68, its opening sentence | CORRECTED in two words. "No structural entry at all" reads "no structural check at all", which is what its own registered sentence and the harness both say |
+| 68, its registered sentence and the typed absence | UNCHANGED. It was already the half the code implements |
