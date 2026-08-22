@@ -646,11 +646,59 @@ def _profile_recording():
             rules.PRIMARY_CELL: {
                 "widths": {width: {"context": dict(contexts[width])}
                            for width in rules.WIDTH_ORDER},
-                "structural": {width: _structural()
-                               for width in rules.WIDTH_ORDER},
+                # Amendment 17 clause 67 and Amendment 18 clause 71: the
+                # pass runs at the short width, so the tally lives there and
+                # every other width carries clause 68's typed absence.
+                "structural": {
+                    width: (dict(_structural(), taken=True)
+                            if width == ps.STRUCTURAL_WIDTH
+                            else {"taken": False,
+                                  "reason_code": ps.STRUCTURAL_NOT_TAKEN})
+                    for width in rules.WIDTH_ORDER},
             },
         },
     }
+
+
+def test_the_tally_is_read_where_clause_67_runs_the_pass():
+    """Amendment 18 clause 71. Before it, this reader took a tally from EVERY
+    width and required them to agree; clause 67 leaves only one width with a
+    pass, so the agreement check is gone with its evidence and the tally is
+    read where the pass runs."""
+    contexts, structural = cs._profile_inputs(_profile_recording())
+    assert tuple(contexts) == rules.WIDTH_ORDER
+    assert structural["taken"] is True
+    assert cs.shape_counts(structural)
+
+
+@pytest.mark.parametrize("width,entry,needle", [
+    (ps.STRUCTURAL_WIDTH,
+     {"taken": False, "reason_code": ps.STRUCTURAL_NOT_TAKEN},
+     "clause 67 takes the structural pass at width"),
+    ("long", None, "which clause 67 does not run it at"),
+    ("long", {"taken": False, "reason_code": "the machine was busy"},
+     "not the absence clause 67 registers"),
+    ("long", {"reason_code": ps.STRUCTURAL_NOT_TAKEN},
+     "rather than a boolean"),
+])
+def test_the_sweep_refuses_a_structural_record_the_clauses_forbid(
+        width, entry, needle):
+    """The same typed union the profile's own reader validates. A tally is the
+    kill rule's weighting, so a forged one silently changes what the ceiling
+    was compared over."""
+    record = _profile_recording()
+    record["cells"][rules.PRIMARY_CELL]["structural"][width] = (
+        dict(_structural(), taken=True) if entry is None else entry)
+    with pytest.raises(RunInvalid) as caught:
+        cs._profile_inputs(record)
+    assert needle in str(caught.value)
+
+
+def test_a_missing_structural_entry_refuses_the_sweep():
+    record = _profile_recording()
+    del record["cells"][rules.PRIMARY_CELL]["structural"]["long"]
+    with pytest.raises(RunInvalid, match="INCOMPLETE"):
+        cs._profile_inputs(record)
 
 
 def test_the_entry_point_refuses_an_unknown_profile_recording_schema(
@@ -721,15 +769,21 @@ def test_the_entry_point_joins_the_deciding_cell_s_recorded_inputs(
     assert observed["pass_index"] == 2
 
 
-def test_the_entry_point_refuses_widths_with_different_structural_tallies(
+def test_the_entry_point_refuses_a_forbidden_long_width_structural_pass(
         tmp_path, monkeypatch, capsys):
+    """REPLACES test_the_entry_point_refuses_widths_with_different_structural_tallies.
+
+    That test drove the cross-width agreement check, which Amendment 18 clause
+    71 removes because clause 67 leaves only one width with a pass to agree
+    with. What the entry point refuses now is a recording that carries a pass
+    at a width the registered arrangement does not run one at, which is the
+    same recording the old test would have been handed."""
     plan_path = tmp_path / "plan.json"
     profile_path = tmp_path / "profile.json"
     plan_path.write_text(json.dumps(_plan()))
     profile = _profile_recording()
-    out_dims, in_dims = rules.SHAPES["S1"]
-    profile["cells"][rules.PRIMARY_CELL]["structural"]["long"][
-        "shape_counts"]["qmm"][f"{out_dims}x{in_dims}"][cs.FORWARD] += 1
+    profile["cells"][rules.PRIMARY_CELL]["structural"]["long"] = dict(
+        _structural(), taken=True)
     profile_path.write_text(json.dumps(profile))
     timed = []
     monkeypatch.setattr(
@@ -737,7 +791,7 @@ def test_the_entry_point_refuses_widths_with_different_structural_tallies(
 
     assert cs.main(["--plan", str(plan_path),
                     "--profile", str(profile_path)]) == ps.EXIT_PRECONDITION
-    assert "structural call tallies disagree" in capsys.readouterr().out
+    assert "clause 67 does not run it at" in capsys.readouterr().out
     assert timed == []
 
 

@@ -1093,9 +1093,21 @@ def _profile_inputs(record: Mapping[str, object]
                     ) -> tuple[dict[str, dict], dict]:
     """The deciding cell's contexts and clause 8 tally, already recorded.
 
-    The structural pass runs at every width so each one is independently
-    checked by the profile. Clause 8 needs one call-count tally for the fixed
-    arrangement, and the first registered width is its canonical copy.
+    Amendment 18 clause 71. Until 2026-08-22 every width carried its own tally
+    and this function required them to AGREE, which was a real check and is
+    now impossible: Amendment 17 clause 67 takes the structural pass at the
+    short width alone, because at the long width it asks for more memory than
+    the machine holds. So the tally is read where the pass runs, and the other
+    widths must carry clause 68's typed absence.
+
+    What replaces the agreement check is not a weaker measurement but a
+    different kind of evidence, and clause 71 is careful about which half is
+    which. The tallied LABEL is a proof: `profile_instrument` derives it from
+    `layer.weight.shape` and `layer.bits`, so a quantity the construction
+    never receives cannot move it. The per-shape COUNT is an argument from the
+    pinned arrangement: a quantized layer is invoked once per layer per
+    direction in a step, and the token count enters as the size of its operand
+    rather than as more invocations.
     """
     if record.get("schema_version") != 2:
         raise RunInvalid(
@@ -1134,23 +1146,47 @@ def _profile_inputs(record: Mapping[str, object]
             f"the profile recording carries no structural record for "
             f"deciding cell {rules.PRIMARY_CELL!r}; clause 8 has no call "
             f"tally")
-    checked = {}
+    tallied = None
     for width in rules.WIDTH_ORDER:
         structural = structurals.get(width)
         if not isinstance(structural, Mapping):
             raise RunInvalid(
                 f"the profile recording carries no structural record for "
                 f"deciding cell {rules.PRIMARY_CELL!r} at width {width!r}; "
-                f"clause 8 has no call tally")
-        checked[width] = shape_counts(structural)
-    canonical_width = rules.WIDTH_ORDER[0]
-    for width in rules.WIDTH_ORDER[1:]:
-        if checked[width] != checked[canonical_width]:
+                f"clause 68 makes a missing entry INCOMPLETE rather than a "
+                f"width that was deliberately not checked")
+        # The same typed union the profile's own reader validates, and for the
+        # same reason: truthiness accepted three records the clauses forbid.
+        taken = structural.get("taken")
+        if not isinstance(taken, bool):
             raise RunInvalid(
-                f"the profile recording's structural call tallies disagree "
-                f"between widths {canonical_width!r} and {width!r}; one "
-                f"tally cannot weight both widths' clause 8 costs")
-    return contexts, dict(structurals[canonical_width])
+                f"the profile recording's structural entry at width "
+                f"{width!r} has 'taken' of {taken!r} rather than a boolean, "
+                f"so it names neither of clause 68's two variants")
+        if width == ps.STRUCTURAL_WIDTH:
+            if not taken:
+                raise RunInvalid(
+                    f"clause 67 takes the structural pass at width "
+                    f"{width!r} and this recording says it was not taken, so "
+                    f"clause 8 has no call tally")
+            tallied = structural
+        else:
+            if taken:
+                raise RunInvalid(
+                    f"the profile recording took the structural pass at "
+                    f"width {width!r}, which clause 67 does not run it at, "
+                    f"so this recording did not come from the registered "
+                    f"arrangement")
+            if structural.get("reason_code") != ps.STRUCTURAL_NOT_TAKEN:
+                raise RunInvalid(
+                    f"the structural pass was not taken at width {width!r} "
+                    f"for {structural.get('reason_code')!r}, which is not "
+                    f"the absence clause 67 registers")
+    # Still validated rather than merely carried: clause 8 refuses a shape
+    # counted at zero, and that refusal is the reason this is read here and
+    # not left for the sweep to discover halfway through a granted window.
+    shape_counts(tallied)
+    return contexts, dict(tallied)
 
 
 def main(argv=None) -> int:
