@@ -33,3 +33,6 @@ bench/.heldout_salt
 # committed through the keep stage (kept bodies, certificates, recordings),
 # never by sweeping a whole store in.
 bench/.candidates/
+
+# subagent-driven-development scratch (ledger, briefs, review packages)
+.superpowers/
