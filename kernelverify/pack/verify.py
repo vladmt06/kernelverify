@@ -95,11 +95,50 @@ def kv_inputs(q: np.ndarray, k_cache: np.ndarray, v_cache: np.ndarray,
             "bits": np.array([bits], dtype=np.int32)}
 
 
+def group_heads(x: np.ndarray, n_kv_heads: int) -> np.ndarray:
+    """(B, HQ, T, DH) -> (B, HKV, GQA, T, DH), the layout the training-attention
+    reference reads.
+
+    The grouping is not a presentation choice. Query head h reads key-value head
+    h // GQA, which is the mapping MLX's own quantized attention spells out when
+    it reshapes queries to (B, n_kv_heads, n_repeats, L, D), and holding it in
+    the shape is what lets the group ratio be a swept dimension rather than a
+    constant baked into one geometry.
+    """
+    batch, n_q_heads, t_len, head_dim = x.shape
+    if n_kv_heads < 1 or n_q_heads % n_kv_heads:
+        raise ValueError(f"{n_q_heads} query heads do not group into "
+                         f"{n_kv_heads} key-value heads")
+    return x.reshape(batch, n_kv_heads, n_q_heads // n_kv_heads, t_len, head_dim)
+
+
+def attn_inputs(q: np.ndarray, k: np.ndarray, v: np.ndarray,
+                d_out: np.ndarray | None = None) -> dict:
+    """Native-op inputs for the training-attention surface.
+
+    Takes the arrays in the layout the KERNEL sees, (B, HQ, T, DH) queries
+    against (B, HKV, T, DH) keys and values, and groups the query heads for the
+    reference. `d_out` is the cotangent a backward is judged against and is
+    absent for a forward-only case, which is why it is optional rather than a
+    separate inputs helper.
+
+    Values arrive as float32 carrying exactly what the device stored: bfloat16
+    is the dtype the seam actually receives and numpy cannot hold it, so a
+    caller converts on the device, where the widening is exact.
+    """
+    inputs = {"q": group_heads(q, k.shape[1]), "k": k, "v": v}
+    if d_out is not None:
+        inputs["d_out"] = group_heads(d_out, k.shape[1])
+    return inputs
+
+
 def reference_and_tolerance(op_name: str, inputs: dict,
                             dtype: str = "float16") -> tuple[np.ndarray, float]:
     """The shipped reference and tolerance for one case, straight from
-    NATIVE_OPS. `dtype` is the candidate kernel's output dtype; every pack
-    surface today emits float16."""
+    NATIVE_OPS. `dtype` is the candidate kernel's output dtype: the decode
+    surfaces emit float16, and the training-attention surface emits bfloat16
+    too, whose eps is eight times float16's and whose tolerance is therefore a
+    different number on the same case."""
     op = NATIVE_OPS[op_name]
     ref = op.reference(inputs)
     return ref, float(op.tolerance(_Case(dtype), inputs, ref))
