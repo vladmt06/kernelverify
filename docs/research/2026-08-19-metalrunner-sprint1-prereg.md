@@ -3315,3 +3315,135 @@ The distinction is the whole substance of the clause rather than a wording prefe
 | 67, its decision not to split the installation | UNCHANGED. The split it declined is one of the four arrangements it measured and that one saves nothing; only the reason given for declining it moves |
 | 68, its opening sentence | CORRECTED in two words. "No structural entry at all" reads "no structural check at all", which is what its own registered sentence and the harness both say |
 | 68, its registered sentence and the typed absence | UNCHANGED. It was already the half the code implements |
+
+## Amendment 19, 2026-08-23: the operation was chosen after its measurements, and a rewritten backward cannot be bit-equal to the one it replaces
+
+Two things happened on 2026-08-23 that committed text does not cover.
+
+The first operation was chosen by direct measurement rather than by section 4's rule, because the profile that rule reads was never run and the calibration lane it depends on is dropped by the any-Mac re-aim.
+Every number in clause 77 was measured BEFORE this text existed, so nothing in this amendment pre-registers any of them, and clause 77 says so in its own body rather than leaving a reader to infer it.
+
+The operation that measurement named is attention, whose replacement computes its own backward.
+Section 8.4 demands that a kept kernel's backward be bit-equal to stock's gradient, and no kernel that computes its own backward can ever satisfy that, so the rule has to be scoped before the kernel is built rather than after it fails.
+
+Every arithmetic result below was reproduced by execution on 2026-08-23 before it was written here.
+
+### Clause 77. The first operation was selected after its measurements, and this document records that rather than implying otherwise
+
+Section 4 computes `gain = 1/(1 - f*(1 - 1/r))` per candidate from the Day 1 profile and takes the largest.
+That profile never ran.
+What ran instead, on the pinned Qwen3-4B and this machine, is a direct measurement of each candidate's own registered floor, which is the `r` half of the same formula.
+
+**Candidate Q's floor was measured at three of its six shapes, at two widths, interleaved over seven rounds with the canary clean.**
+Section 4.2 registers Q's floor as the dense fp16 matmul at the same logical shape, on the argument that dense does strictly less work because it never dequantizes.
+
+| Shape | M | dense fp16 | MLX quantized | dense/quant |
+|---|---|---|---|---|
+| S3, gate and up | 260 | 3.116 ms | 3.012 ms | 1.034 |
+| S3, gate and up | 2114 | 18.367 ms | 19.213 ms | 0.956 |
+| S4, down | 260 | 2.751 ms | 2.617 ms | 1.051 |
+| S4, down | 2114 | 18.861 ms | 19.275 ms | 0.979 |
+| S1, q_proj | 260 | 1.171 ms | 1.117 ms | 1.049 |
+| S1, q_proj | 2114 | 7.730 ms | 8.094 ms | 0.955 |
+
+Stock is within 4.5 percent of a comparison that does strictly less work, and at the short width it BEATS that comparison, because 4-bit weights move a quarter of the bytes and the short width is bandwidth-bound.
+At the best ratio measured anywhere, 1.051, and at the profile's own projections share of 0.376, the registered formula gives 1.0186.
+Granting a ratio of 1.15, which no shape reached at either width, it gives 1.0516.
+Both are below R10's 1.10 floor, so candidate Q cannot reach the shipping floor alone.
+
+**Section 5's kill rule is NOT what removed candidate Q, and this is stated rather than glossed.**
+That rule needs the condition to hold at 5 of the 6 registered shapes, per Amendment 5 clause 8, and only three shapes were measured.
+The condition holds at every shape measured and is unmeasured at S2, S5 and S6.
+What removes candidate Q is section 4.3's own branch: its gain is below 1.10 on its own registered floor.
+
+**Both proxy shares that made candidates L and Q look large are artefacts of the 0.6B proxy, measured 2026-08-23.**
+
+| | 0.6B | 1.7B | 4B target |
+|---|---|---|---|
+| head share of the step's matmul work | 26.1% | 18.1% | 9.7% |
+
+The tied output head is a fixed 151936-row matmul while every other matmul grows with the model, so the head's share falls as the model grows and the proxy overstates it by 2.7x at the target.
+Candidate L's registered share of 0.245 is therefore about 0.10 at the target, and at the 1.798x work elimination its own floor measures, the formula gives 1.0464.
+
+**Candidate A's share was measured at width 97, which is the one place attention cannot be measured, because attention is the only region quadratic in the width.**
+Its 0.045 is a short-width reading and the registered long band is 1057.
+
+**Attention's floor, measured at the target's own geometry.**
+Stock's training attention is the composed path, confirmed by reading the graph MLX builds: the fused primitive appears once in a plain call and zero times under `mx.grad`, where a softmax appears instead.
+MLX implements no fused attention backward at all, so the backward is composed in every arrangement.
+
+| B | T | fused | composed | composed/fused | composed x 36 layers |
+|---|---|---|---|---|---|
+| 4 | 65 | 0.423 ms | 1.370 ms | 3.24 | 49.3 ms |
+| 2 | 1057 | 4.499 ms | 26.123 ms | 5.81 | 940.4 ms |
+| 1 | 2048 | 6.729 ms | 44.892 ms | 6.67 | 1616.1 ms |
+
+At the long band attention forward alone is roughly a quarter of the step, and at a conservative region ratio of 3 the formula gives 1.20.
+The second effect is memory rather than time: the composed path materializes a B by heads by T by T score matrix, which is 286.0 MB per layer at B=2, T=1057 in fp32, and not building it is what puts R4's and R6's 16 GB machine in reach.
+
+**What this clause does NOT claim.**
+The share of 0.25 used above is an estimate from region timings against a step time, not a share measured by any registered instrument, and no `f` in this clause was measured the way Amendment 5 clause 1 defines one.
+The candidate ordering here rests on ratios, which were measured, and on shares, which were estimated, and a reader may discount the shares without touching the conclusion that candidate Q's own ceiling is 1.05 and attention's own floor is 3.24 at the worst band.
+
+### Clause 78. Section 8.4's exact-equality rule is a retune-class rule
+
+Section 8.4's first sentence reads:
+
+> The kept kernel's backward is compared to stock's gradient in isolation by exact array equality on fixed cases before the end-to-end run, and a failure there stops the run.
+
+That sentence is satisfiable exactly when the kept kernel's backward IS stock's own operation.
+It is unsatisfiable, for arithmetic reasons and not for engineering ones, when the kernel computes its own backward: a different accumulation order over the same mathematics changes the last bits of a floating-point sum, so a correct rewrite fails array equality by construction.
+
+**Registered: section 8.4's array-equality requirement binds a kept kernel whose registered vjp calls the stock operation it replaced.**
+This is the retune class, and the training quantized matmul is its worked example: the forward is swapped, the vjp calls `mx.quantized_matmul(transpose=False)`, the gradient produced is stock's own gradient, and equality on fixed cases is exactly satisfiable and is required.
+
+**Registered: a kept kernel whose registered vjp does not call the stock operation it replaced is the rewrite class, and clause 79 states what verifies it.**
+For the attention operation there is additionally no stock implementation to be equal to: MLX composes the backward out of matmuls and a softmax and has no fused attention backward, so array equality there would compare a kernel against an implementation that does not exist.
+
+The class is read off the kernel's registered vjp and is not a label chosen at keep time.
+It is recorded in the certificate beside the forward and backward source hashes the certificate already binds, so a reader can tell which of the two rules verified which kernel.
+
+### Clause 79. A rewrite-class backward is verified against an fp64 analytic gradient through the same battery the forward uses, and by the loss curve
+
+**Registered: every gradient a rewrite-class kernel computes is judged by the contract machinery this repository already uses for forward outputs, one verdict per gradient tensor.**
+
+The reference is analytic.
+It is the closed-form vjp of the operation's own definition, evaluated in float64 on the case's own inputs, and it is neither a finite difference nor another implementation of the same kernel.
+For attention, with `P = softmax(SCALE * Q K^T + causal)` and `O = P V` and `D = rowsum(dO * O)`, the reference is
+
+    dV = P^T dO
+    dS = P * (dO V^T - D)
+    dQ = SCALE * dS K
+    dK = SCALE * dS^T Q
+
+with dK and dV summed over each grouped-query group's members.
+
+The tolerance is the ensemble floor already registered for native operators: `floored_tolerance` over an ensemble of legitimate alternative reduction orders of the same mathematics, so a case whose reference is itself ill-conditioned cannot be judged tighter than the spread of correct implementations at that case.
+No gate states its own tolerance, and the judge is the existing `verify.judge`.
+
+**The K is BORROWED and uncalibrated, and it is recorded as such in the tolerance function's own docstring, as `kv_tolerance` records its own borrow.**
+`K_NATIVE = 1.5` was measured over a different operator's ensemble, no harness has scored an ensemble over this operator leave-one-out, and calibrating it is queued rather than claimed.
+
+**Section 8.4's second paragraph is unchanged and becomes the second half of this rule.**
+The end-to-end run reports the loss curve of every arm, and a divergence beyond what the same-seed stock arm reproduces against itself voids the speed claim for that cell.
+This is the check no per-case tolerance can make: a tolerance bounds one step's error on fixed cases, and the loss curve bounds what those errors do when a real fine-tune accumulates thousands of them.
+A rewrite-class kernel ships only if both halves hold.
+
+**What this does not weaken.**
+Forward outputs are judged exactly as before, through `verify_output` against the operator's fp64 reference.
+The retune class keeps section 8.4 as written, including the sentence that a failure stops the run.
+Nothing here licenses a tolerance chosen after a result is seen: the reference, the ensemble, the K and the cases are all fixed in the battery entry before any kernel is timed, and rule V1's ordering is unchanged.
+
+### Ledger: what Amendment 19 does to committed text
+
+| Clause | What happens to it |
+|---|---|
+| Section 8.4, first paragraph | SCOPED to the retune class by clause 78. Its array equality, its fixed cases, its isolation and its stop-the-run consequence are all unchanged for every kernel whose vjp calls the stock operation it replaced |
+| Section 8.4, second paragraph | UNCHANGED, and promoted by clause 79 into the second half of the rewrite-class rule |
+| Section 4's selection rule | NOT EXECUTED. The Day 1 profile it reads never ran, the calibration lane that would have made its shares binding is dropped by the any-Mac re-aim, and clause 77 records what replaced it and what that replacement cannot claim |
+| Section 4.3's below-1.10 branch | APPLIED to candidate Q on its own registered floor, which is the one part of section 4 that was measured |
+| Section 5's kill rule | NOT FIRED. Its 5-of-6 condition needs six shapes and three were measured; clause 77 states this rather than borrowing the rule's authority |
+| Section 6's funnel and rule V1 | UNCHANGED. Verify before time is untouched, and clause 79 adds gradient verdicts to what a rewrite-class candidate must survive before it may be timed |
+| Amendments 5 through 18, the calibration machinery | UNCHANGED as text and INAPPLICABLE to this sprint. The lane they govern is dropped, their code is kept, and no reading in clause 77 is derived from any of them |
+| Every price, schedule, rate and demand in this document | UNCHANGED. Nothing in this amendment is a timing calibration |
+| An uncommitted draft numbered Amendment 19, dated 2026-08-22 | NOT PART of this document. It carries clauses 77 to 79 governing the dropped calibration lane's memory arithmetic, it was never committed, and this amendment reuses its numbers because committed text ends at Amendment 18 |
