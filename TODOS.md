@@ -317,6 +317,15 @@
 - Context: `native_ops.py::kv_tolerance` (its docstring states the borrow), `KV_MEMBERS` beside it, `bench/emit_pack_certificates.py::contract_version_for` (the certificate prose that now says "K borrowed from quantized_matmul, uncalibrated"); surfaced by the verification-design audit of 2026-08-15 and labelled by task V2 of the 2026-08-16 amendments plan.
 - Depends on / blocked by: nothing technical; it is a CPU harness that can run beside any GPU measurement.
 
+## train_attention's K is borrowed too, and its ensemble has never been scored
+
+- What: derive a K over `ATTN_MEMBERS` and over `ATTN_GRAD_MEMBERS` the way the kv entry above describes, on a grid of (B, HKV, GQA, T, DH) and both dtypes, with a held-out implementation and an independent draw, and report the calibration and the independent demand separately for the forward and for each of the three gradients.
+- Why: `kernelverify/schemas/native_ops.py::attn_tolerance` and `attn_grad_tolerances` multiply an ensemble floor by `K_NATIVE = 1.5`, which ADR 0004 measured over the CORPUS operators' ensembles on the corpus grid; no harness has scored these four forward members or these two gradient members leave-one-out at any shape, and Amendment 19 clause 79 makes this tolerance the whole gradient claim for a rewrite-class kernel, so the borrow is load-bearing in a way the decode one is not.
+- Pros: CPU-only, like the kv calibration, so it needs no GPU slot; the rule, the grid vocabulary and the leave-one-out procedure are copied from `bench/calibrate_quant_bits.py` rather than invented; the gradient half is where the answer matters most and is the cheapest half to run, since the analytic reference is already cross-checked against MLX's own vjp.
+- Cons: a K that moves obliges a bump of `ATTN_ENSEMBLE_VERSION` and re-emission of any attention certificate; the gradients have three different magnitudes and may not want one K between them, which is a question this harness has to answer rather than assume.
+- Context: `native_ops.py::attn_tolerance` and `attn_grad_tolerances` (both docstrings state the borrow), `ATTN_MEMBERS` and `ATTN_GRAD_MEMBERS` beside them, and the kv entry above, whose harness this one copies.
+- Depends on / blocked by: nothing technical; it can run beside any GPU measurement.
+
 ## The closing idle check discards a whole run on one sample
 
 - What: decide what evidence the end of a run needs, and give `check_idle_after` that instead of a single `idle_check()` snapshot; a streak like the opening gate's, a mid-run sampler that records when the window broke, or a rule that separates a blip from a busy machine.

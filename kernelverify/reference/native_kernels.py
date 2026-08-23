@@ -221,8 +221,47 @@ def kv_attention(inputs, *, scores_dtype="float32", accum_dtype="float32",
     return out.astype(q.dtype)
 
 
+# ---------------------------------------------------------------------------
+# Causal grouped-query attention, one training step
+# ---------------------------------------------------------------------------
+def train_attention(inputs):
+    """Causal grouped-query self-attention at fp32 working precision.
+
+    The battery's control for `train_attention`: an implementation written
+    independently of the fp64 reference and of the tolerance ensemble, so a
+    misreading shared with either would show up here rather than cancel. It
+    is the plain order, a whole normalised row at a time, which is what a
+    kernel that never fuses anything would do.
+
+    Query heads arrive grouped under the key-value head they share, q of
+    (B, HKV, GQA, T, DH) against k and v of (B, HKV, T, DH), and the scale is
+    1/sqrt(DH), which is the value mlx-lm passes to the seam this operator
+    replaces.
+
+    No fault seams: this operator has no catalogue mutants yet, and a seam
+    with no mutant behind it is a parameter nothing ever passes. The training
+    mutation battery adds them with the mutants they express.
+    """
+    q = inputs["q"].astype(np.float32)
+    k = inputs["k"].astype(np.float32)
+    v = inputs["v"].astype(np.float32)
+    t_q, t_k = q.shape[-2], k.shape[-2]
+    scale = np.float32(1.0 / np.sqrt(np.float32(q.shape[-1])))
+
+    scores = np.einsum("bhgid,bhjd->bhgij", q, k) * scale
+    allowed = np.tril(np.ones((t_q, t_k), dtype=bool))
+    scores = np.where(allowed, scores, np.float32(-np.inf))
+
+    shifted = scores - scores.max(axis=-1, keepdims=True)
+    probs = np.exp(shifted)
+    probs /= probs.sum(axis=-1, keepdims=True)
+    out = np.einsum("bhgij,bhjd->bhgid", probs, v)
+    return out.astype(inputs["q"].dtype)
+
+
 NATIVE_KERNELS = {
     "quantized_matmul": quantized_matmul,
     "moe_dispatch": moe_dispatch,
     "kv_attention": kv_attention,
+    "train_attention": train_attention,
 }

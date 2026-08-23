@@ -398,6 +398,286 @@ def kv_tolerance(case, inputs, ref) -> float:
                              ref)
 
 
+# ---------------------------------------------------------------------------
+# train_attention: causal grouped-query self-attention at TRAINING shape,
+# forward and backward.
+#
+# `kv_attention` above is the decode sibling: one query position against a
+# quantized cache. Training is the other regime, and it differs in every way
+# that matters to a kernel. Every position attends at once, the mask is
+# causal rather than absent, nothing is quantized, and the operator carries a
+# BACKWARD. The backward is where the opportunity is: MLX fuses this forward
+# in a plain call and decomposes it into matmuls and a softmax inside any
+# gradient trace, and implements no fused attention backward at all.
+#
+# Layout: query heads are held GROUPED under the key-value head they share,
+# so q is (B, HKV, GQA, T, DH) against k and v of (B, HKV, T, DH). That is
+# the structure grouped-query attention actually has, and holding it in the
+# shape lets the schema sweep the group ratio as its own dimension. A kernel
+# that indexes the group wrongly is silently correct at a ratio of 1 and
+# wrong at every other, so the ratio has to be a dimension rather than a
+# constant baked into one shape.
+#
+# The scale is 1/sqrt(DH), which is what `mlx_lm.models.qwen3.Attention`
+# computes as `head_dim**-0.5` and passes to the seam this operator replaces.
+# ---------------------------------------------------------------------------
+TRAIN_ATTENTION_META = {
+    "op_schema": {
+        "inputs": [
+            {"name": "q", "dims": ["B", "HKV", "GQA", "T", "DH"]},
+            {"name": "k", "dims": ["B", "HKV", "T", "DH"]},
+            {"name": "v", "dims": ["B", "HKV", "T", "DH"]},
+        ],
+        # Shapes are chosen for fault expression, not for speed realism. T=65
+        # is the edge case a tiled kernel gets wrong: one row past a 64-wide
+        # tile, so the last tile is a single position and the causal bound
+        # falls inside a tile rather than on its boundary. The group ratios
+        # are 2, 4 and 8 because a group-indexing fault is invisible at 1.
+        "dims": [
+            {"name": "B", "candidates": [1, 2]},
+            {"name": "HKV", "candidates": [1, 2]},
+            {"name": "GQA", "candidates": [2, 4, 8]},
+            {"name": "T", "candidates": [65, 128]},
+            {"name": "DH", "candidates": [64, 128]},
+        ],
+    },
+    "dtypes": ["float32", "float16"],
+    "tolerances": {"float32": 1e-3, "float16": 1e-2},
+}
+
+# Peak the queries are rescaled to, the same job QUERY_SCALE does for the
+# decode operator: at the corpus range on both operands a score reaches
+# several hundred and the softmax is a one-hot at every case, which measures
+# nothing an attention kernel can get wrong. Keys and values stay at corpus
+# scale, so the score rms lands near 2 whatever DH is.
+ATTN_QUERY_SCALE = 0.6
+
+# The flash tile widths the ensemble spans. The kernel's own key-loop width
+# is a tuned knob, and a different width is a different rescaling schedule
+# and therefore a different rounding, so the floor has to cover more than one
+# of them or it would be a floor for one knob setting.
+ATTN_TILES = (16, 32)
+
+
+def _causal_mask(t_q: int, t_k: int) -> np.ndarray:
+    """Position i may read key j only where j <= i. Square in training: the
+    step attends over its own width, with no cache in front of it."""
+    return np.tril(np.ones((t_q, t_k), dtype=bool))
+
+
+def _attn_scores(inputs, dtype) -> np.ndarray:
+    """Masked, scaled scores at `dtype`. Masked entries are -inf, which is
+    exactly what a correct kernel's masked lane holds before its softmax."""
+    q = inputs["q"].astype(dtype)
+    k = inputs["k"].astype(dtype)
+    scale = dtype(1.0 / np.sqrt(float(q.shape[-1])))
+    scores = np.einsum("bhgid,bhjd->bhgij", q, k) * scale
+    return np.where(_causal_mask(q.shape[-2], k.shape[-2]), scores, dtype(-np.inf))
+
+
+def _softmax_rows(scores: np.ndarray) -> np.ndarray:
+    shifted = scores - scores.max(axis=-1, keepdims=True)
+    probs = np.exp(shifted)
+    return probs / probs.sum(axis=-1, keepdims=True)
+
+
+def attn_reference(inputs) -> np.ndarray:
+    """fp64 truth for the forward: softmax over the causal row, then the
+    value combine, with the group's queries each reading their own row."""
+    probs = _softmax_rows(_attn_scores(inputs, np.float64))
+    return np.einsum("bhgij,bhjd->bhgid", probs, inputs["v"].astype(np.float64))
+
+
+def attn_lse_reference(inputs) -> np.ndarray:
+    """fp64 truth for the row logsumexp the forward hands to its backward.
+
+    A flash forward computes this on its way through the key loop and the
+    backward rebuilds the probabilities from it, so it is a shipped output
+    with its own correctness claim rather than an implementation detail. Its
+    verdict is separate because an L that is wrong by a constant per row
+    leaves the forward's own output exactly right: the constant cancels in
+    the normalisation, and only the backward would ever see it.
+    """
+    scores = _attn_scores(inputs, np.float64)
+    row_max = scores.max(axis=-1)
+    return row_max + np.log(np.exp(scores - row_max[..., None]).sum(axis=-1))
+
+
+def _online_combine(scores: np.ndarray, v: np.ndarray, tile: int) -> np.ndarray:
+    """The flash order: one pass over key tiles, carrying a running maximum
+    and a running normaliser, rescaling the accumulator whenever the maximum
+    moves. Never materialises a normalised probability matrix."""
+    b, h, g, t_q, _t_k = scores.shape
+    dh = v.shape[-1]
+    running_max = np.full((b, h, g, t_q), -np.inf, dtype=np.float32)
+    running_sum = np.zeros((b, h, g, t_q), dtype=np.float32)
+    acc = np.zeros((b, h, g, t_q, dh), dtype=np.float32)
+    for start in range(0, scores.shape[-1], tile):
+        block = scores[..., start:start + tile]
+        new_max = np.maximum(running_max, block.max(axis=-1))
+        # A row whose running maximum is still -inf has seen nothing yet, and
+        # -inf minus -inf is a NaN rather than the zero the algebra wants.
+        safe_max = np.where(np.isfinite(new_max), new_max, np.float32(0.0))
+        correction = np.where(np.isfinite(running_max),
+                              np.exp(running_max - safe_max), np.float32(0.0))
+        probs = np.exp(block - safe_max[..., None])
+        running_sum = running_sum * correction + probs.sum(axis=-1)
+        acc = acc * correction[..., None] + np.einsum(
+            "bhgij,bhjd->bhgid", probs, v[:, :, start:start + tile, :])
+        running_max = new_max
+    return acc / running_sum[..., None]
+
+
+def _attn_member(inputs, *, order="standard", tile=32) -> np.ndarray:
+    """Legitimate fp32 implementations of the same forward.
+
+    `standard` builds the whole normalised row and combines it; `online` is
+    the tiled rescaling order a flash kernel runs, at two tile widths;
+    `reversed-keys` walks the key axis backwards, which is the same sum in a
+    different associativity. Every one is a correct implementation, so the
+    worst of their deviations from fp64 is the floor no correct kernel should
+    be judged below.
+    """
+    scores = _attn_scores(inputs, np.float32)
+    v = inputs["v"].astype(np.float32)
+    if order == "online":
+        out = _online_combine(scores, v, tile)
+    else:
+        probs = _softmax_rows(scores)
+        if order == "reversed-keys":
+            out = np.einsum("bhgij,bhjd->bhgid", probs[..., ::-1], v[:, :, ::-1, :])
+        else:
+            out = np.einsum("bhgij,bhjd->bhgid", probs, v)
+    return out.astype(inputs["q"].dtype)
+
+
+ATTN_MEMBERS = {
+    "attn:standard": dict(order="standard"),
+    "attn:online-16": dict(order="online", tile=ATTN_TILES[0]),
+    "attn:online-32": dict(order="online", tile=ATTN_TILES[1]),
+    "attn:reversed-keys": dict(order="reversed-keys"),
+}
+
+# Same discipline as KV_ENSEMBLE_VERSION: these members share `_attn_scores`
+# with the reference, so a change to the scoring moves every member at once
+# under four unchanged names, and only a version bump says so.
+ATTN_ENSEMBLE_VERSION = "attn-ensemble-v1"
+
+
+def attn_tolerance(case, inputs, ref) -> float:
+    """The train_attention forward tolerance, whose K is BORROWED.
+
+    K_NATIVE = 1.5 is ADR 0004's unquantized value, measured over the corpus
+    operators' ensembles on the corpus grid. No harness has ever derived a K
+    over ATTN_MEMBERS: these four have never been scored leave-one-out
+    against a held-out implementation of this operator, at any shape, group
+    ratio or width. The reuse is defensible in kind, since both floors are
+    ensembles of legitimate fp32 reduction orders over unquantized operands,
+    and it is still a reuse rather than a measurement, exactly as
+    `kv_tolerance` records for its own borrow. Calibrating it is queued in
+    TODOS.md.
+    """
+    return floored_tolerance(_base_tol(case.dtype, ref), K_NATIVE,
+                             (_attn_member(inputs, **kw) for kw in ATTN_MEMBERS.values()),
+                             ref)
+
+
+def attn_augment(case, inputs):
+    """Put the softmax in the regime a kernel can be wrong in.
+
+    At the corpus range on both operands a score reaches several hundred, so
+    every row is a one-hot and the value combine is a copy: a kernel could
+    drop most of its arithmetic and pass. Rescaling the queries alone puts
+    the score rms near 2 at every DH, because the 1/sqrt(DH) scale cancels
+    the reduction's own growth. Keys and values stay where the mode put them.
+    """
+    inputs["q"] = _rescaled(inputs["q"], ATTN_QUERY_SCALE)
+    return inputs
+
+
+# ---------------------------------------------------------------------------
+# The backward. Not a NATIVE_OPS entry of its own: it is the same operator's
+# other half, judged through the same battery machinery by `verify.py`, with
+# the cotangent carried in the inputs dict beside the primals.
+# ---------------------------------------------------------------------------
+def _attn_grad(inputs, dtype, *, reversed_order=False) -> dict:
+    """The closed-form vjp of the forward above, at `dtype`.
+
+    Written out rather than differentiated by a tool, because this IS the
+    reference: a rewrite-class kernel computes its own backward and there is
+    no stock backward to compare against (Amendment 19 clause 78). With
+    P the causal softmax and O = P V and D the row sum of dO * O:
+
+        dV = P^T dO                 summed over the group's queries
+        dS = P * (dO V^T - D)
+        dQ = scale * dS K
+        dK = scale * dS^T Q         summed over the group's queries
+
+    `reversed_order` reverses each contraction's own axis, which is the same
+    sum in a different associativity and is what makes the fp32 pair an
+    ensemble rather than one implementation run twice.
+    """
+    q = inputs["q"].astype(dtype)
+    k = inputs["k"].astype(dtype)
+    v = inputs["v"].astype(dtype)
+    d_out = inputs["d_out"].astype(dtype)
+    scale = dtype(1.0 / np.sqrt(float(q.shape[-1])))
+
+    probs = _softmax_rows(_attn_scores(inputs, dtype))
+    out = np.einsum("bhgij,bhjd->bhgid", probs, v)
+
+    def contract(subscripts, left, right, axis_left, axis_right):
+        if not reversed_order:
+            return np.einsum(subscripts, left, right)
+        flip_l = [slice(None)] * left.ndim
+        flip_r = [slice(None)] * right.ndim
+        flip_l[axis_left] = slice(None, None, -1)
+        flip_r[axis_right] = slice(None, None, -1)
+        return np.einsum(subscripts, left[tuple(flip_l)], right[tuple(flip_r)])
+
+    # dV and dK sum over BOTH the group's members and the query positions:
+    # every query in a group reads the same key-value head, so its gradient
+    # lands on that one head. A kernel that forgets the group sum passes a
+    # ratio-1 test and fails everywhere else.
+    d_v = contract("bhgij,bhgid->bhjd", probs, d_out, 3, 3)
+    d_probs = contract("bhgid,bhjd->bhgij", d_out, v, 4, 3)
+    row = np.sum(d_out * out, axis=-1)
+    d_scores = probs * (d_probs - row[..., None])
+    d_q = contract("bhgij,bhjd->bhgid", d_scores, k, 4, 2) * scale
+    d_k = contract("bhgij,bhgid->bhjd", d_scores, q, 3, 3) * scale
+    return {"dq": d_q, "dk": d_k, "dv": d_v}
+
+
+def attn_grad_reference(inputs) -> dict:
+    """fp64 truth for the three gradients, keyed by the primal they belong to."""
+    return _attn_grad(inputs, np.float64)
+
+
+def _attn_grad_member(inputs, *, reversed_order=False) -> dict:
+    grads = _attn_grad(inputs, np.float32, reversed_order=reversed_order)
+    dtype = inputs["q"].dtype
+    return {name: value.astype(dtype) for name, value in grads.items()}
+
+
+ATTN_GRAD_MEMBERS = {
+    "attn-grad:pairwise": dict(reversed_order=False),
+    "attn-grad:reversed": dict(reversed_order=True),
+}
+
+
+def attn_grad_tolerances(case, inputs, refs) -> dict:
+    """One tolerance per gradient, floored by the same ensemble rule as the
+    forward and carrying the same borrowed K. Three separate floors rather
+    than one: dQ, dK and dV have different magnitudes and different
+    reductions, and a single tolerance would be the loosest of the three
+    applied to all of them.
+    """
+    members = [_attn_grad_member(inputs, **kw) for kw in ATTN_GRAD_MEMBERS.values()]
+    return {name: floored_tolerance(_base_tol(case.dtype, refs[name]), K_NATIVE,
+                                    (member[name] for member in members), refs[name])
+            for name in refs}
+
+
 NATIVE_OPS = {
     "quantized_matmul": NativeOp(QUANTIZED_MATMUL_META, qmm_reference,
                                  qmm_tolerance, qmm_augment),
@@ -405,4 +685,6 @@ NATIVE_OPS = {
                              moe_augment),
     "kv_attention": NativeOp(KV_ATTENTION_META, kv_reference, kv_tolerance,
                              kv_augment),
+    "train_attention": NativeOp(TRAIN_ATTENTION_META, attn_reference,
+                                attn_tolerance, attn_augment),
 }

@@ -243,3 +243,149 @@ def test_cache_dequant_matches_mlx_quantize_dequantize_bit_for_bit(bits):
                                    bits=bits)).reshape(cache.shape)
     assert stock.dtype == np.float16
     assert np.array_equal(ours.astype(np.float16), stock)
+
+
+# ---------------------------------------------------------------------------
+# train_attention: causal grouped-query attention, forward and backward
+# ---------------------------------------------------------------------------
+def attn_inputs(b=1, hkv=2, g=4, t=9, dh=16, dtype=np.float32, seed=11):
+    rng = np.random.default_rng(seed)
+    return {
+        "q": (rng.standard_normal((b, hkv, g, t, dh)) * 0.4).astype(dtype),
+        "k": (rng.standard_normal((b, hkv, t, dh)) * 0.9).astype(dtype),
+        "v": (rng.standard_normal((b, hkv, t, dh)) * 0.9).astype(dtype),
+        "d_out": (rng.standard_normal((b, hkv, g, t, dh)) * 0.7).astype(dtype),
+    }
+
+
+def test_train_attention_control_agrees_with_reference():
+    from kernelverify.reference.native_kernels import train_attention
+
+    inputs = attn_inputs()
+    ref = NATIVE_OPS["train_attention"].reference(inputs)
+    out = train_attention(inputs).astype(np.float64)
+    assert np.max(np.abs(out - ref)) < 1e-5
+
+
+def test_the_causal_mask_is_a_mask_and_not_a_decoration():
+    """The fault a training attention kernel must never ship: a position that
+    reads the future. Changing a key that position i is not allowed to see
+    must leave row i bit-identical."""
+    inputs = attn_inputs()
+    before = NATIVE_OPS["train_attention"].reference(inputs)
+    moved = {name: arr.copy() for name, arr in inputs.items()}
+    moved["k"][:, :, -1, :] += 5.0          # the last key, visible only to the last row
+    moved["v"][:, :, -1, :] += 5.0
+    after = NATIVE_OPS["train_attention"].reference(moved)
+    assert np.array_equal(before[..., :-1, :], after[..., :-1, :])
+    assert not np.array_equal(before[..., -1, :], after[..., -1, :])
+
+
+def test_attn_lse_reference_matches_a_direct_log_sum_exp():
+    """The row statistic the forward hands its backward, checked against the
+    definition rather than against the shifted form that computes it."""
+    from kernelverify.schemas.native_ops import _attn_scores, attn_lse_reference
+
+    inputs = attn_inputs()
+    scores = _attn_scores(inputs, np.float64)
+    with np.errstate(divide="ignore"):
+        direct = np.log(np.sum(np.exp(scores), axis=-1))   # safe: fp64, rms ~ 1
+    assert np.max(np.abs(attn_lse_reference(inputs) - direct)) < 1e-12
+
+
+def test_attn_grad_reference_matches_central_differences():
+    """The analytic vjp checked against something that knows nothing about it.
+
+    Amendment 19 clause 79 makes this reference the oracle for a rewrite-class
+    backward, so it carries the whole gradient claim: there is no stock
+    attention backward in MLX to fall back on.
+    """
+    from kernelverify.schemas.native_ops import attn_grad_reference, attn_reference
+
+    inputs = attn_inputs(b=1, hkv=2, g=2, t=5, dh=4, dtype=np.float64)
+    grads = attn_grad_reference(inputs)
+
+    def loss(name, value):
+        moved = dict(inputs)
+        moved[name] = value
+        return float(np.sum(attn_reference(moved) * inputs["d_out"]))
+
+    eps = 1e-6
+    for name in ("q", "k", "v"):
+        numeric = np.zeros_like(inputs[name])
+        walk = np.nditer(inputs[name], flags=["multi_index"])
+        while not walk.finished:
+            index = walk.multi_index
+            plus, minus = inputs[name].copy(), inputs[name].copy()
+            plus[index] += eps
+            minus[index] -= eps
+            numeric[index] = (loss(name, plus) - loss(name, minus)) / (2 * eps)
+            walk.iternext()
+        analytic = grads["d" + name]
+        scale = max(1e-12, float(np.max(np.abs(numeric))))
+        assert np.max(np.abs(numeric - analytic)) / scale < 1e-6, name
+
+
+def test_the_group_sum_in_dk_and_dv_is_not_optional():
+    """Four query heads share one key-value head, so that head's gradient is
+    the sum of four. A kernel that writes one group member's contribution is
+    correct at a group ratio of one and wrong at four, which is why the ratio
+    is a battery dimension and why this is pinned here."""
+    from kernelverify.schemas.native_ops import attn_grad_reference
+
+    inputs = attn_inputs(g=4)
+    full = attn_grad_reference(inputs)
+    one_member = attn_grad_reference({**inputs,
+                                      "q": inputs["q"][:, :, :1],
+                                      "d_out": inputs["d_out"][:, :, :1]})
+    for name in ("dk", "dv"):
+        assert full[name].shape == inputs["k"].shape
+        gap = np.max(np.abs(full[name] - one_member[name]))
+        assert gap > 1e-2 * np.max(np.abs(full[name]))
+
+
+@requires_metal
+def test_attn_reference_cross_checked_against_mlx_fused_attention():
+    """The fused primitive is the independent implementation: it is Apple's
+    code, it takes the grouped heads flat, and it applies the causal mask
+    itself from the same string mlx-lm's training path passes."""
+    mx = pytest.importorskip("mlx.core")
+
+    inputs = attn_inputs(b=2, hkv=2, g=4, t=17, dh=64)
+    b, hkv, g, t, dh = inputs["q"].shape
+    ref = NATIVE_OPS["train_attention"].reference(inputs)
+    fused = mx.fast.scaled_dot_product_attention(
+        mx.array(inputs["q"].reshape(b, hkv * g, t, dh)),
+        mx.array(inputs["k"]), mx.array(inputs["v"]),
+        scale=1.0 / np.sqrt(dh), mask="causal")
+    mx.eval(fused)
+    got = np.array(fused).astype(np.float64).reshape(b, hkv, g, t, dh)
+    assert np.max(np.abs(got - ref)) < 1e-4
+
+
+@requires_metal
+def test_attn_grad_reference_cross_checked_against_mlx_autograd():
+    """MLX's own vjp through a composed attention, which is exactly what stock
+    training runs, against the analytic gradients this project ships."""
+    mx = pytest.importorskip("mlx.core")
+    from kernelverify.schemas.native_ops import attn_grad_reference
+
+    inputs = attn_inputs(b=1, hkv=2, g=4, t=13, dh=32)
+    _b, _hkv, _g, t, dh = inputs["q"].shape
+    allowed = mx.array(np.tril(np.ones((t, t), dtype=bool)))
+
+    def composed(q, k, v):
+        scores = (q @ mx.swapaxes(k[:, :, None], -1, -2)) * (1.0 / np.sqrt(dh))
+        scores = mx.where(allowed, scores, mx.array(-float("inf"), scores.dtype))
+        return mx.softmax(scores, axis=-1) @ v[:, :, None]
+
+    primals = [mx.array(inputs[name]) for name in ("q", "k", "v")]
+    _out, vjps = mx.vjp(composed, primals, [mx.array(inputs["d_out"])])
+    mx.eval(vjps)
+
+    analytic = attn_grad_reference(inputs)
+    for name, got in zip(("dq", "dk", "dv"), vjps):
+        theirs = np.array(got).astype(np.float64)
+        assert theirs.shape == analytic[name].shape, name
+        scale = max(1e-12, float(np.max(np.abs(analytic[name]))))
+        assert np.max(np.abs(theirs - analytic[name])) / scale < 1e-5, name
