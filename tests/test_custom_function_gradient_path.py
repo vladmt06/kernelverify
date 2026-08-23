@@ -24,6 +24,12 @@ the product, and this is where that would show up.
 The kernel here is a deliberately naive matmul. It is not fast and is not
 meant to be; it exists because a matmul's vjp is the real gradient shape
 (one matmul per primal) rather than an elementwise special case.
+
+The second half of this file pins a second mechanism, added when the sprint's
+operation became attention: a `custom_function` that returns TWO outputs, so
+a flash-style forward can hand its row statistic to its own backward instead
+of paying for a second pass to rebuild it. Same three compositions, because
+the door is worthless if it dies under any of them.
 """
 
 import mlx.core as mx
@@ -186,5 +192,165 @@ def test_the_whole_trainer_composition_reaches_our_vjp(operands):
     finally:
         type(ours).__call__ = original
 
+    assert abs(float(value) - float(ref_value)) < 1e-3
+    assert float(mx.max(mx.abs(grad["w"] - ref_grad["w"]))) < 1e-3
+
+
+# ---------------------------------------------------------------------------
+# The two-output door the attention kernel needs
+#
+# A flash-style attention forward computes the row statistic that normalises
+# the softmax (the logsumexp, L) on its way through the key loop, and its
+# backward needs that same L to rebuild the probabilities without a second
+# pass over the scores. Recomputing L in the backward costs a whole extra
+# forward, so the design returns it as a SECOND OUTPUT and reads it back in
+# the vjp, which is only possible if three things hold in MLX: a
+# `custom_function` may return a tuple, its vjp receives the outputs, and the
+# cotangent for an output nothing downstream consumes arrives as zeros rather
+# than as a refusal.
+#
+# The toy below is that arrangement at a shape a test can check: scores from
+# one matmul, L their row logsumexp, O the softmax, and a backward that
+# recomputes the scores and normalises them with the SAVED L. Same three
+# compositions as above, because a mechanism that works alone and dies under
+# `mx.compile` would take the kernel with it.
+# ---------------------------------------------------------------------------
+_VJP_LOG: dict = {}
+
+
+@mx.custom_function
+def _softmax_pair(a, b):
+    scores = a @ b
+    lse = mx.logsumexp(scores, axis=-1)
+    return mx.exp(scores - lse[:, None]), lse
+
+
+@_softmax_pair.vjp
+def _(primals, cotangents, outputs):
+    a, b = primals
+    d_out, d_lse = cotangents
+    _out, lse = outputs
+    _VJP_LOG.update(cotangent_count=len(cotangents), output_count=len(outputs),
+                    d_lse_magnitude=float(mx.sum(mx.abs(d_lse))),
+                    lse_shape=tuple(lse.shape))
+    probs = mx.exp((a @ b) - lse[:, None])
+    d_scores = probs * (d_out - mx.sum(d_out * probs, axis=-1, keepdims=True))
+    return d_scores @ b.T, a.T @ d_scores
+
+
+def _door(a, b):
+    """What the seam installs: two outputs in, one out. The row statistic
+    exists for the backward alone and never leaves this function."""
+    out, _lse = _softmax_pair(a, b)
+    return out
+
+
+def _stock_softmax(a, b):
+    return mx.softmax(a @ b, axis=-1)
+
+
+def _weighted_sum(fn, b):
+    """A loss that weights the columns, so an incorrect backward cannot pass
+    by symmetry the way `sum` alone would."""
+    return lambda x: mx.sum(fn(x, b) * mx.arange(b.shape[1], dtype=mx.float32))
+
+
+@requires_metal
+def test_the_two_output_forward_is_the_softmax_it_claims_to_be(operands):
+    a, b = operands
+    assert float(mx.max(mx.abs(_door(a, b) - _stock_softmax(a, b)))) < 1e-5
+
+
+@requires_metal
+def test_the_vjp_receives_both_outputs_so_the_row_statistic_is_free(operands):
+    """The mechanism the whole design rests on: L is computed once in the
+    forward and read back in the backward, rather than recomputed there."""
+    a, b = operands
+    _VJP_LOG.clear()
+    ours = mx.grad(_weighted_sum(_door, b))(a)
+    stock = mx.grad(_weighted_sum(_stock_softmax, b))(a)
+    mx.eval(ours, stock)
+    assert _VJP_LOG["output_count"] == 2
+    assert _VJP_LOG["lse_shape"] == (a.shape[0],)
+    assert float(mx.max(mx.abs(ours - stock))) < 1e-4
+
+
+@requires_metal
+def test_the_unused_second_output_arrives_as_a_zero_cotangent(operands):
+    """Nothing downstream consumes L, and MLX answers that with zeros rather
+    than an error. A future MLX that refused instead would break the door, so
+    the fact is pinned rather than assumed."""
+    a, b = operands
+    _VJP_LOG.clear()
+    mx.eval(mx.grad(_weighted_sum(_door, b))(a))
+    assert _VJP_LOG["cotangent_count"] == 2
+    assert _VJP_LOG["d_lse_magnitude"] == 0.0
+
+
+@requires_metal
+def test_the_two_output_door_survives_compile(operands):
+    a, b = operands
+    ours = mx.compile(mx.grad(_weighted_sum(_door, b)))(a)
+    stock = mx.grad(_weighted_sum(_stock_softmax, b))(a)
+    mx.eval(ours, stock)
+    assert float(mx.max(mx.abs(ours - stock))) < 1e-4
+
+
+@requires_metal
+def test_the_two_output_door_survives_checkpointing(operands):
+    """Checkpointing re-executes the forward during the backward, which is
+    also what keeps L from being held across all 36 layers at once: it is
+    rebuilt for the one layer being differentiated and dropped again."""
+    a, b = operands
+    ours = mx.grad(mx.checkpoint(_weighted_sum(_door, b)))(a)
+    stock = mx.grad(_weighted_sum(_stock_softmax, b))(a)
+    mx.eval(ours, stock)
+    assert float(mx.max(mx.abs(ours - stock))) < 1e-4
+
+
+class _OursPair(nn.Module):
+    def __init__(self, weight):
+        super().__init__()
+        self.w = weight
+
+    def __call__(self, x):
+        return _door(x, self.w)
+
+
+class _StockSoftmax(nn.Module):
+    def __init__(self, weight):
+        super().__init__()
+        self.w = weight
+
+    def __call__(self, x):
+        return _stock_softmax(x, self.w)
+
+
+@requires_metal
+def test_the_whole_trainer_composition_reaches_the_two_output_vjp(operands):
+    """The arrangement the attention kernel will actually live in: two
+    outputs, inside a module, checkpointed at the type, under
+    `nn.value_and_grad`, inside a compiled step."""
+    a, b = operands
+    ours, stock = _OursPair(b), _StockSoftmax(b)
+    columns = mx.arange(b.shape[1], dtype=mx.float32)
+    _VJP_LOG.clear()
+    original = _checkpoint_the_type(ours)
+    try:
+        value_and_grad = nn.value_and_grad(
+            ours, lambda m, x: mx.sum(m(x) * columns))
+
+        @mx.compile
+        def step(x):
+            return value_and_grad(ours, x)
+
+        value, grad = step(a)
+        ref_value, ref_grad = nn.value_and_grad(
+            stock, lambda m, x: mx.sum(m(x) * columns))(stock, a)
+        mx.eval(value, grad, ref_value, ref_grad)
+    finally:
+        type(ours).__call__ = original
+
+    assert _VJP_LOG["output_count"] == 2
     assert abs(float(value) - float(ref_value)) < 1e-3
     assert float(mx.max(mx.abs(grad["w"] - ref_grad["w"]))) < 1e-3
