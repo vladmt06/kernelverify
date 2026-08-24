@@ -3447,3 +3447,168 @@ Nothing here licenses a tolerance chosen after a result is seen: the reference, 
 | Amendments 5 through 18, the calibration machinery | UNCHANGED as text and INAPPLICABLE to this sprint. The lane they govern is dropped, their code is kept, and no reading in clause 77 is derived from any of them |
 | Every price, schedule, rate and demand in this document | UNCHANGED. Nothing in this amendment is a timing calibration |
 | An uncommitted draft numbered Amendment 19, dated 2026-08-22 | NOT PART of this document. It carries clauses 77 to 79 governing the dropped calibration lane's memory arithmetic, it was never committed, and this amendment reuses its numbers because committed text ends at Amendment 18 |
+
+## Amendment 20, 2026-08-24: clause 77's baseline was a rewrite of MLX's decomposition, and attention's share is a tenth of the step rather than a quarter
+
+Clause 77 said in its own body that its shares were estimates rather than measurements, and that a reader could discount them without touching its conclusion.
+Both halves of that sentence have now been measured.
+The first half was too kind to itself: the baseline the shares and the ratios were both taken against was not the path a training step runs, and correcting it moves the ratios by up to a factor of 1.89.
+The second half is false: the measured share does touch the conclusion, because it decides whether the operation can reach section 4.3's shipping floor at all.
+
+Three clauses follow.
+Clause 80 withdraws the composed baseline and registers how one has to be obtained.
+Clause 81 replaces clause 77's estimated share with an ablated one and states what the registered formula gives at it.
+Clause 82 withdraws one sentence of clause 78 that describes a record the certificate does not carry.
+
+Every arithmetic result below was reproduced by execution on 2026-08-24, on the same machine, on the same pinned Qwen3-4B artifact, and through the same interleaved sampler every pack certificate in this repository is measured under, before it was written here.
+
+### Clause 80. The composed baseline is MLX's own graph, and clause 77's ratios against a hand-written one are withdrawn
+
+Stock's training attention is the decomposition MLX falls back to inside a gradient trace, which clause 77 established by reading the graph.
+What clause 77 then timed as "composed" was not that graph.
+It was a hand-written program of the same mathematics, and it differs from MLX's own in two places.
+
+| | MLX's own decomposition | what was timed |
+|---|---|---|
+| Where the scale lands | on the QUERIES, before the matmul | on the SCORES, after the matmul |
+| How the softmax reaches fp32 | `mx.softmax(..., precise=True)`, which upcasts inside its own kernel | an explicit fp32 copy of the whole score matrix, and a cast back |
+
+The second difference is the expensive one: the score matrix is the largest tensor in the operation, and materialising it twice more is two extra passes over `B * heads * T * T` elements.
+
+**Measured, both arms in one set of interleaved rounds at bfloat16.**
+
+| Cell | MLX's own | the hand-written one | hand-written / MLX's own |
+|---|---|---|---|
+| batch 4, width 65 | 0.358 ms | 0.397 ms | 1.11 |
+| batch 2, width 1057 | 11.379 ms | 21.522 ms | 1.89 |
+
+**No value check could have caught it, and this is the reason the fault survived a gate that runs one.**
+The two arms agree to a maximum absolute difference of 1.562e-02 at both cells, against a reference peak of 3.953.
+`arms_agree` admits a difference up to 5e-3 of the reference arm's peak, which is 1.98e-02 here, so it correctly reports that the two arms compute the same thing.
+A fairness check on a timing comparison bounds VALUE, and two programs of the same mathematics can agree in value while one of them does twice the work.
+
+**Registered: the arm a pack gate times as the stock path is obtained from MLX's own graph and is never hand-written.**
+For an operation MLX decomposes inside a gradient trace, that means the value of `mx.vjp` of the stock call, which is by construction the graph the trace builds.
+Where a gate also wants to state what that graph IS, it writes the decomposition out separately and pins it by bit-equality against the graph, so a future MLX that changes its decomposition fails a test instead of silently moving a published ratio.
+
+**Withdrawn: clause 77's composed column and its composed/fused column, at all three cells.**
+Replaced by the same three cells measured against MLX's own graph, at bfloat16, eleven rounds, with the fused arm as the canary.
+
+| B | T | fused, median | composed, median | credited ratio | canary spread |
+|---|---|---|---|---|---|
+| 4 | 65 | 0.107 ms | 0.276 ms | WITHHELD | 1.933 |
+| 2 | 1057 | 3.899 ms | 11.416 ms | 2.87 | 1.008 |
+| 1 | 2048 | 6.729 ms | 19.903 ms | 2.92 | 1.009 |
+
+The credited ratio is `ratio_lo`, smallest numerator over largest denominator, which is what every pricing verdict in this repository is computed with and is why it sits below the two medians' quotient of 2.93 and 2.96.
+The short cell is withheld by this repository's own rule, because the reference arm's spread of 1.933 is over the 1.5 the sampler permits, so its clock moved under the cell.
+The A5 gate's own canary-clean run of the same cell credits it at 2.29, on medians of 0.234 ms composed and 0.095 fused.
+
+**One reading in the withdrawn table is confirmed rather than moved, and it is the one that identifies what went wrong.**
+Clause 77's fused column at batch 1, width 2048 reads 6.729 ms and this measurement reads 6.729 ms.
+The two arrangements therefore agree on the arm they share to the last digit reported, and disagree by a factor of 2.25 on the arm they do not, which is what says the composed column is the hand-written program rather than a difference in how either was timed.
+
+**What this does to the gate that was measured against the old baseline.**
+The training-attention forward's credited ratio at the long band is 1.58 where it was published as 3.02, and at the short band 0.86 where it was published as 1.03.
+The short band already routes to stock under ruling F10, which registered that outcome before this correction and for a different reason, so nothing about its routing moves.
+
+### Clause 81. Attention's share of the step is measured by ablation, and it is a tenth rather than a quarter
+
+Clause 77 wrote:
+
+> At the long band attention forward alone is roughly a quarter of the step, and at a conservative region ratio of 3 the formula gives 1.20.
+
+**That sentence is WITHDRAWN, in both of its halves.**
+The quarter was an estimate built from region timings divided by a step time, and the region timings were the hand-written arm of clause 80.
+The 1.20 follows from it and falls with it.
+
+**What replaces it is the definition section 3's own arithmetic forces, measured with no instrument inside the step.**
+Amendment 5's clause 1 and the probe record already establish that `f := (T_stock - T_ablated)/T_stock` is the unique share under which the registered formula's own extreme case is a measured fact: at `r` infinite the formula says `T = T_stock * (1 - f)`, which is a plain uninstrumented step with the operation's cost driven to zero.
+The stand-in has attention's output shape and keeps the key and value tensors alive through a reduction multiplied by zero, so a lazy graph cannot drop their projections and charge them to attention.
+
+**Measured on the real Qwen3-4B 4-bit artifact, batch 2, width 1057, 16 adapted layers, three timed steps after a warm-up.**
+
+| Arrangement | stock step | ablated step | f (min) | f (median) |
+|---|---|---|---|---|
+| as the trainer runs it | 7544.8 ms | 6743.0 ms | 0.1063 | 0.1051 |
+| the same, an earlier run | 7637.6 ms | 6815.6 ms | 0.1076 | 0.1076 |
+| gradient checkpointing installed | 9121.9 ms | 8132.2 ms | 0.1085 | 0.1072 |
+
+**Registered: attention's share of the training step at the long registered band is 0.105 to 0.108, and checkpointing does not move it.**
+The third row exists because checkpointing recomputes the forward and could have raised attention's share by running it twice; it does not, within the spread of the other two.
+
+**What the registered formula gives at that share, computed at f = 0.1063.**
+
+| Region ratio `r` | Gain |
+|---|---|
+| 1.128, the forward swapped and the backward left composed | 1.012 |
+| 1.58, both halves at the forward's own measured ratio | 1.041 |
+| 3 | 1.076 |
+| 5 | 1.093 |
+| infinite, attention free | 1.119 |
+
+**The ceiling is 1.119 and R10's floor is 1.10, so the floor is reachable only at `r >= 6.9`.**
+At f = 0.1051 it needs 7.41 and at 0.1076 it needs 6.45, so the requirement is between six and eight whichever of the three measurements is taken.
+The region it applies to is 37.611 ms at the long band, of which the forward is 11.347 and the backward 26.264, so `r = 6.9` means the whole attention region running in 5.45 ms.
+MLX's own FUSED forward, which is the fastest attention forward on this machine and is in contract, costs 3.914 ms at that cell, and MLX implements no fused backward at all.
+So the requirement is 1.53 ms for a backward whose own forward costs 3.914 ms and which does more arithmetic than that forward does.
+
+**R18's 30 to 50 percent design target is unreachable at this share for a different and stronger reason.**
+`gain = 1/(1 - f*(1 - 1/r))` is bounded above by `1/(1 - f)` for every `r`, so a gain of 1.30 requires `f >= 1 - 1/1.30 = 0.2308`.
+The measured share is less than half of that, so no attention kernel at any speed, including one that takes zero time, reaches 1.30 end to end at this band.
+
+**What this clause does NOT do.**
+It does not re-select the operation, void the gate, or change what the kernel is.
+Section 4's selection rule was never executed and clause 77 records that; this clause replaces one estimated input to an arithmetic that was already recorded as resting on estimates, and states what the arithmetic gives.
+Re-scoping the sprint against that arithmetic is a ruling, every previous scope ruling in this document was taken by the coordinator before the work it governs, and this amendment does not take it.
+
+**Clause 77's memory finding survives, at half its stated size, and it is the same mistake as clause 80's.**
+That the composed path materialises a `B x heads x T x T` score matrix is a property of the graph rather than of how it was timed, and it stands.
+Its size does not: clause 77 states 286.0 MB per layer at batch 2, width 1057, which is that matrix in float32, and MLX's own decomposition never builds one in float32.
+It holds the scores at the storage type and upcasts inside the softmax kernel, which is exactly the second row of clause 80's table, so the same wrong assumption inflated the time and the footprint together.
+
+| Quantity, one layer at batch 2, width 1057 | Measured |
+|---|---|
+| the score matrix at bfloat16, which is what MLX builds | 136.4 MiB, 143.0 MB |
+| the score matrix at float32, which is what clause 77 counted | 272.8 MiB, 286.0 MB |
+| peak of MLX's own decomposed forward | 195.3 MiB |
+| peak of that forward and its gradients together | 561.2 MiB |
+
+**Registered: clause 77's 286.0 MB per layer is WITHDRAWN and replaced by 143.0 MB.**
+A kernel that never builds the score matrix still does not pay it, and the peak of the whole arrangement, 561.2 MiB for one layer, is what a 16 GB machine sees; the direction of R4's and R6's argument is unchanged and its magnitude is halved.
+None of this is part of the gain arithmetic above.
+
+### Clause 82. Clause 78's certificate sentence is withdrawn, and the verification class is recorded where the schema can carry it
+
+Clause 78 wrote:
+
+> It is recorded in the certificate beside the forward and backward source hashes the certificate already binds, so a reader can tell which of the two rules verified which kernel.
+
+**That sentence is WITHDRAWN.**
+`kernelverify/report/certificate.py::Certificate` binds ONE `translation_unit`, whose sha256 is the single source hash in `byte_bound`, and it has no field naming a verification class.
+The sentence therefore describes two records the certificate does not carry, and a reader following it would find neither.
+
+**Registered: the verification class is a required key of the certificate's `domain` mapping, under the name `verification_class`, taking the value `retune` or `rewrite`.**
+`domain` is the existing free-form validity block, rendered under `validity()`, so this needs no schema change and no new field.
+The class is still READ off the kernel's registered vjp exactly as clause 78 says, and is recorded rather than chosen.
+
+**Registered: where a kept kernel's forward and backward are separate sources, it emits one certificate per source, each carrying the same `verification_class`.**
+This follows from the schema rather than being a preference: `translation_unit` is the exact source that was verified, and a backward verified against gradient references on its own cases is a second verification of a second source.
+Clause 78's substance is unchanged by either registration: which rule verified which kernel is still recoverable from the committed evidence, and it is now recoverable from a field that exists.
+
+### Ledger: what Amendment 20 does to committed text
+
+| Clause | What happens to it |
+|---|---|
+| Clause 77's composed column and composed/fused column | WITHDRAWN at all three cells by clause 80, and replaced by the same cells measured against MLX's own graph, with the short cell withheld by the canary |
+| Clause 77's fused column | UNCHANGED and CONFIRMED. The batch 1, width 2048 reading reproduces to the last digit reported |
+| Clause 77's "roughly a quarter of the step" and the 1.20 that follows from it | WITHDRAWN by clause 81 and replaced by an ablated 0.105 to 0.108 |
+| Clause 77's conclusion that candidate Q cannot reach the shipping floor | UNCHANGED. It rests on Q's own measured floor of 1.051, which no correction here touches |
+| Clause 77's memory finding | HALVED by clause 81. The score matrix is real and MLX holds it at the storage type, so 286.0 MB per layer is withdrawn and replaced by 143.0 MB; the conclusion it supports is unchanged |
+| Clause 77's own caveat that its shares are estimates a reader may discount | SUPERSEDED. The share is now measured, and the sentence that a reader may discount it without touching the conclusion is withdrawn with it, because the measured share decides whether section 4.3's floor is reachable |
+| Clause 78's sentence about the certificate's records | WITHDRAWN by clause 82, and replaced by a registration naming a field that exists |
+| The rest of clause 78, and all of clause 79 | UNCHANGED. The retune and rewrite classes, how the class is read, the analytic fp64 gradient reference, the ensemble floor, the borrowed K and the loss-curve gate all stand |
+| Section 4.3's shipping floor of 1.10, and R10 | UNCHANGED as a rule. Clause 81 states what the measured share requires of `r` to reach it and takes no ruling |
+| R18's 30 to 50 percent design target | UNCHANGED as a target. Clause 81 records that it is unreachable by this operation alone at this share, for every `r` |
+| Section 6's funnel, rule V1, and every tolerance | UNCHANGED. Nothing here is a correctness rule, and no verdict in this document moves |
+| Every price, schedule, rate and demand in this document | UNCHANGED. Nothing in this amendment is a timing calibration |
