@@ -31,7 +31,7 @@ Vlad's global instructions still apply; this file adds the project's layout, how
 - `kernelverify/schemas/native_ops.py` - the native operator registry: per-operator schema, fp64 reference, tolerance and augmentation, so native operators run through the same battery machinery as the corpus ports.
   Its standing rule is that every native reference is cross-checked in tests against an independent implementation, MLX's own where one exists.
 - `kernelverify/pack/` - the hand-written Metal kernels and the dispatch decision in front of them.
-  Three are decode-shaped and one is a training kernel.
+  Five modules dispatch through `mx.fast.metal_kernel`: `wide_qmv.py`, `kv_attention.py` and `moe_dispatch.py` are decode-shaped, and `train_attention.py` and `train_qmm.py` are training kernels.
   Only `wide_qmv.py` is live for decode, and its routing table starts at M = 5, so it routes nothing at batch 1.
   `kv_attention.py` is demoted: the end-to-end A/B in `docs/research/2026-08-15-mlx-e2e-findings.md` measured it losing 1-2% of decode tokens/s at every cell and recommended against shipping it.
   `moe_dispatch.py` is unused on the target model: the Qwen3-4B geometry recorded in `bench/calibrate_quant_serving.py` is dense (`model_type` qwen3, seven per-layer projections, no experts).
