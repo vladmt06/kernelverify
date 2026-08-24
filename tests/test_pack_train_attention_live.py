@@ -169,8 +169,10 @@ def test_a_key_a_row_may_not_see_cannot_change_that_row():
 ))
 def test_a_knob_setting_changes_the_schedule_and_not_the_answer(knobs):
     """The whole premise of tuning: these settings rescale the running maximum
-    at different points and stage different amounts, and every one of them must
-    land on the same answer."""
+    at different points, hold different numbers of score fragments at once, and
+    dispatch different numbers of threads, and every one of them must land on
+    the same answer. What they do NOT differ in is threadgroup memory, because
+    this kernel stages nothing at all."""
     mx = pytest.importorskip("mlx.core")
     q, k, v = _operands(mx, 1, 4, 2, 129, 128, mx.float16)
     out, _lse = _forward(mx, q, k, v, knobs)
@@ -288,3 +290,32 @@ def test_the_door_survives_compile_and_a_width_that_changes_under_it():
         assert out.shape == (1, 8, t_len, ta.HEAD_DIM)
         verdict = _verdict(mx, q, k, v, out, mx.bfloat16)
         assert verdict.ok, f"width {t_len}: {verdict}"
+
+
+@requires_metal
+@pytest.mark.parametrize("n_q,n_kv,t_len", [(8, 2, 65), (8, 2, 129),
+                                            (32, 8, 257)])
+def test_the_timed_composed_arm_is_mlxs_own_decomposition(n_q, n_kv, t_len):
+    """The gate's baseline is what a training step runs, not a rewrite of it.
+
+    `composed_arm` asks MLX for the vjp of the seam's own call and keeps the
+    value, so the arm IS the graph a gradient trace builds. This test says what
+    that graph is by writing it out independently and demanding bit-equality:
+    the scale lands on the QUERIES before the matmul, and the softmax upcasts
+    inside its own kernel rather than through a materialised fp32 copy of the
+    scores. A hand-written arm that got either detail wrong ran 1.9x slower
+    while agreeing in value to 1.6e-2, so no value check could catch it and the
+    ratio the gate published was inflated instead.
+    """
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bench"))
+    import pack_train_attention as bench
+
+    mx = pytest.importorskip("mlx.core")
+    q, k, v = _operands(mx, 1, n_q, n_kv, t_len, ta.HEAD_DIM, mx.bfloat16)
+    timed = bench.composed_arm(q, k, v)
+    written_out = bench.precise_decomposition(q, k, v)
+    mx.eval(timed, written_out)
+    assert timed.shape == q.shape
+    assert mx.array_equal(timed, written_out)

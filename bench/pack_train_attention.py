@@ -248,16 +248,45 @@ def verify(space) -> GateEvidence:
     return evidence
 
 
+def fused_call(q, k, v):
+    """The seam's own call, which fuses outside a trace and decomposes inside."""
+    return mx.fast.scaled_dot_product_attention(q, k, v, scale=ta.SCALE,
+                                                mask="causal")
+
+
 def composed_arm(q, k, v):
-    """What a training step actually runs at every layer: the decomposition MLX
-    falls back to inside a gradient trace."""
+    """What a training step actually runs at every layer.
+
+    Built by asking MLX for the vjp of the seam's own call and keeping the
+    VALUE, rather than by hand-writing the decomposition. That is not a
+    stylistic choice: a hand-written version drifted from MLX's own by 1.9x at
+    the long cell, because MLX scales the QUERIES before the matmul and uses a
+    softmax that upcasts inside its own kernel, while the hand-written one
+    scaled the scores afterwards and materialised the whole score matrix at
+    fp32 and back. The two agree in VALUE to 1.6e-2, so `arms_agree` could not
+    see the difference, and the ratio the gate published was inflated by the
+    two extra passes. Asking MLX for its own graph cannot drift.
+    """
+    value, _grads = mx.vjp(fused_call, [q, k, v], [mx.zeros_like(q)])
+    return value[0]
+
+
+def precise_decomposition(q, k, v):
+    """MLX's decomposition written out, for the test that pins what it is.
+
+    Bit-identical to `composed_arm` on this MLX, which is the check that says
+    the reconstruction above is the real one: scale on the queries, causal
+    mask, and `mx.softmax(..., precise=True)`, which upcasts inside the kernel
+    instead of materialising an fp32 copy of the scores.
+    """
     batch, n_q_heads, t_len, head_dim = q.shape
     n_kv = k.shape[1]
-    grouped = q.reshape(batch, n_kv, n_q_heads // n_kv, t_len, head_dim)
-    scores = (grouped @ mx.swapaxes(k[:, :, None], -1, -2)) * ta.SCALE
+    grouped = (q * ta.SCALE).reshape(batch, n_kv, n_q_heads // n_kv, t_len,
+                                     head_dim)
+    scores = grouped @ mx.swapaxes(k[:, :, None], -1, -2)
     allowed = mx.tril(mx.ones((t_len, t_len), dtype=mx.bool_))
     scores = mx.where(allowed, scores, mx.array(-float("inf"), scores.dtype))
-    probs = mx.softmax(scores.astype(mx.float32), axis=-1).astype(q.dtype)
+    probs = mx.softmax(scores, axis=-1, precise=True)
     return (probs @ v[:, :, None]).reshape(batch, n_q_heads, t_len, head_dim)
 
 
@@ -281,8 +310,7 @@ def bench(space) -> bool:
 
         builders = {
             "composed": lambda i: composed_arm(q, k, v),
-            "fused": lambda i: mx.fast.scaled_dot_product_attention(
-                q, k, v, scale=ta.SCALE, mask="causal"),
+            "fused": lambda i: fused_call(q, k, v),
         }
         kernels = {}
         for knobs in space.launchable:
