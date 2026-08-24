@@ -436,6 +436,47 @@ a pre-registration amendment written after the measurement it registers. The
 open list is in `docs/PLAN.md` under "Open bugs", with the full reports in
 `docs/plans/2026-08-24-codex-review-findings.md`.
 
+### Git discipline in this repo
+
+This repo runs several lanes at once, in separate worktrees, so these are not style preferences.
+
+- Never commit on `main` or whatever the default branch is.
+  Branch first, then the rest of these apply.
+- Commit freely on a lane branch once the work is green and coherent, and say what landed and how to undo it.
+  Nothing has entered shared history at that point, so an unwanted commit costs one `git reset --soft HEAD~1`.
+  Do not sit on finished, tested work: with several lanes live, the commit IS the handoff unit, and a peer cannot review, rebase or reconcile what is not a commit.
+- Do NOT commit when the tests are red mid-refactor and the commit would poison a bisect, when the diff carries credentials or generated artifacts, when it touches files another lane owns, or when someone is reading the working tree.
+- Ask before anything that leaves the branch: push, merge, force-push, or rebasing commits that are already published.
+  Ask before discarding a dirty tree too, so `reset --hard`, `clean`, and any checkout that would throw work away.
+- NEVER `git add -A` or `git add .`.
+  Name every staged file.
+  This is a scar, not a preference: `add -A` once swept about 5000 lines of unrelated artifacts into one commit here.
+- Every merge runs `/code-review` on the merge diff before it concludes.
+- Never add AI co-author attribution to a commit message, in any form.
+
+### Engineering rules that bind work here
+
+- Start every bug fix by REPRODUCING the bug end to end, as close to how a user would meet it as possible.
+  This repo's own history is the argument: a timing baseline that looked right in every test was wrong because nothing reproduced what a training step actually runs.
+- Do not touch unrelated code, but DO surface bad code or a design flaw you find, as a separate issue rather than a drive-by fix.
+- Do not over-engineer gates, guardrails and verification steps.
+  They belong where bad data or a bad output could derail a whole mechanism.
+  Everywhere else the principle is to fix the root cause rather than mask bad code behind a guard, which matters more here than in most repos, because this one's product IS its gates and a gate added to hide a fault is worse than no gate.
+- Flag uncertainty explicitly.
+  Confidence without certainty does more damage than admitting a gap.
+  Where it helps, run a small, low-risk, localised experiment and bring the hypothesis and the result back rather than arguing from expectation.
+- Give little weight to development cost when making a technical decision.
+  Development time and complexity are not much of a factor; prefer quality, simplicity, robustness, scalability and long-term maintainability.
+
+### Machine safety
+
+Every binding number in this repo comes off one machine, so a measurement taken on a busy one is worse than no measurement.
+
+- No GPU measurement window is armed without the owner's explicit go, run by run.
+- At most one armed detached job at a time; the disarm command is `launchctl bootout gui/$(id -u)/com.kernelverify.detached-<harness>`.
+- An armed run needs AC power and a quiet machine, and the runner already refuses a busy one.
+- Development smoke tests of a few seconds are fine at any time; anything minutes-long goes through the detached runner.
+
 ### Where the current state lives
 
 | Question | File |
