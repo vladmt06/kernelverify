@@ -41,6 +41,9 @@ CACHE_PATH = _REPO_ROOT / "bench" / ".cache" / "verdicts.pkl"
 def _oracle_member_labels() -> list:
     """Every ensemble member's identity, for the verdict-cache fingerprint."""
     from kernelverify.schemas.native_ops import (
+        ATTN_ENSEMBLE_VERSION,
+        ATTN_GRAD_MEMBERS,
+        ATTN_MEMBERS,
         KV_ENSEMBLE_VERSION,
         KV_MEMBERS,
         MOE_ENSEMBLE_VERSION,
@@ -68,6 +71,11 @@ def _oracle_member_labels() -> list:
     labels.append(f"moe-ensemble={MOE_ENSEMBLE_VERSION}")
     labels += sorted(KV_MEMBERS)
     labels.append(f"kv-ensemble={KV_ENSEMBLE_VERSION}")
+    # The training-attention operator carries TWO ensembles, one for the
+    # forward and one for the gradients, and both floor a shipped verdict.
+    labels += sorted(ATTN_MEMBERS)
+    labels += sorted(ATTN_GRAD_MEMBERS)
+    labels.append(f"attn-ensemble={ATTN_ENSEMBLE_VERSION}")
     return labels
 
 BUDGETS = (4, 8, 16, 32)

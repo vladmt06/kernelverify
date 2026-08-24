@@ -558,9 +558,13 @@ ATTN_MEMBERS = {
     "attn:reversed-keys": dict(order="reversed-keys"),
 }
 
-# Same discipline as KV_ENSEMBLE_VERSION: these members share `_attn_scores`
-# with the reference, so a change to the scoring moves every member at once
-# under four unchanged names, and only a version bump says so.
+# Same discipline as KV_ENSEMBLE_VERSION, and it is load-bearing in the same
+# place: these members share `_attn_scores` with the reference, so a change to
+# the scoring moves every member at once under four unchanged names, and only a
+# version bump says so. `kernelverify/battery/core.py::_oracle_member_labels`
+# reads it into the verdict-cache fingerprint, which is what makes a bump
+# rebuild the cached verdicts rather than leave them scored under the old
+# arithmetic.
 ATTN_ENSEMBLE_VERSION = "attn-ensemble-v1"
 
 
