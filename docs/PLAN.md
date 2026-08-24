@@ -1952,6 +1952,43 @@ becomes a later lever at the shapes where it wins rather than the headline.
 
 # THE ATTENTION INCREMENT (final plan, 2026-08-23; supersedes the Lane A tasks of the 5-day breakdown above)
 
+## Status, 2026-08-24: A1 to A5 are landed, and the claim they were built for does not hold
+
+Tasks A1 to A5 are complete and pushed. What they produced, and what measuring
+it honestly then cost, is recorded in three places that travel with this repo:
+
+| Record | Where |
+|---|---|
+| The pre-registered rules, including the withdrawals | `docs/research/2026-08-19-metalrunner-sprint1-prereg.md`, Amendments 19 and 20 |
+| Which tasks are done and which rulings were taken | `docs/plans/2026-08-24-sprint-ledger.md`, rulings F8 to F11 |
+| 67 findings from three parallel Codex reviews, NONE acted on yet | `docs/plans/2026-08-24-codex-review-findings.md` |
+
+Three things a reader has to know before executing anything below.
+
+**The forward kernel works and is verified.** It runs on the simdgroup matrix
+units, stages nothing, and clears its gate at the long band at 1.58x what a
+training step actually runs, with all 1740 verification cases green. An
+independent PyTorch float64 autograd pass reproduced its fp64 references to
+5.4e-15 across every grouped-query ratio.
+
+**The gate's numbers moved because its baseline was wrong.** What it timed as
+the stock path was a hand-written copy of MLX's decomposition that did two
+extra passes over the score matrix, so it was 1.89x slow and every ratio
+against it was inflated. Amendment 20 clause 80 withdraws the old figures:
+3.02x at the long band became 1.58x, and 1.03x at the short band became 0.86x,
+which routes that band to stock.
+
+**The operation cannot carry R10's floor, and this is arithmetic rather than
+engineering.** Attention is 0.1063 of a real 4B step at the long band, measured
+by ablation. The registered formula is bounded above by 1/(1-f) = 1.119 with
+attention taking zero time, so the 1.10 floor needs the whole attention region
+6.9x faster, which is 5.45 ms for a forward and a backward together when MLX's
+own fused forward alone costs 3.914 ms and MLX has no fused backward at all.
+R18's 1.30 is unreachable at any speed, since it would need a share of 0.2308.
+Re-scoping against that is a coordinator ruling and has not been taken, so
+tasks A6 onward below are written as they were and are NOT cleared to start.
+
+
 ## Context
 
 The pivot section above holds the evidence.
@@ -2021,14 +2058,14 @@ dK and dV sum over each GQA group's 4 query heads.
 
 ### Day 1
 
-- [ ] **A1. The prereg amendment, committed ALONE and FIRST.** One doc-only commit: 8.4 scoped to retune-class (train_qmm's tt-forward-stock-backward is the worked example); rewrite-class verified by fp64-analytic tolerance through the battery plus the existing loss-curve gate; the F6/F7 measurements recorded with their numbers and the statement that the amendment postdates them. No GPU.
-- [ ] **A2. The two-output custom_function spike.** Extend the tests/test_custom_function_gradient_path.py arrangement (value_and_grad + checkpoint + compile) with a toy two-output kernel BEFORE any Metal exists. GPU, minutes. If it fails, adopt plan B the same day and record it in the ledger.
-- [ ] **A3. Cell surface + references.** train_attention.py geometry/cell surface with CPU tests mirroring test_pack_train_qmm.py; native_ops.py gains "train_attention": attn_reference (fp64 causal GQA), attn_lse_reference, attn_grad_reference (the analytic math above), ensemble members (standard-softmax-fp32, online-softmax-fp32, reversed-keys-fp32; two orders for grads), attn_tolerance via floored_tolerance at borrowed K=1.5 with the kv_tolerance-style borrowed-K docstring, augment rescaling q and k so softmax is neither uniform nor saturated. Battery dims exercise GQA ratios 2, 4, 8 and T=65 as the edge-tile case. Cross-check tests: attn_reference vs mx.fast.sdpa outside a trace; attn_grad_reference vs mx.grad of composed fp32 MLX attention. GPU for cross-checks only.
-- [ ] **A4. ATTN_FWD_MSL at one hand-picked setting.** Flash-style online softmax, causal bound on the key loop, GQA by hq/4, K/V tiles staged as half (storage), every accumulator fp32 (lint C1 attested), out-of-range keys masked to -INF, out-of-range query rows store nothing, epilogue writes O and L. fp64 + sdpa parity at edges T in {1, 63, 64, 65, 127, 128, 1057} and both cells. GPU.
+- [x] **A1. The prereg amendment, committed ALONE and FIRST.** One doc-only commit: 8.4 scoped to retune-class (train_qmm's tt-forward-stock-backward is the worked example); rewrite-class verified by fp64-analytic tolerance through the battery plus the existing loss-curve gate; the F6/F7 measurements recorded with their numbers and the statement that the amendment postdates them. No GPU.
+- [x] **A2. The two-output custom_function spike.** Extend the tests/test_custom_function_gradient_path.py arrangement (value_and_grad + checkpoint + compile) with a toy two-output kernel BEFORE any Metal exists. GPU, minutes. If it fails, adopt plan B the same day and record it in the ledger.
+- [x] **A3. Cell surface + references.** train_attention.py geometry/cell surface with CPU tests mirroring test_pack_train_qmm.py; native_ops.py gains "train_attention": attn_reference (fp64 causal GQA), attn_lse_reference, attn_grad_reference (the analytic math above), ensemble members (standard-softmax-fp32, online-softmax-fp32, reversed-keys-fp32; two orders for grads), attn_tolerance via floored_tolerance at borrowed K=1.5 with the kv_tolerance-style borrowed-K docstring, augment rescaling q and k so softmax is neither uniform nor saturated. Battery dims exercise GQA ratios 2, 4, 8 and T=65 as the edge-tile case. Cross-check tests: attn_reference vs mx.fast.sdpa outside a trace; attn_grad_reference vs mx.grad of composed fp32 MLX attention. GPU for cross-checks only.
+- [x] **A4. ATTN_FWD_MSL at one hand-picked setting.** Flash-style online softmax, causal bound on the key loop, GQA by hq/4, K/V tiles staged as half (storage), every accumulator fp32 (lint C1 attested), out-of-range keys masked to -INF, out-of-range query rows store nothing, epilogue writes O and L. fp64 + sdpa parity at edges T in {1, 63, 64, 65, 127, 128, 1057} and both cells. GPU.
 
 ### Day 2
 
-- [ ] **A5. Forward knobs + pack gate.** The FWD knob triple through enumerate_knobs; bench/pack_train_attention.py forward half in pack_wide_qmv's verify-then-time order; interleaved arms {ours-fwd, sdpa-fwd, composed-fwd} at both cells, canary withholding. GATE: forward beats composed at both cells and is within striking distance of 4.5 ms at (2,1057). GPU.
+- [x] **A5. Forward knobs + pack gate.** The FWD knob triple through enumerate_knobs; bench/pack_train_attention.py forward half in pack_wide_qmv's verify-then-time order; interleaved arms {ours-fwd, sdpa-fwd, composed-fwd} at both cells, canary withholding. GATE: forward beats composed at both cells and is within striking distance of 4.5 ms at (2,1057). GPU.
 - [ ] **A6. verify_grads.** verify.py gains attn_inputs and verify_grads (dq, dk, dv each judged through the battery, same judge(), no gate states its own tolerance). CPU.
 - [ ] **F. Lane fixes + merge wave 1.** Apply Lane B's two written fixes in kv-anymac-mr; re-run the two re-reviews that died on the session limit; merge lane/anymac-timing then lane/anymac-metalrunner into lane/metalrunner-sprint1 with /code-review on each merge diff per the standing rule; retarget the tuner's lazy cell import from train_qmm shapes to the train_attention cell surface (the brief anticipated this with the injectable hardware seam). CPU.
 
