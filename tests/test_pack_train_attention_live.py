@@ -262,3 +262,29 @@ def test_the_shipped_geometry_is_judged_by_the_fp64_reference_too(dtype_name):
                                                _f32(mx, v)))
     got = group_heads(np.array(lse)[..., None], ta.N_KV_HEADS)[..., 0]
     assert np.max(np.abs(got - reference)) < 1e-4
+
+
+@requires_metal
+def test_the_door_survives_compile_and_a_width_that_changes_under_it():
+    """mlx-lm compiles its training step, and its width moves with the data.
+
+    The door reads the width off the query shape and hands it to the kernel as
+    a one-element input, so a compiled graph bakes in whatever width it traced.
+    MLX retraces when an input shape changes, which is what makes that safe;
+    this is the test that says so, because if it were not, a compiled step
+    would keep masking at the first batch's width for the whole run.
+    """
+    mx = pytest.importorskip("mlx.core")
+    kern = ta.build_fwd(mx, DEFAULT_KNOBS, ta.HEAD_DIM)
+
+    @mx.compile
+    def step(q, k, v):
+        return ta.run_fwd(mx, kern, DEFAULT_KNOBS, q, k, v)
+
+    for t_len in (65, 129, 65):
+        q, k, v = _operands(mx, 1, 8, 2, t_len, ta.HEAD_DIM, mx.bfloat16)
+        out, lse = step(q, k, v)
+        mx.eval(out, lse)
+        assert out.shape == (1, 8, t_len, ta.HEAD_DIM)
+        verdict = _verdict(mx, q, k, v, out, mx.bfloat16)
+        assert verdict.ok, f"width {t_len}: {verdict}"
