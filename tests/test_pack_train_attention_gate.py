@@ -39,6 +39,16 @@ def test_the_two_fills_differ_so_an_unwritten_cell_cannot_hide():
     assert pack_train_attention.FILL_A != pack_train_attention.FILL_B
 
 
+def test_the_gating_cell_is_one_of_the_timed_cells_and_is_the_long_one():
+    """The gate rules on the long band because attention's share of a step is
+    quadratic in the width while every other region's is linear. A gate that
+    ruled on the short band would rule on the cell where the door's own
+    preparation, not the kernel, sets the number."""
+    assert pack_train_attention.GATING_CELL in pack_train_attention.TIMED_CELLS
+    widths = [width for _batch, width in pack_train_attention.TIMED_CELLS]
+    assert pack_train_attention.GATING_CELL[1] == max(widths)
+
+
 def test_the_timed_cells_are_the_two_the_pack_registers():
     from kernelverify.pack import train_attention as ta
 
