@@ -326,6 +326,24 @@
 - Context: `native_ops.py::attn_tolerance` and `attn_grad_tolerances` (both docstrings state the borrow), `ATTN_MEMBERS` and `ATTN_GRAD_MEMBERS` beside them, and the kv entry above, whose harness this one copies.
 - Depends on / blocked by: nothing technical; it can run beside any GPU measurement.
 
+## The training-attention door pays 17 percent to cast its operands, and the contract may not need it
+
+- What: measure whether `simdgroup_multiply_accumulate` with narrow multiplicand fragments and a float accumulator is bit-identical to the same product with float fragments, and if it is, decide whether contract clause C1 admits a narrow MULTIPLICAND (as opposed to a narrow accumulator, which it will never admit) and whether `kernelverify/compiler/lint.py` should stop refusing `simdgroup_matrix<half, 8, 8>` in that position.
+- Why: the forward kernel's fragments must be float because the lint refuses narrow ones, so `run_fwd` casts q, k and v to fp32 on every call. Measured 2026-08-24 at the long cell: the cast is 0.584 ms and the pad 0.617 ms of a 7.090 ms call, so the door's preparation is 17.1 percent of the operation, and at the short cell it is 60.6 percent, where the kernel itself is already faster than MLX's fused primitive. The arithmetic argument for admitting it is that a product of two fp16 values is exact in fp32 (11-bit significands give a 22-bit product against 24 available) and bf16 more so, so IF the hardware does not round the product to the input type before accumulating, the narrow-fragment form computes exactly what the wide-fragment form computes and no precision is lost at all.
+- Pros: it removes half the door's preparation and halves the operand traffic the fragments read; the experiment is one small kernel and a bit-comparison, needing no window and no model.
+- Cons: it is a change to the contract clause the whole verification story rests on, so it needs its own amendment and its own review, and the answer may be that Apple's mixed-precision multiply-accumulate DOES round the product, in which case the refusal is correct and the cast stays.
+- Context: `kernelverify/pack/train_attention.py::run_fwd` (the cast and the pad), `ATTN_FWD_MSL` (the fragments), `kernelverify/compiler/lint.py` (the refusal, stated in its docstring), and the F9 ruling in the sprint ledger.
+- Depends on / blocked by: nothing technical.
+
+## The training-attention door pads its operands on every call
+
+- What: give the forward kernel a bounded tail path so the last tile of a width that is not a whole number of tiles can be read without the door padding first, or find a cheaper way to produce the padded operand than `mx.pad` followed by a cast.
+- Why: a fragment load reads eight rows whether or not eight rows exist, so `run_fwd` pads q, k and v up to whole tiles before casting them. Measured 2026-08-24: the pad alone is 0.617 ms of a 7.090 ms call at the long cell and 0.063 of 0.257 at the short one, and mlx-lm's widths are one past a multiple of 32, so the padding fires on essentially every real step.
+- Pros: independent of the contract question above, so whichever lands first still buys its own share; the tail is the only tile that needs the path, so the fast path stays exactly as it is.
+- Cons: a tail path is a second code path through the hottest loop in the kernel, and the thing it protects against is an out-of-bounds READ, which is the class of fault that does not reproduce reliably; it needs its own case in the gate rather than a comment.
+- Context: `kernelverify/pack/train_attention.py::pad_rows` and `fwd_row_multiple`, and the fragment loads in `ATTN_FWD_MSL`.
+- Depends on / blocked by: nothing technical.
+
 ## The closing idle check discards a whole run on one sample
 
 - What: decide what evidence the end of a run needs, and give `check_idle_after` that instead of a single `idle_check()` snapshot; a streak like the opening gate's, a mid-run sampler that records when the window broke, or a rule that separates a blip from a busy machine.
