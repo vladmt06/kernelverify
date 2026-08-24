@@ -24,7 +24,8 @@ DEFAULT_KNOBS = {"SGROUPS": 2, "BKEY": 16}
 
 # One row past a 64-wide tile, one row short of it, the exact boundaries, and
 # the degenerate widths where a whole tile is masked but one key still is not.
-EDGE_WIDTHS = (1, 2, 3, 31, 32, 33, 63, 64, 65, 127, 128, 129)
+EDGE_WIDTHS = (1, 2, 3, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65,
+               127, 128, 129)
 
 
 def _dtype_name(dtype) -> str:

@@ -30,12 +30,17 @@ Vlad's global instructions still apply; this file adds the project's layout, how
   `core.py` owns the case space, the input modes and the verdict cache with its fingerprint; `policies.py` holds the shipped boundary-then-pairs-then-random policy and the rivals it is scored against.
 - `kernelverify/schemas/native_ops.py` - the native operator registry: per-operator schema, fp64 reference, tolerance and augmentation, so native operators run through the same battery machinery as the corpus ports.
   Its standing rule is that every native reference is cross-checked in tests against an independent implementation, MLX's own where one exists.
-- `kernelverify/pack/` - the three hand-written Metal kernels and the dispatch decision in front of them.
-  Only `wide_qmv.py` is live, and its routing table starts at M = 5, so it routes nothing at batch 1.
+- `kernelverify/pack/` - the hand-written Metal kernels and the dispatch decision in front of them.
+  Three are decode-shaped and one is a training kernel.
+  Only `wide_qmv.py` is live for decode, and its routing table starts at M = 5, so it routes nothing at batch 1.
   `kv_attention.py` is demoted: the end-to-end A/B in `docs/research/2026-08-15-mlx-e2e-findings.md` measured it losing 1-2% of decode tokens/s at every cell and recommended against shipping it.
   `moe_dispatch.py` is unused on the target model: the Qwen3-4B geometry recorded in `bench/calibrate_quant_serving.py` is dense (`model_type` qwen3, seven per-layer projections, no experts).
 - `kernelverify/pack/wide_qmv.py` - the wide-tile quantized GEMV kernel and its dispatch decision.
   `should_dispatch(m, bits, d_out, d_in)` consults the routing table; it never carries a default window of its own.
+- `kernelverify/pack/train_attention.py` - the TRAINING attention kernel: causal grouped-query attention at Qwen3-4B's geometry, forward on the simdgroup matrix units, with the row logsumexp as a second output for the backward.
+  It stages nothing in threadgroup memory and its door casts the operands to fp32 once, because a staged variant measured 15.6 ms against this one's 6.8 at the long band.
+  The lane-to-element mapping of an 8x8 fragment is a property of the chip, is pinned by `tests/test_pack_train_attention_live.py`, and a machine whose mapping differs fails the on-device verification and routes to stock.
+- `kernelverify/pack/train_qmm.py` - the training-width quantized matmul, kept as a later lever at the shapes where it wins: the pivot of 2026-08-23 measured MLX's own quantized matmul within 4.5 percent of a dense comparison that does strictly less work, so the operation has no headroom worth a sprint.
 - `kernelverify/pack/routed_windows.py` - the routing table, derived at import from the committed pricing recording and pinned to that recording's sha256, the kernel source's sha256 and the launch config it was priced at.
   Nothing here is hand-written except the exclusions and the pins, so shipped routing and recorded evidence cannot drift apart.
 - `kernelverify/runners/` - the backends that execute a candidate kernel and hand its output to the oracle.
@@ -85,6 +90,8 @@ Vlad's global instructions still apply; this file adds the project's layout, how
   Extracted from `calibrate_quant_serving.py` on 2026-08-15 so the pricing probe enforces the same budget by the same code, not by a second copy with its own numbering.
   Every refusal gets its own number and none may reuse 0, 1 or 2 (attested, measured-and-stopped, and argparse's own); `BudgetGuard` takes an optional `parent_pid` so the SAME guard serves the child, which has a parent to lose, and the parent's in-process path, which does not.
 - `bench/pack_wide_qmv.py` - the kernel pack's correctness gate: the E2E dispatch shapes, and per-shape coverage at exactly the tile widths the pack routes to each of them.
+- `bench/pack_train_attention.py` - the training-attention gate, in the same verify-then-time order: every launchable knob setting is linted, screened for unwritten cells with two complementary fills, and judged by the battery at both storage dtypes over the tile-edge widths before any of them is timed.
+  Its three arms are COMPOSED (what a training step actually runs, since MLX decomposes its fused attention inside a gradient trace), FUSED (Apple's own inference kernel, the honest ceiling, gating nothing), and one arm per knob setting.
 - `bench/pack_kv_attention.py` and `bench/pack_moe_dispatch.py` - the other two pack gates, in the same verify-then-time order and under the same interleaving discipline.
   Both arms are verified before either is timed, so a ratio compares two contract-passing implementations rather than one that merely happens to be faster.
 - `bench/emit_pack_certificates.py` - one certificate per specialization: it runs the pack gates' `verify()`, captures the generated translation unit in a fresh process, behaviourally validates it against the live MLX arm, and hashes what it certified.
