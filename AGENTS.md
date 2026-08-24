@@ -342,6 +342,111 @@ bench/start_binding_run.sh     # arms a launchd job, then quit Terminal
   Completion is not claimable until the gates passed along the way and the simplifier pass is done.
   The coordinator writes the lane plans into a design doc under the gstack project directory, which the gstack skills create for themselves at `~/.gstack/projects/<repo-name>/` on whatever machine they run on (`~/.gstack/projects/kernelverify/` here), so this needs no setup beyond having gstack installed; the review rules every open decision with Vlad, and a lane brief must trace to a ruled plan with no unresolved decisions, the way W1-W8 traced to the runner-consolidation review.
 
+## For any orchestrator running agents in this repo
+
+Written for whichever orchestrator is driving, not for one product. Everything
+in this section is binding and travels with a clone; nothing in it depends on a
+machine-local config file.
+
+### Superpowers runs at every plan and every hand-off, with no exceptions
+
+MANDATORY. Planning anything, or assigning any task to any agent, goes through
+the superpowers skills:
+
+| Moment | Skill |
+|---|---|
+| Planning any work, or writing any plan | `superpowers:brainstorming`, then `superpowers:writing-plans` |
+| Assigning or dispatching a task to any agent | `superpowers:subagent-driven-development` |
+| Executing a plan inline instead of dispatching | `superpowers:executing-plans` |
+| Debugging anything | `superpowers:systematic-debugging` |
+| Isolating work | `superpowers:using-git-worktrees` |
+
+This is the same rule the repo's `CLAUDE.md` states for skill routing, repeated
+here because `CLAUDE.md` is one product's filename and this file is the one
+every agent tool reads. If only one of the two is loaded, this is the one that
+binds.
+
+A dispatch that skipped `subagent-driven-development` is not a shortcut, it is
+an unreviewed hand-off: that skill is what supplies the per-task brief, the
+fresh implementer, the review after each task, and the ledger that survives a
+context compaction.
+
+### Andrej Karpathy's guidelines, binding on every task
+
+These are not waited for and not negotiated. They bias toward caution over
+speed; for a trivial task, use judgement. Where one of these and a specific rule
+elsewhere in this file disagree, the specific rule wins.
+
+**1. Think before coding.** Do not assume, do not hide confusion, surface
+tradeoffs. State assumptions explicitly and ask if uncertain. If multiple
+interpretations exist, present them rather than picking silently. If a simpler
+approach exists, say so and push back when warranted. If something is unclear,
+stop, name what is confusing, and ask.
+
+**2. Simplicity first.** The minimum code that solves the problem, nothing
+speculative. No features beyond what was asked, no abstractions for single-use
+code, no flexibility or configurability nobody requested, no error handling for
+impossible scenarios. If it is 200 lines and could be 50, rewrite it. The check:
+would a senior engineer call this overcomplicated?
+
+**3. Surgical changes.** Touch only what you must, clean up only your own mess.
+Do not improve adjacent code, comments or formatting. Do not refactor what is
+not broken. Match the existing style even where you would do it differently.
+Mention unrelated dead code rather than deleting it. Remove the imports,
+variables and functions that YOUR change made unused, and no others. The test:
+every changed line traces directly to the request.
+
+**4. Goal-driven execution.** Define success criteria, then loop until verified.
+"Add validation" becomes "write tests for invalid inputs, then make them pass".
+"Fix the bug" becomes "write a test that reproduces it, then make it pass".
+"Refactor X" becomes "ensure the tests pass before and after". For a multi-step
+task, state a plan where every step names its own verification. Strong criteria
+let an agent loop independently; weak ones force constant clarification.
+
+Derived from Andrej Karpathy's observations on LLM coding pitfalls,
+https://x.com/karpathy/status/2015883857489522876
+
+### Adversarial review by a second model, in parallel, is part of the work
+
+This repo's measurements have been wrong in ways its own tests could not see,
+and every time, an outside model reading the same code found it. That is a
+standing arrangement, not an occasional favour.
+
+- Every plan and every landed increment gets an adversarial pass from a model
+  that is NOT the one that wrote it. In practice that is the `codex` CLI, run as
+  `codex exec -C <worktree> -s read-only -` with the brief on stdin.
+- The pass runs IN PARALLEL with the work, in its own git worktree, so it never
+  sits on the critical path. One task per worktree, zero file overlap.
+- Read-only sandbox for review, `workspace-write` only for a task that is meant
+  to change files.
+- Every brief must state that the reviewing agent has NO METAL DEVICE, so it
+  judges by reading and by `KV_FORCE_NO_METAL=1`, and that GPU-marked tests skip
+  for it.
+- A brief tells the reviewer to BREAK the work, requires every finding to be
+  reproduced by execution or by reading exact lines before it is reported, and
+  requires unreproduced suspicions to be labelled as such.
+- Findings are recorded verbatim in `docs/plans/`, not summarised into a commit
+  message, because a summary loses the reproduction.
+
+What this has actually caught, so none of it reads as ceremony: a timing
+baseline that was a hand-written copy of MLX's decomposition and 1.89x slow, so
+every published ratio was inflated; a verdict cache whose fingerprint omitted
+two ensembles; a tolerance that would certify a 2.5 percent systematic bias; and
+a pre-registration amendment written after the measurement it registers. The
+open list is in `docs/PLAN.md` under "Open bugs", with the full reports in
+`docs/plans/2026-08-24-codex-review-findings.md`.
+
+### Where the current state lives
+
+| Question | File |
+|---|---|
+| What are we building and what is decided | `docs/PLAN.md` |
+| Where are we, and what is broken right now | `docs/PLAN.md`, the Status and Open bugs sections at the head of THE ATTENTION INCREMENT |
+| What rules were pre-registered, and what has been withdrawn | `docs/research/2026-08-19-metalrunner-sprint1-prereg.md` |
+| Which tasks are done and which rulings were taken | `docs/plans/2026-08-24-sprint-ledger.md` |
+| What the adversarial reviews found | `docs/plans/2026-08-24-codex-review-findings.md` |
+
+
 ## Mistakes already encountered
 
 - The shell cwd resets between tool calls, so `cd` into YOUR OWN checkout in every command.

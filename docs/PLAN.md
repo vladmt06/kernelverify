@@ -1988,6 +1988,92 @@ R18's 1.30 is unreachable at any speed, since it would need a share of 0.2308.
 Re-scoping against that is a coordinator ruling and has not been taken, so
 tasks A6 onward below are written as they were and are NOT cleared to start.
 
+### Open bugs, all of them, as of 2026-08-24
+
+Nothing below has been fixed. Full text and reproduction for every numbered
+item is in `docs/plans/2026-08-24-codex-review-findings.md`; the labels A and B
+are the Codex run that found it. Everything marked CONFIRMED was reproduced by
+execution or by reading the exact lines, not argued.
+
+**Group 1: the kernel and the gate. Nine confirmed, one open question.**
+
+| # | Bug | Where |
+|---|---|---|
+| A1 | `geometry_ok()` is never called by `run_fwd()`, so an unsupported geometry dispatches instead of falling back to stock; DH=65 left a column unwritten and HQ=10/HKV=3 indexed a KV head that does not exist | `kernelverify/pack/train_attention.py:110` |
+| A2 | `verify()` discards the row logsumexp and judges only the output, and `screen_unwritten()` checks that a cell was stored, not what was stored in it; a deliberately poisoned LSE passed all 145 cases and reached timing | `bench/pack_train_attention.py:228,175` |
+| A6 | Verify-before-time is sequenced by `main()` rather than enforced: `bench()` takes no verification evidence, so an imported call timed an unverified setting | `bench/pack_train_attention.py:300,389` |
+| A7 | `arms_agree()` is a second numerical judge outside `kernelverify.pack.verify`, with its own hardcoded 5e-3, and it rejected an otherwise verified arm before timing | `bench/interleave.py:68` |
+| A9 | Verification records every specialization with a hardcoded threadgroup `(32,1,1)` while `fwd_launch()` returns `(32,SGROUPS,1)`, so the evidence misidentifies every setting above SGROUPS=1 | `bench/pack_train_attention.py:218` |
+| A10 | The kernel module still justifies itself with a 286 MB fp32 score matrix, the number Amendment 20 withdrew and replaced with 143 MB bf16 | `kernelverify/pack/train_attention.py:22` |
+| A8 | OPEN QUESTION, not reproduced: the anti-drift pin may not bind the real trainer path, since the composed arm calls `mx.fast` directly, the pin tests only three widths, and the stack hashes omit both attention wrappers | `metalrunner/versions.py:35` |
+
+**Group 2: the oracle and its tolerance. Three confirmed, and they undermine every verdict the gate issued.**
+
+| # | Bug | Consequence |
+|---|---|---|
+| A3 | `_base_tol()` permits four bf16 ulps at the reference peak: a bf16-only `out *= 0.975` defect passed all 72 gate cases at worst error/tolerance 0.90 | a systematic 2.5 percent epilogue bias would be certified |
+| A5 | Ensemble members never round back to the storage dtype, so every routed member returns float32 and skips C1's final rounding | member error understated by 2029x at fp16 and 31500x at bf16, so the floor is far too tight |
+| A4 | Every forward and gradient member shares one `_attn_scores()` reduction, though contract clause C2 admits every summation order | a legitimate sequential-fp32 reduction was rejected by 3.8x, and its dK and dV by 4.9x and 13.4x |
+
+Against those three: A11 is the one piece of good news, and it is load-bearing.
+An independent PyTorch float64 autograd pass reproduced `attn_reference`,
+`attn_lse_reference` and `attn_grad_reference` to 5.4e-15 across grouped-query
+ratios 1, 2, 4 and 8, including the per-group dK and dV sums, and 6252
+valid-domain cases found no further mask, padding, write-coverage or LSE fault.
+The references are right. What is wrong is the tolerance and the ensemble
+around them.
+
+**Group 3: the pre-registration. Twenty-four confirmed faults in Amendments 19 and 20.**
+
+The most serious first.
+
+| # | Fault |
+|---|---|
+| B39 | The rules are post-result: `29abffd` changed the baseline at 10:39 and Amendment 20 followed at 10:48, so clause 81 registers a definition after seeing what it produces, which is the one thing pre-registration exists to prevent |
+| B22 | Clause 81 calls batch 2 width 1057 the long registered band and applies it to section 4.3, but the deciding cell is batch 4 and Amendment 5 applies both widths |
+| B23 | Amendment 20 withdraws the shares and ratios that named attention as the first operation, and leaves the selection itself standing |
+| B24 | Amendment 19 calls the attention ratio a registered floor while standing Amendment 6 clause 27 says candidate A has no floor and no credited ratio anywhere |
+| B25 | Section 4.3's below-1.10 branch fires only after ranking all candidates, so clause 77 did not apply the rule it claims to have applied |
+| B26 | Amendment 19's ledger says no reading in clause 77 derives from Amendments 5 to 18, and its 0.245, 0.045 and 0.376 shares come straight from them |
+| B27 | The 16 GB conclusion at 561.2 MiB contradicts section 10's standing refusal to claim anything about a 16 GB machine |
+| B20 | Clause 81 attributes `f := (T_stock - T_ablated)/T_stock` to Amendment 5 clause 1, which registers a dialled fitted slope instead |
+| B21 | The ablation stand-in is claimed to keep the key and value projections out of attention's share, and the standing text says it does not |
+| B28 | "No rewrite can ever satisfy exact equality" is too strong: a rewrite may reproduce stock's accumulation order or be exact on the cases |
+| B29 | "For attention there is no stock implementation to be equal to" is false: MLX's composed backward exists and Amendment 19 says so itself |
+| B31 | The gradient verdicts are not wired into any gate, so the funnel cannot be unchanged and use them at the same time |
+| B32 | No total classifier is specified for a vjp that conditionally calls stock, so the retune/rewrite class is not always readable |
+| B34 | "The arm a pack gate times as the stock path is never hand-written" is false and unqualified: `pack_kv_attention.py` hand-writes and times its own |
+| B35 | "No value check could have caught it" is false: exact equality would have caught the difference |
+| B36 | "The same interleaved sampler every pack certificate is measured under" is false: certificate emission records no timings |
+| B37 | "Every pricing verdict is computed with `ratio_lo`" is false: the routing classifier uses `ratio_hi` for LOSS and both for REFUSED |
+| B41 | `verification_class` is registered as required and nothing validates it, in `__post_init__`, in `audit`, or in any producer |
+| B7, B10, B13, B14, B16, B11 | Arithmetic that does not reproduce as written: 2.2555 rounds to 2.26 and not 2.25; `r = 6.9` gives 1.09998 and so does NOT reach the floor, the exact threshold is 6.9067; 1.53687 rounds to 1.54; `r = 1.128` has no stated derivation; `f (median)` is not derivable from the deltas shown |
+
+B42 is left open rather than confirmed: one certificate per source does not
+follow from the schema, because emission names files from `kernel_name` alone,
+so two certificates for one kernel would overwrite each other.
+
+**Group 4: infrastructure, and it blocks the parallel-Codex workflow itself.**
+
+| # | Bug |
+|---|---|
+| C-BLOCK | `KV_FORCE_NO_METAL=1` with the main worktree's venv aborts with exit 134 while importing `mlx.nn` when run from a git worktree, so no Codex agent can run the suite and therefore none can commit under the green-suite rule |
+| C-1 | Lane B fix 1 is written test-first, red then green, and sits UNCOMMITTED in the `kv-anymac-mr` worktree because of the above |
+| C-2 | Lane B fix 2, the real unmonkeypatched cache-hit test, is not started for the same reason |
+| F | Task F has not run: `lane/anymac-timing` and `lane/anymac-metalrunner` are unmerged, and every merge owes a `/code-review` on its own merge diff |
+
+**Group 5: standing, already in TODOS.md, unchanged by any of the above.**
+
+- `train_attention`'s K is borrowed from another operator and its ensemble has never been scored leave-one-out.
+- The door's cast to fp32 is 17.1 percent of the long cell and rests on a contract question about narrow multiplicand fragments.
+- The door's pad is a further 0.6 ms of the same call and fires on essentially every real step.
+
+**The one thing that is not a bug and is still the reason to stop.** Attention
+is 0.1063 of the step, so the registered formula caps the whole-run gain at
+1.119 with attention free. That is arithmetic, it is not on this list because
+nothing on this list would fix it, and re-scoping against it is a ruling that
+has not been taken.
+
 
 ## Context
 
