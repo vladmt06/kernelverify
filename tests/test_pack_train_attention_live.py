@@ -20,7 +20,7 @@ from kernelverify.pack import train_attention as ta
 from kernelverify.pack.verify import attn_inputs, group_heads, verify_output
 from kernelverify.schemas.native_ops import attn_lse_reference
 
-DEFAULT_KNOBS = {"RQ": 8, "SGROUPS": 1, "BKEY": 32}
+DEFAULT_KNOBS = {"SGROUPS": 2, "BKEY": 16}
 
 # One row past a 64-wide tile, one row short of it, the exact boundaries, and
 # the degenerate widths where a whole tile is masked but one key still is not.
@@ -161,10 +161,10 @@ def test_a_key_a_row_may_not_see_cannot_change_that_row():
 
 @requires_metal
 @pytest.mark.parametrize("knobs", (
-    {"RQ": 2, "SGROUPS": 1, "BKEY": 32},
-    {"RQ": 8, "SGROUPS": 2, "BKEY": 32},
-    {"RQ": 4, "SGROUPS": 4, "BKEY": 32},
-    {"RQ": 8, "SGROUPS": 1, "BKEY": 64},
+    {"SGROUPS": 1, "BKEY": 16},
+    {"SGROUPS": 2, "BKEY": 32},
+    {"SGROUPS": 4, "BKEY": 16},
+    {"SGROUPS": 8, "BKEY": 64},
 ))
 def test_a_knob_setting_changes_the_schedule_and_not_the_answer(knobs):
     """The whole premise of tuning: these settings rescale the running maximum
@@ -195,3 +195,48 @@ def test_the_registered_cells_agree_with_the_fused_reference(cell, batch, t_len)
     mx.eval(fused)
     gap = float(mx.max(mx.abs(out.astype(mx.float32) - fused.astype(mx.float32))))
     assert gap < 2e-2, f"{cell}: {gap}"
+
+
+@requires_metal
+def test_the_simdgroup_fragment_layout_is_the_one_this_kernel_indexes_by():
+    """The assumption the register softmax rests on, measured rather than read.
+
+    The kernel applies the causal mask, the row reductions and the output store
+    directly to the two elements each lane holds of an 8x8 fragment, which
+    needs the mapping from lane to (row, column). MSL does not promise a
+    mapping, so this test states the one the kernel indexes by and asks the
+    chip. A machine whose layout differs fails here, and would in any case fail
+    the on-device verification and route to stock rather than answer wrongly.
+    """
+    mx = pytest.importorskip("mlx.core")
+
+    probe = mx.fast.metal_kernel(
+        name="fragment_layout", input_names=["src"], output_names=["out"],
+        source="""
+    const uint lane = thread_position_in_threadgroup.x;
+    threadgroup float tile[64];
+    for (uint e = lane; e < 64; e += 32) { tile[e] = src[e]; }
+    threadgroup_barrier(metal::mem_flags::mem_threadgroup);
+    metal::simdgroup_float8x8 m;
+    metal::simdgroup_load(m, tile, 8);
+    out[lane * 2 + 0] = m.thread_elements()[0];
+    out[lane * 2 + 1] = m.thread_elements()[1];
+""")
+    held = probe(inputs=[mx.array(np.arange(64, dtype=np.float32))],
+                 output_shapes=[(64,)], output_dtypes=[mx.float32],
+                 grid=(32, 1, 1), threadgroup=(32, 1, 1))[0]
+    mx.eval(held)
+    held = np.array(held).astype(int)
+
+    for lane in range(32):
+        row = ((lane % 8) // 2) + (lane // 16) * 4      # the kernel's sg_row
+        col = (lane % 2) * 2 + ((lane // 8) % 2) * 4    # the kernel's sg_col
+        assert held[2 * lane] == row * 8 + col, lane
+        assert held[2 * lane + 1] == row * 8 + col + 1, lane
+
+    # And the four lanes that share a row are at exclusive-or distances 1 and
+    # 8, which is what makes a row reduction two shuffles.
+    for lane in range(32):
+        row = ((lane % 8) // 2) + (lane // 16) * 4
+        for partner in (lane ^ 1, lane ^ 8, lane ^ 9):
+            assert ((partner % 8) // 2) + (partner // 16) * 4 == row, (lane, partner)
