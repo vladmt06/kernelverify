@@ -241,3 +241,24 @@ def test_the_simdgroup_fragment_layout_is_the_one_this_kernel_indexes_by():
         row = ((lane % 8) // 2) + (lane // 16) * 4
         for partner in (lane ^ 1, lane ^ 8, lane ^ 9):
             assert ((partner % 8) // 2) + (partner // 16) * 4 == row, (lane, partner)
+
+
+@requires_metal
+@pytest.mark.parametrize("dtype_name", ("bfloat16", "float16"))
+def test_the_shipped_geometry_is_judged_by_the_fp64_reference_too(dtype_name):
+    """The gate's two cells are checked against the fused primitive because an
+    fp64 score matrix at width 1057 and 32 heads is half a gigabyte. This runs
+    the SHIPPED geometry at a width the fp64 reference can afford, so the real
+    head counts are judged by the battery and not only by another kernel."""
+    mx = pytest.importorskip("mlx.core")
+    dtype = getattr(mx, dtype_name)
+    q, k, v = _operands(mx, 2, ta.N_Q_HEADS, ta.N_KV_HEADS, 129, ta.HEAD_DIM,
+                        dtype)
+    out, lse = _forward(mx, q, k, v)
+    verdict = _verdict(mx, q, k, v, out, dtype)
+    assert verdict.ok, f"{dtype_name}: {verdict}"
+
+    reference = attn_lse_reference(attn_inputs(_f32(mx, q), _f32(mx, k),
+                                               _f32(mx, v)))
+    got = group_heads(np.array(lse)[..., None], ta.N_KV_HEADS)[..., 0]
+    assert np.max(np.abs(got - reference)) < 1e-4
