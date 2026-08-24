@@ -85,7 +85,9 @@ Vlad's global instructions still apply; this file adds the project's layout, how
   Amended a third time (the merge review of that night's work, same docstring): the checkpoint fingerprint now carries a sha256 over the modules a record's value passes through, because the run resumed past STEP 0 - the pipeline's only end-to-end bit-exactness gate - on a checkpoint written by pre-buffer-pool code, and `--continuity-only` runs STEP 0 alone, which is the check to run after any change to the arithmetic path.
   The single-instance lock moved to `machine_state.MeasurementLock`: ONE `fcntl.flock` shared by every heavy harness, since a per-harness lock let the pricing probe run beside the calibration, which is the 03:29 collapse itself, and a pid file cannot be read without a stale-pid judgement that eventually steals a live holder's lock.
   Amended a fifth time on 2026-08-16 (same docstring): the child's lifetime is now bound to the parent's from both ends - a `getppid()` check between records for a parent that died, a session spawn plus a process-group sweep for a parent that merely stopped - and `K_SHIP` imports `native_ops.K_QUANT` instead of restating it as a literal.
-  The pinned 3-bit artifact lives at the absolute path `/Users/vlad/kernelverify/bench/.models/qwen3-4b-3bit-g64`; `bench/.models` is gitignored, so it exists in the main worktree only and never arrives via merge.
+  The pinned artifacts live under `bench/.models/` (`qwen3-4b-3bit-g64`, `qwen3-4b-4bit-g64`, and the 0.6B and 1.7B proxies); that directory is gitignored, so they exist in the main worktree only and arrive neither by merge nor by a fresh clone.
+  To recreate one on a new machine, quantize the base model with mlx-lm's own converter, which is the quantizer the contract is written against: `.venv/bin/python -m mlx_lm convert --hf-path Qwen/Qwen3-4B --mlx-path bench/.models/qwen3-4b-4bit-g64 -q --q-bits 4 --q-group-size 64`, and the same with `--q-bits 3` for the 3-bit directory.
+  Check what you get against `docs/pinned-model-hashes.txt`, which is tracked precisely because the artifacts are not: a measurement taken on an artifact whose bytes differ from those hashes is not comparable to anything recorded here.
 - `bench/memory_guard.py` - the footprint budget, the phys_footprint reader, the available-memory gate, the orphan check and the numbered refusal exits, shared by every harness that can be Jetsam-killed.
   Extracted from `calibrate_quant_serving.py` on 2026-08-15 so the pricing probe enforces the same budget by the same code, not by a second copy with its own numbering.
   Every refusal gets its own number and none may reuse 0, 1 or 2 (attested, measured-and-stopped, and argparse's own); `BudgetGuard` takes an optional `parent_pid` so the SAME guard serves the child, which has a parent to lose, and the parent's in-process path, which does not.
@@ -226,7 +228,7 @@ Vlad's global instructions still apply; this file adds the project's layout, how
 ## Running
 
 ```
-cd /Users/vlad/kernelverify
+cd "$(git rev-parse --show-toplevel)"
 .venv/bin/python bench/measure_escape.py   # ~1 min, must reproduce ADR 0001
 .venv/bin/python bench/score_oracles.py    # ~1 min warm, ~10 min after a catalogue or ensemble change
 .venv/bin/python bench/calibrate_k.py --n-random 24   # instant warm, ~20 min cold, must reproduce ADR 0005
@@ -304,8 +306,10 @@ Or detached, so every interactive session can be closed first; this is the bindi
 bench/start_binding_run.sh     # arms a launchd job, then quit Terminal
 ```
 
-- External dependencies, deliberately outside the repo: a llama.cpp checkout at `/Users/vlad/llama.cpp` and GGUF models at `/Users/vlad/models/gguf`.
-  These two paths are canonical across lanes as of 2026-08-14; `~/src/llama.cpp` is abandoned.
+- External dependencies, deliberately outside the repo: a llama.cpp checkout and a directory of GGUF models.
+  Both are declared in exactly one place, `bench/external.py`, and every bench script that shells out takes the paths, the build flags and the invoker from there, so a new machine changes those two constants and every lane follows.
+  On the original dev machine they are `~/llama.cpp` and `~/models/gguf`, canonical across lanes as of 2026-08-14; `~/src/llama.cpp` is abandoned.
+  A fresh clone has neither, so the llama.cpp baselines cannot run until you clone llama.cpp, build it with the recorded CMAKE_FLAGS, and point `bench/external.py` at it.
   The commit, build flags, model files and power state are recorded in the result JSON, so a rerun that disagrees can be diagnosed rather than argued about.
 - Re-baseline whenever llama.cpp master moves, and record the commit; a speedup measured against a stale baseline is not a speedup.
 
@@ -336,12 +340,12 @@ bench/start_binding_run.sh     # arms a launchd job, then quit Terminal
   DURING the work, the /spartan quality gates run between every step - the phase reviewer gates each phase and does not let work skip ahead.
   At task COMPLETION, run the code-simplifier plugin on the changed code.
   Completion is not claimable until the gates passed along the way and the simplifier pass is done.
-  The coordinator writes the lane plans into a design doc under ~/.gstack/projects/kernelverify/, the review rules every open decision with Vlad, and a lane brief must trace to a ruled plan with no unresolved decisions, the way W1-W8 traced to the runner-consolidation review.
+  The coordinator writes the lane plans into a design doc under the gstack project directory, which the gstack skills create for themselves at `~/.gstack/projects/<repo-name>/` on whatever machine they run on (`~/.gstack/projects/kernelverify/` here), so this needs no setup beyond having gstack installed; the review rules every open decision with Vlad, and a lane brief must trace to a ruled plan with no unresolved decisions, the way W1-W8 traced to the runner-consolidation review.
 
 ## Mistakes already encountered
 
 - The shell cwd resets between tool calls, so `cd` into YOUR OWN checkout in every command.
-  For the main session that is `/Users/vlad/kernelverify`; a worktree lane uses its own path (`/Users/vlad/kv-*`), never main's.
+  For the main session that is the repo root, which `git rev-parse --show-toplevel` returns on any machine; a worktree lane uses its own path, by convention a sibling directory of the repo root named `kv-<lane>`, never main's.
 - The verdict cache stores plain tuples, not dataclasses, because pickled dataclasses remember their defining module and break when loaded from an import context.
 - Structured input modes can make a correct fp32 kernel exceed the published tolerance against the fp64 reference.
   That is ill-conditioning, not a port bug; the shipped oracle handles it with the ensemble-floor tolerance (ADR 0004), and a control failing that tolerance on any mode now always means the oracle or the port is broken.

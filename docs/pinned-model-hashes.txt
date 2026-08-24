@@ -1,0 +1,40 @@
+# sha256 of the pinned MLX model artifacts under bench/.models/, which is
+# gitignored and therefore absent from a fresh clone. Recreate the artifacts
+# with mlx-lm's own converter (see AGENTS.md, bench/.models entry) and check
+# them against these hashes before trusting any measurement taken on them.
+8826b2974ee2910de741732febc687c8ca1ed2e6ad5eee4e5b941bfca7655aeb  bench/.models/qwen3-4b-3bit-g64/model.safetensors
+365a6fff57490ca4e89e354c3295b7f2f60ac3fcb0a8a3fa06e21b80bb4d19ca  bench/.models/qwen3-4b-4bit-g64/model.safetensors
+ed2783a8f3a220bca6dc3a40cbc34ccad4257effbc95e95eaaf62137140360ac  qwen3-4b-3bit-g64/config.json
+2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2  qwen3-4b-3bit-g64/generation_config.json
+aeabf19a3ff248fe1ead9bd749cbcc468f82720e88a0a3709f4bcd159592e1db  qwen3-4b-3bit-g64/model.safetensors.index.json
+be75606093db2094d7cd20f3c2f385c212750648bd6ea4fb2bf507a6a4c55506  qwen3-4b-3bit-g64/tokenizer.json
+ee8f6d44bf2353e6d3686c3adaf70e1ccfe9e6ed6822d0ab2f28cafdd7754792  qwen3-4b-3bit-g64/tokenizer_config.json
+a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8  qwen3-4b-3bit-g64/chat_template.jinja
+e5448a93388c394eff9c98b0a54c90f743cbbd29c21c7090ce20d7e3ee3ab4a4  qwen3-4b-3bit-g64/README.md
+cd08d43fc6f59e643b58b114d308a29bbd4ca147d30df6f419fcbe3115dcc2dd  qwen3-4b-4bit-g64/config.json
+2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2  qwen3-4b-4bit-g64/generation_config.json
+388d811b8b7c2608dd04cce1bcb04a8bf715d19b42790894e6d3427ff429a777  qwen3-4b-4bit-g64/model.safetensors.index.json
+be75606093db2094d7cd20f3c2f385c212750648bd6ea4fb2bf507a6a4c55506  qwen3-4b-4bit-g64/tokenizer.json
+ee8f6d44bf2353e6d3686c3adaf70e1ccfe9e6ed6822d0ab2f28cafdd7754792  qwen3-4b-4bit-g64/tokenizer_config.json
+a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8  qwen3-4b-4bit-g64/chat_template.jinja
+e5448a93388c394eff9c98b0a54c90f743cbbd29c21c7090ce20d7e3ee3ab4a4  qwen3-4b-4bit-g64/README.md
+43209eb9544b7d4871f54673b35a1c434155fcff0c31eced56571e0489629bf0  qwen3-0.6b-4bit-g64/README.md
+c0284b582e14987fbd3d5a2cb2bd139084371ed9acbae488829a1c900833c680  qwen3-0.6b-4bit-g64/added_tokens.json
+15d3ac26c043ae477273ed5802ee0f0b33bb14f18c9d3dd70910c02d906e3f1f  qwen3-0.6b-4bit-g64/config.json
+8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5  qwen3-0.6b-4bit-g64/merges.txt
+392e8d466d56100ada00eb82031fb854297fc9e389b7d303eba3af114e87bce2  qwen3-0.6b-4bit-g64/model.safetensors
+7b294141456f6904936db03c00bca50fb5f6198f652fe8483f9cd2a1018accfb  qwen3-0.6b-4bit-g64/model.safetensors.index.json
+76862e765266b85aa9459767e33cbaf13970f327a0e88d1c65846c2ddd3a1ecd  qwen3-0.6b-4bit-g64/special_tokens_map.json
+aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4  qwen3-0.6b-4bit-g64/tokenizer.json
+253153d0738ceb4c668d2eff957714dd2bea0b56de772a9fdccd96cbf517e6a0  qwen3-0.6b-4bit-g64/tokenizer_config.json
+ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910  qwen3-0.6b-4bit-g64/vocab.json
+26afc7609fa8dce8a0763b115ce95017763e45c0aaa92ac38911363f4fc1c16b  qwen3-1.7b-4bit-g64/README.md
+c0284b582e14987fbd3d5a2cb2bd139084371ed9acbae488829a1c900833c680  qwen3-1.7b-4bit-g64/added_tokens.json
+507a6701220524eb8b283425bf0856a9ae4f21f4052e563896ddd668994b1dc7  qwen3-1.7b-4bit-g64/config.json
+8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5  qwen3-1.7b-4bit-g64/merges.txt
+0e86d9677e519323849eac1bc272caae88567a481ff188c431f70be543d9995f  qwen3-1.7b-4bit-g64/model.safetensors
+1e3058d4ba4b04e4de35b74467725cbef90ff022198404218e48f21adc9cfa15  qwen3-1.7b-4bit-g64/model.safetensors.index.json
+76862e765266b85aa9459767e33cbaf13970f327a0e88d1c65846c2ddd3a1ecd  qwen3-1.7b-4bit-g64/special_tokens_map.json
+aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4  qwen3-1.7b-4bit-g64/tokenizer.json
+253153d0738ceb4c668d2eff957714dd2bea0b56de772a9fdccd96cbf517e6a0  qwen3-1.7b-4bit-g64/tokenizer_config.json
+ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910  qwen3-1.7b-4bit-g64/vocab.json
